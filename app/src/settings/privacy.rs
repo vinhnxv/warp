@@ -307,6 +307,22 @@ impl PrivacySettings {
         }
     }
 
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn new_for_test(ctx: &mut ModelContext<Self>) -> Self {
+        Self {
+            auth_state: AuthStateProvider::as_ref(ctx).get().clone(),
+            auth_client: ServerApiProvider::as_ref(ctx).get_auth_client(),
+            is_crash_reporting_enabled: true,
+            is_telemetry_enabled: true,
+            is_cloud_conversation_storage_enabled: true,
+            user_secret_regex_list: CustomSecretRegexList::new(None),
+            has_initialized_default_secret_regexes: HasInitializedDefaultSecretRegexes::new(None),
+            is_telemetry_force_enabled: false,
+            is_enterprise_secret_redaction_enabled: false,
+            enterprise_secret_regex_list: Vec::new(),
+        }
+    }
+
     pub fn is_telemetry_force_enabled(&self) -> bool {
         self.is_telemetry_force_enabled
     }

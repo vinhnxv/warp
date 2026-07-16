@@ -65,7 +65,8 @@ pub use crate::ai::blocklist::history_model::{
     ConversationStatusUpdate,
 };
 pub use crate::ai::blocklist::orchestration_event_streamer::{
-    register_agent_event_consumer, unregister_agent_event_consumer,
+    register_agent_event_consumer, unregister_agent_event_consumer, OrchestrationEventStreamer,
+    OrchestrationEventStreamerEvent,
 };
 pub use crate::ai::blocklist::orchestration_topology::{
     descendant_conversation_ids_in_spawn_order, descendant_conversations_in_pill_order,
@@ -102,13 +103,15 @@ pub use crate::ai::harness_availability::{
 pub use crate::ai::llms::{LLMId, LLMInfo, LLMPreferences, LLMPreferencesEvent};
 pub use crate::ai::orchestration::{
     accept_disabled_reason_with_auth, api_key_snapshot, auth_secret_selection_required,
-    empty_env_recommendation_message, environment_snapshot, harness_is_selectable,
-    harness_snapshot, host_snapshot, location_snapshot, model_snapshot,
-    persist_environment_selection, persist_host_selection,
+    classify_cloud_agent_startup_error, empty_env_recommendation_message, environment_snapshot,
+    harness_is_selectable, harness_snapshot, host_snapshot, location_snapshot, model_snapshot,
+    oz_run_url, persist_environment_selection, persist_host_selection, prepare_remote_child_launch,
     resolve_auth_secret_selection_for_harness, resolve_default_environment_id,
-    resolve_default_host_slug, should_show_auth_secret_picker, AuthSecretSelection, OptionBadge,
+    resolve_default_host_slug, should_show_auth_secret_picker, AuthSecretSelection,
+    CloudAgentStartupBlocker, CloudAgentStartupFailure, CloudAgentStartupIssue, OptionBadge,
     OptionFooter, OptionRow, OptionSnapshot, OptionSourceStatus, OrchestrationConfigState,
-    OrchestrationEditState, ORCHESTRATION_ENV_NONE_LABEL, ORCHESTRATION_WARP_WORKER_HOST,
+    OrchestrationEditState, PrepareRemoteChildLaunchError, PreparedRemoteChildLaunch,
+    RemoteChildLaunchConfig, ORCHESTRATION_ENV_NONE_LABEL, ORCHESTRATION_WARP_WORKER_HOST,
 };
 pub use crate::ai::skills::{SkillManager, SkillReference};
 pub use crate::appearance::Appearance;
@@ -125,6 +128,10 @@ pub use crate::search::slash_command_menu::static_commands::commands::{
     self as slash_commands, COMMAND_REGISTRY,
 };
 pub use crate::search::slash_command_menu::{SlashCommandId, StaticCommand};
+pub use crate::server::server_api::ai::{
+    AIClient, AgentConfigSnapshot, SpawnAgentRequest, SpawnAgentResponse,
+};
+pub use crate::server::server_api::ServerApiProvider;
 pub use crate::settings::AISettingsChangedEvent;
 pub use crate::terminal::alt_screen::{should_intercept_mouse, should_intercept_scroll};
 pub use crate::terminal::color::{Colors as TerminalColors, List as TerminalColorList};

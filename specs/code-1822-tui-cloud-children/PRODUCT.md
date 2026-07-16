@@ -86,6 +86,6 @@ Figma: none provided.
 ### Interaction boundaries
 36. The cloud placeholder accepts no prompt or shell input. Printable keys are never forwarded to a local PTY or remote run.
 37. The placeholder does not expose stop, kill, delete, retry, or follow-up actions.
-38. Existing orchestration-tab keyboard and mouse navigation remains available.
+38. `Shift+Up` focuses the orchestration tab bar directly from the cloud placeholder even though no prompt input is rendered. Once the tab bar is focused, its existing navigation keys behave identically to regular sessions; the placeholder does not add a visual hint for this shortcut.
 39. Existing application exit behavior remains available; focusing a cloud placeholder must not make terminal-control keybindings act on a nonexistent local process.
 40. The reusable link interaction behaves consistently for the Oz run URL and GitHub authentication URL, including hover treatment, click target, Enter activation, selection, and copying.

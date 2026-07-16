@@ -47,10 +47,9 @@ Extract the launch-error interpretation needed by both frontends into shared dat
 The GUI maps these shared values into its existing `Status` and events without changing control flow. The TUI uses the same values in its placeholder presentation. Do not introduce a shared launch coordinator or duplicate `StartAgentExecutor` outcome state.
 
 ### 2. Add a minimal deferred TUI cloud terminal manager
-Add `crates/warp_tui/src/cloud_terminal_manager.rs` with `TuiCloudTerminalManager`, implementing `TerminalManagerTrait`. It owns:
-- A PTY-less `TerminalModel` constructed with `TerminalModel::new_for_cloud_mode_shared_session_viewer`.
-- Wakeup/model-event channels, `Sessions`, `ModelEventDispatcher`, terminal colors/size, and the inactive PTY-read receiver required to construct `TerminalSurfaceInit`.
-- No local PTY, network transport, session-sharing connection API, polling loop, or speculative connected-state enum.
+Add `TerminalSurfaceInit::new_for_tui_cloud_viewer` in the shared app terminal layer to construct the PTY-less `TerminalModel`, wakeup/model-event channels, `Sessions`, `ModelEventDispatcher`, terminal colors/size, and inactive PTY-read receiver. Add `crates/warp_tui/src/cloud_terminal_manager.rs` with `TuiCloudTerminalManager`, implementing `TerminalManagerTrait`; it retains the terminal model and inactive receiver while the session view retains the surface's model handles.
+
+The TUI manager owns no local PTY, network transport, session-sharing connection API, polling loop, or speculative connected-state enum.
 
 **GUI prior art:** This deliberately mirrors the GUI's `shared_session::viewer::TerminalManager::new_deferred` construction and lifetime model: create the real terminal model, event plumbing, view, and concrete type-erased manager before a remote session exists, then retain their identities for an eventual in-place attachment. It does not reuse the GUI manager implementation because that implementation constructs `TerminalView` and owns GUI-specific network, orchestration polling, `ActiveAgentViewsModel`, permission, and session-attachment behavior.
 
@@ -70,6 +69,7 @@ Add `TuiTerminalSessionMode::{Local, CloudPlaceholder(ModelHandle<TuiCloudRunSta
 - `cloud_placeholder_presentation` derives the current callout from startup state plus history status.
 - `render` returns the placeholder before constructing normal transcript/input/footer content.
 - `child_view_ids`, activation/focus, keymap context, and PTY event routing treat an unattached cloud placeholder as self-focused and non-interactive.
+- A cloud-placeholder keymap flag scopes `Shift+Up` directly to the existing tab-focus action because the hidden input view cannot emit `FocusAboveRequested`; no cloud-specific shortcut hint or footer is added.
 
 Do not add cloud checks throughout transcript, input, menus, footer, or shell-command handlers. No printable input or PTY intent is emitted from placeholder mode.
 
@@ -155,7 +155,7 @@ flowchart LR
   - URL wrapping at narrow widths and recentering after resize.
   - Dark/light theme semantic styles.
   - Click and Enter dispatch the same open-URL action.
-  - No transcript, input, zero state, footer, or PTY event routing in placeholder mode.
+  - No transcript, input, zero state, terminal footer, or PTY event routing in placeholder mode.
 - `TuiLink` tests cover persistent hover styling, footprint-correct click dispatch, label/URL preservation, and reuse with both cloud and authentication URLs.
 
 ### Orchestration launch and lifecycle

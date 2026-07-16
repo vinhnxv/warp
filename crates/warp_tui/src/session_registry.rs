@@ -16,8 +16,12 @@ use warpui::SingletonEntity;
 use warpui_core::runtime::TuiDriverHandle;
 use warpui_core::{AppContext, Entity, EntityId, ModelContext, ModelHandle, ViewHandle, WindowId};
 
+use crate::cloud_run::TuiCloudRunState;
+use crate::cloud_terminal_manager::TuiCloudTerminalManager;
+
 use crate::orchestration_model::{
-    MaterializedLocalOzChildSession, TuiOrchestrationEvent, TuiOrchestrationModel,
+    MaterializedLocalOzChildSession, MaterializedRemoteChildSession, TuiOrchestrationEvent,
+    TuiOrchestrationModel,
 };
 use crate::resume::TuiExitSummaryHandle;
 use crate::terminal_session_view::{TuiTerminalSessionEvent, TuiTerminalSessionView};
@@ -131,6 +135,36 @@ impl TuiSessions {
         let surface = manager.surface.clone();
         let session_id =
             Self::register_session(sessions, manager.surface, manager.manager, focus, ctx);
+        (session_id, surface)
+    }
+
+    /// Creates and registers a deferred PTY-less cloud terminal session.
+    pub(crate) fn create_cloud_terminal_session(
+        sessions: &ModelHandle<Self>,
+        window_id: WindowId,
+        cloud_run_state: ModelHandle<TuiCloudRunState>,
+        focus: bool,
+        ctx: &mut AppContext,
+    ) -> (TuiSessionId, ViewHandle<TuiTerminalSessionView>) {
+        let (exit_summary, keyboard_enhancement_supported) = sessions.read(ctx, |sessions, _| {
+            (
+                sessions.exit_summary.clone(),
+                sessions.keyboard_enhancement_supported,
+            )
+        });
+        let (manager, surface_init) =
+            TuiCloudTerminalManager::new(Vector2F::new(120., 24.), TRANSCRIPT_BLOCK_SPACING, ctx);
+        let surface = ctx.add_typed_action_tui_view(window_id, |ctx| {
+            TuiTerminalSessionView::new_cloud(
+                surface_init,
+                cloud_run_state,
+                exit_summary,
+                keyboard_enhancement_supported,
+                ctx,
+            )
+        });
+        let manager = ctx.add_model(|_| Box::new(manager) as Box<dyn TerminalManagerTrait>);
+        let session_id = Self::register_session(sessions, surface.clone(), manager, focus, ctx);
         (session_id, surface)
     }
     /// Wires a session view to orchestration before registering it.
@@ -261,6 +295,38 @@ impl TuiSessions {
                     );
                 });
             }
+            TuiOrchestrationEvent::CreateRemoteChildSession {
+                parent_session_id,
+                request,
+                prepared,
+            } => {
+                let window_id = sessions
+                    .as_ref(ctx)
+                    .session(*parent_session_id)
+                    .expect("the dispatching parent session must remain registered")
+                    .view()
+                    .window_id(ctx);
+                let cloud_run_state = ctx.add_model(|_| TuiCloudRunState::new());
+                let (session_id, session_view) = Self::create_cloud_terminal_session(
+                    &sessions,
+                    window_id,
+                    cloud_run_state.clone(),
+                    false,
+                    ctx,
+                );
+                orchestration_for_events.update(ctx, |orchestration, ctx| {
+                    orchestration.register_remote_child_session(
+                        MaterializedRemoteChildSession {
+                            session_id,
+                            session_view,
+                            cloud_run_state,
+                            request: (**request).clone(),
+                            prepared: (**prepared).clone(),
+                        },
+                        ctx,
+                    );
+                });
+            }
             TuiOrchestrationEvent::RemoveChildSession(session_id) => {
                 sessions.update(ctx, |sessions, ctx| {
                     sessions.remove_session(*session_id, ctx);
@@ -353,6 +419,12 @@ impl TuiSessions {
         self.sessions.iter().find(|session| session.id == id)
     }
 
+    /// Looks up a retained session by its terminal surface id.
+    pub(crate) fn session_id_for_surface(&self, surface_id: EntityId) -> Option<TuiSessionId> {
+        self.sessions
+            .iter()
+            .find_map(|session| (session.id.surface_id() == surface_id).then_some(session.id))
+    }
     /// Builds the loaded conversation-to-session index used by one topology snapshot.
     pub(crate) fn session_ids_by_conversation(
         &self,

@@ -1,12 +1,17 @@
 use warp::tui_export::{
-    register_tui_session_view_test_singletons, AIConversationId, BlocklistAIHistoryModel, Harness,
-    StartAgentExecutionMode, StartAgentExecutor, StartAgentExecutorEvent, StartAgentOutcome,
+    register_tui_session_view_test_singletons, AIConversationId, BlocklistAIHistoryModel,
+    CloudAgentStartupBlocker, CloudAgentStartupIssue, ConversationStatus, Harness,
+    OrchestrationEventStreamerEvent, StartAgentExecutionMode, StartAgentExecutor,
+    StartAgentExecutorEvent, StartAgentOutcome, StartAgentRequest,
 };
 use warpui::platform::WindowStyle;
 use warpui::{AddWindowOptions, ModelHandle, ReadModel, SingletonEntity as _, UpdateModel};
-use warpui_core::{App, WindowId};
+use warpui_core::elements::tui::{TuiBufferExt, TuiRect};
+use warpui_core::presenter::tui::TuiPresenter;
+use warpui_core::{App, TuiView as _, WindowId};
 
 use super::TuiOrchestrationModel;
+use crate::cloud_run::TuiCloudRunStartup;
 use crate::root_view::RootTuiView;
 use crate::session_registry::{TuiSessionId, TuiSessions};
 use crate::test_fixtures::{add_test_semantic_selection, add_test_terminal_session};
@@ -14,6 +19,28 @@ use crate::test_fixtures::{add_test_semantic_selection, add_test_terminal_sessio
 struct OrchestrationFixture {
     sessions: ModelHandle<TuiSessions>,
     window_id: WindowId,
+}
+
+fn remote_request(parent_conversation_id: AIConversationId) -> StartAgentRequest {
+    StartAgentRequest {
+        id: Default::default(),
+        name: "cloud-researcher".to_string(),
+        prompt: "research the codebase".to_string(),
+        execution_mode: StartAgentExecutionMode::Remote {
+            environment_id: "env-1".to_string(),
+            skill_references: Vec::new(),
+            model_id: "auto".to_string(),
+            computer_use_enabled: false,
+            worker_host: "warp".to_string(),
+            harness_type: "oz".to_string(),
+            title: "Researcher".to_string(),
+            auth_secret_name: None,
+            agent_identity_uid: None,
+        },
+        lifecycle_subscription: None,
+        parent_conversation_id,
+        parent_run_id: Some("parent-run-1".to_string()),
+    }
 }
 
 /// Boots the container + root + orchestration model wiring (no live PTYs).
@@ -192,6 +219,63 @@ fn local_harness_children_fail_cleanly() {
 }
 
 #[test]
+fn github_auth_blocker_keeps_the_remote_session_and_actionable_url() {
+    App::test((), |mut app| async move {
+        let fixture = orchestration_fixture(&mut app);
+        let parent_session_id = add_dispatching_session(&mut app, &fixture, true);
+        let parent_conversation_id = app.read(|ctx| {
+            BlocklistAIHistoryModel::as_ref(ctx)
+                .active_conversation(parent_session_id.surface_id())
+                .unwrap()
+                .id()
+        });
+        let request = remote_request(parent_conversation_id);
+        let (conversation_id, surface_id, cloud_run_state) = app.update(|ctx| {
+            TuiOrchestrationModel::handle(ctx).update(ctx, |model, ctx| {
+                model.materialize_remote_child(
+                    &request,
+                    "cloud-researcher".to_string(),
+                    Harness::Oz,
+                    ctx,
+                )
+            })
+        });
+        app.update(|ctx| {
+            TuiOrchestrationModel::handle(ctx).update(ctx, |model, ctx| {
+                model.apply_remote_child_startup_issue(
+                    conversation_id,
+                    surface_id,
+                    cloud_run_state.clone(),
+                    CloudAgentStartupIssue::Blocked(CloudAgentStartupBlocker::GitHubAuthRequired {
+                        message: "GitHub authentication required".to_string(),
+                        auth_url: "https://example.com/auth".to_string(),
+                    }),
+                    ctx,
+                );
+            });
+        });
+        app.read(|ctx| {
+            assert!(TuiSessions::as_ref(ctx)
+                .session_id_for_surface(surface_id)
+                .is_some());
+            assert_eq!(
+                BlocklistAIHistoryModel::as_ref(ctx)
+                    .conversation(&conversation_id)
+                    .unwrap()
+                    .status(),
+                &ConversationStatus::Blocked {
+                    blocked_action: "GitHub authentication required".to_string(),
+                }
+            );
+            let TuiCloudRunStartup::Blocked(blocker) = cloud_run_state.as_ref(ctx).startup() else {
+                panic!("expected blocked cloud startup state");
+            };
+            assert_eq!(blocker.primary_url(), "https://example.com/auth");
+        });
+    });
+}
+
+#[test]
 fn snapshot_is_shared_across_tree_and_filters_conversations_without_sessions() {
     App::test((), |mut app| async move {
         let fixture = orchestration_fixture(&mut app);
@@ -293,30 +377,126 @@ fn snapshot_is_shared_across_tree_and_filters_conversations_without_sessions() {
 }
 
 #[test]
-fn remote_children_fail_cleanly() {
+fn remote_child_materialization_is_navigable_and_projects_lifecycle() {
     App::test((), |mut app| async move {
         let fixture = orchestration_fixture(&mut app);
-        let session_id = add_dispatching_session(&mut app, &fixture, true);
-        let executor = add_relayed_executor(&mut app, session_id);
+        let parent_session_id = add_dispatching_session(&mut app, &fixture, true);
+        let parent_conversation_id = app.read(|ctx| {
+            BlocklistAIHistoryModel::as_ref(ctx)
+                .active_conversation(parent_session_id.surface_id())
+                .unwrap()
+                .id()
+        });
+        let request = remote_request(parent_conversation_id);
+        let (conversation_id, surface_id, cloud_run_state) = app.update(|ctx| {
+            TuiOrchestrationModel::handle(ctx).update(ctx, |model, ctx| {
+                model.materialize_remote_child(
+                    &request,
+                    "cloud-researcher".to_string(),
+                    Harness::Oz,
+                    ctx,
+                )
+            })
+        });
+        app.read(|ctx| {
+            let history = BlocklistAIHistoryModel::as_ref(ctx);
+            let conversation = history.conversation(&conversation_id).unwrap();
+            assert!(conversation.is_remote_child());
+            assert_eq!(
+                history.resolved_parent_conversation_id_for_conversation(conversation),
+                Some(parent_conversation_id)
+            );
+            assert!(TuiSessions::as_ref(ctx)
+                .session_id_for_surface(surface_id)
+                .is_some());
+            assert!(matches!(
+                cloud_run_state.as_ref(ctx).startup(),
+                TuiCloudRunStartup::Dispatching
+            ));
+            assert_eq!(
+                cloud_run_state.as_ref(ctx).conversation_id(),
+                Some(conversation_id)
+            );
+            let session_id = TuiSessions::as_ref(ctx)
+                .session_id_for_surface(surface_id)
+                .unwrap();
+            let view = TuiSessions::as_ref(ctx)
+                .session(session_id)
+                .unwrap()
+                .view()
+                .clone();
+            let mut presenter = TuiPresenter::new();
+            let frame = presenter.present_element(
+                view.as_ref(ctx).render(ctx),
+                TuiRect::new(0, 0, 80, 12),
+                ctx,
+            );
+            assert!(frame
+                .buffer
+                .to_lines()
+                .iter()
+                .any(|line| line.contains("Starting cloud run…")));
+        });
 
-        let (parent_conversation_id, outcome) = dispatch_and_recv(
-            &mut app,
-            session_id,
-            &executor,
-            StartAgentExecutionMode::Remote {
-                environment_id: "env-1".to_string(),
-                skill_references: Vec::new(),
-                model_id: "auto".to_string(),
-                computer_use_enabled: false,
-                worker_host: "warp".to_string(),
-                harness_type: "oz".to_string(),
-                title: "Researcher".to_string(),
-                auth_secret_name: None,
-                agent_identity_uid: None,
-            },
-        );
-        assert_error_containing(outcome, "Cloud child agents aren't supported");
-        assert_failed_launch_cleaned_up(&app, &fixture, parent_conversation_id, 1);
+        app.update(|ctx| {
+            BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                history.assign_run_id_for_conversation(
+                    conversation_id,
+                    "00000000-0000-0000-0000-000000000004".to_string(),
+                    None,
+                    surface_id,
+                    ctx,
+                );
+            });
+        });
+        app.read(|ctx| {
+            assert_eq!(
+                BlocklistAIHistoryModel::as_ref(ctx)
+                    .conversation_id_for_agent_id("00000000-0000-0000-0000-000000000004"),
+                Some(conversation_id)
+            );
+        });
+        app.update(|ctx| {
+            TuiOrchestrationModel::handle(ctx).update(ctx, |model, ctx| {
+                model.handle_streamer_event(
+                    &OrchestrationEventStreamerEvent::WatchedRunStatusChanged {
+                        owner_conversation_id: parent_conversation_id,
+                        run_id: "00000000-0000-0000-0000-000000000004".to_string(),
+                        status: ConversationStatus::Success,
+                    },
+                    ctx,
+                );
+            });
+        });
+        app.read(|ctx| {
+            assert_eq!(
+                BlocklistAIHistoryModel::as_ref(ctx)
+                    .conversation(&conversation_id)
+                    .unwrap()
+                    .status(),
+                &ConversationStatus::Success
+            );
+            let child_session_id = TuiSessions::as_ref(ctx)
+                .session_id_for_surface(surface_id)
+                .unwrap();
+            let child_view = TuiSessions::as_ref(ctx)
+                .session(child_session_id)
+                .unwrap()
+                .view()
+                .clone();
+            let mut presenter = TuiPresenter::new();
+            let frame = presenter.present_element(
+                child_view.as_ref(ctx).render(ctx),
+                TuiRect::new(0, 0, 80, 12),
+                ctx,
+            );
+            let lines = frame.buffer.to_lines();
+            let header = lines
+                .iter()
+                .find(|line| line.contains("cloud-researcher"))
+                .expect("orchestration tab should render");
+            assert!(header.contains("✓"), "{header}");
+        });
     });
 }
 

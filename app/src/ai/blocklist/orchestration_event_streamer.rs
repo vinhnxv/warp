@@ -297,6 +297,7 @@ pub struct OrchestrationEventStreamer {
     killed_run_id_order: VecDeque<String>,
 }
 
+#[allow(private_interfaces)]
 pub enum OrchestrationEventStreamerEvent {
     DormantClaudeWakeReady {
         conversation_id: AIConversationId,
@@ -311,6 +312,12 @@ pub enum OrchestrationEventStreamerEvent {
     /// Lifecycle transition for a known child under `parent_task_id`.
     ChildStatusChanged {
         parent_task_id: AmbientAgentTaskId,
+        run_id: String,
+        status: ConversationStatus,
+    },
+    /// Lifecycle transition observed on an owner-side stream for a watched run.
+    WatchedRunStatusChanged {
+        owner_conversation_id: AIConversationId,
         run_id: String,
         status: ConversationStatus,
     },
@@ -2100,6 +2107,21 @@ impl OrchestrationEventStreamer {
                 .or_default()
                 .pending_message_ids
                 .extend(message_ids);
+        }
+
+        for event in &events {
+            if event.run_id == self_run_id {
+                continue;
+            }
+            let Some(lifecycle_type) = lifecycle_event_type_from_wire(event.event_type.as_str())
+            else {
+                continue;
+            };
+            ctx.emit(OrchestrationEventStreamerEvent::WatchedRunStatusChanged {
+                owner_conversation_id: conversation_id,
+                run_id: event.run_id.clone(),
+                status: conversation_status_from_lifecycle_event_type(lifecycle_type),
+            });
         }
 
         let lifecycle_events = convert_lifecycle_events(&events, self_run_id);

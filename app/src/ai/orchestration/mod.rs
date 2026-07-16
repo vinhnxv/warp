@@ -9,6 +9,7 @@
 mod config_state;
 mod edit_state;
 mod providers;
+mod remote_child;
 mod snapshots;
 mod validation;
 
@@ -24,6 +25,12 @@ pub use providers::{
     persist_environment_selection, persist_host_selection,
     resolve_auth_secret_selection_for_harness, resolve_default_environment_id,
     resolve_default_host_slug, ORCHESTRATION_WARP_WORKER_HOST,
+};
+pub(crate) use remote_child::should_disable_snapshot;
+pub use remote_child::{
+    classify_cloud_agent_startup_error, oz_run_url, prepare_remote_child_launch,
+    CloudAgentStartupBlocker, CloudAgentStartupFailure, CloudAgentStartupIssue,
+    PrepareRemoteChildLaunchError, PreparedRemoteChildLaunch, RemoteChildLaunchConfig,
 };
 #[cfg_attr(not(feature = "tui"), allow(unused_imports))]
 pub use snapshots::location_snapshot;
