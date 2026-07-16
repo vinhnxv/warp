@@ -61,7 +61,7 @@ pub use crate::ai::blocklist::diff_storage::{
 };
 pub use crate::ai::blocklist::diff_types::{changed_lines_from_op, DiffSessionType, FileDiff};
 pub use crate::ai::blocklist::history_model::{
-    BlocklistAIHistoryEvent, BlocklistAIHistoryModel, CloudConversationData,
+    AIQueryHistory, BlocklistAIHistoryEvent, BlocklistAIHistoryModel, CloudConversationData,
     ConversationStatusUpdate,
 };
 pub use crate::ai::blocklist::orchestration_event_streamer::{
@@ -176,8 +176,8 @@ pub use crate::terminal::terminal_manager::BlockSpacing;
 pub use crate::terminal::view::blocklist_filter::should_show_task_in_blocklist;
 pub use crate::terminal::view::{ExecuteCommandEvent, WAKEUP_THROTTLE_PERIOD};
 pub use crate::terminal::{
-    BlockPadding, PtyIntent, PtyIntentEvent, ShellLaunchData, SizeInfo, SizeUpdate,
-    TerminalManager as TerminalManagerTrait, TerminalModel, TerminalSurface,
+    tui_prompt_history, BlockPadding, PtyIntent, PtyIntentEvent, ShellLaunchData, SizeInfo,
+    SizeUpdate, TerminalManager as TerminalManagerTrait, TerminalModel, TerminalSurface,
 };
 pub use crate::themes::default_themes::{dark_theme, light_theme};
 pub use crate::throttle::throttle;

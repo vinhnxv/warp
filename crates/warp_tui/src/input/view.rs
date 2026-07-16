@@ -51,6 +51,7 @@ use crate::input_suggestions_mode::{TuiInputSuggestionsMode, TuiInputSuggestions
 use crate::keybindings::{
     KEYBOARD_ENHANCEMENT_AVAILABLE_FLAG, PLAN_TOGGLE_AVAILABLE_FLAG, TUI_BINDING_GROUP,
 };
+use crate::prompt_history_menu::TuiPromptHistoryMenuModel;
 use crate::transcript_view::TuiTranscriptView;
 use crate::tui_builder::TuiUiBuilder;
 
@@ -118,6 +119,9 @@ pub enum TuiInputViewEvent {
     AcceptedMcp(TuiMcpAction),
     /// Shift+Up should move focus from the first visual row to the region above.
     MoveFocusUp,
+    /// The user accepted a prompt from the up-arrow prompt-history menu. Carries
+    /// the prompt text to fill into the input and submit.
+    AcceptedPromptHistory(String),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -158,6 +162,9 @@ pub struct TuiInputView {
     suggestions_mode: ModelHandle<TuiInputSuggestionsModeModel>,
     /// Generalized inline menus used to route prioritized menu actions.
     inline_menus: Vec<TuiInlineMenu>,
+    /// The up-arrow prompt-history menu, retained separately from the
+    /// type-erased inline menu list because the input opens it directly.
+    prompt_history_menu: ModelHandle<TuiPromptHistoryMenuModel>,
     /// Shared editor session state, including the single-entry kill buffer.
     editor_state: TuiEditorState,
     /// Multiline insertion and six-row viewport policy.
@@ -200,6 +207,7 @@ impl TuiInputView {
         input_mode: ModelHandle<BlocklistAIInputModel>,
         suggestions_mode: ModelHandle<TuiInputSuggestionsModeModel>,
         inline_menus: Vec<TuiInlineMenu>,
+        prompt_history_menu: ModelHandle<TuiPromptHistoryMenuModel>,
         transcript: ViewHandle<TuiTranscriptView>,
         can_move_focus_up: impl Fn(&AppContext) -> bool + 'static,
         ctx: &mut ViewContext<Self>,
@@ -209,6 +217,7 @@ impl TuiInputView {
             input_mode,
             suggestions_mode,
             inline_menus,
+            prompt_history_menu,
             Some(transcript),
             can_move_focus_up,
             ctx,
@@ -221,6 +230,7 @@ impl TuiInputView {
         input_mode: ModelHandle<BlocklistAIInputModel>,
         suggestions_mode: ModelHandle<TuiInputSuggestionsModeModel>,
         inline_menus: Vec<TuiInlineMenu>,
+        prompt_history_menu: ModelHandle<TuiPromptHistoryMenuModel>,
         can_move_focus_up: impl Fn(&AppContext) -> bool + 'static,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
@@ -229,6 +239,7 @@ impl TuiInputView {
             input_mode,
             suggestions_mode,
             inline_menus,
+            prompt_history_menu,
             None,
             can_move_focus_up,
             ctx,
@@ -240,6 +251,7 @@ impl TuiInputView {
         input_mode: ModelHandle<BlocklistAIInputModel>,
         suggestions_mode: ModelHandle<TuiInputSuggestionsModeModel>,
         inline_menus: Vec<TuiInlineMenu>,
+        prompt_history_menu: ModelHandle<TuiPromptHistoryMenuModel>,
         transcript: Option<ViewHandle<TuiTranscriptView>>,
         can_move_focus_up: impl Fn(&AppContext) -> bool + 'static,
         ctx: &mut ViewContext<Self>,
@@ -258,6 +270,7 @@ impl TuiInputView {
             input_mode,
             suggestions_mode,
             inline_menus,
+            prompt_history_menu,
             editor_state: TuiEditorState::default(),
             editor_behavior: TuiEditorBehavior::multiline(6),
             prefix_mouse_state: MouseStateHandle::default(),
@@ -502,6 +515,13 @@ impl TypedActionView for TuiInputView {
                         menu.open(ctx);
                     }
                     TuiEditorInteractionOutcome::FollowCursor
+                } else if matches!(*command, TuiEditorCommand::MoveUp)
+                    && !self.is_shell_mode(ctx)
+                    && self.single_cursor_on_first_row(ctx)
+                {
+                    self.prompt_history_menu
+                        .update(ctx, |menu, ctx| menu.open(ctx));
+                    TuiEditorInteractionOutcome::FollowCursor
                 // With nothing left to delete, backspace removes the `!`
                 // affordance instead; typed text is preserved.
                 } else if matches!(*command, TuiEditorCommand::Backspace)
@@ -586,16 +606,22 @@ impl TuiInputView {
 
     /// Whether Shift+Up should leave the input instead of extending selection.
     fn can_focus_above(&self, ctx: &AppContext) -> bool {
-        if !(self.can_move_focus_up)(ctx) || self.selection_range(ctx).is_some() {
+        (self.can_move_focus_up)(ctx) && self.single_cursor_on_first_row(ctx)
+    }
+
+    /// Whether the single caret sits on the first visual row of the input with
+    /// no active selection — the position where Up opens the prompt-history
+    /// menu. Accounts for soft-wrapping via the char-cell display lattice,
+    /// mirroring the GUI editor view's `single_cursor_on_first_row`.
+    fn single_cursor_on_first_row(&self, ctx: &AppContext) -> bool {
+        if self.selection_range(ctx).is_some() {
             return false;
         }
-
         let model = self.model.as_ref(ctx);
         let render = model.render_state().as_ref(ctx);
         let Some(char_cell) = render.char_cell() else {
             return false;
         };
-
         let cursor_offset = CharOffset::from(self.cursor_offset(ctx).as_usize().saturating_sub(1));
         let hidden = char_cell.hidden_line_ranges(ctx);
         char_cell
@@ -703,6 +729,9 @@ impl TuiInputView {
                         }
                         TuiInlineMenuAccepted::Mcp(action) => {
                             ctx.emit(TuiInputViewEvent::AcceptedMcp(action));
+                        }
+                        TuiInlineMenuAccepted::PromptHistory(text) => {
+                            ctx.emit(TuiInputViewEvent::AcceptedPromptHistory(text));
                         }
                     }
                 }

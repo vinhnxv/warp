@@ -4,6 +4,7 @@ use warp_core::features::FeatureFlag;
 use warpui::{AppContext, EntityId, SingletonEntity};
 
 use super::History;
+use crate::ai::blocklist::history_model::AIQueryHistory;
 use crate::ai::blocklist::{BlocklistAIHistoryModel, InputConfig};
 use crate::input_suggestions::HistoryInputSuggestion;
 use crate::settings::AISettings;
@@ -128,3 +129,45 @@ impl History {
         sort_and_dedupe_suggestions(suggestions, session_id, &all_live_session_ids)
     }
 }
+
+/// Returns the de-duplicated, GUI-ordered agent prompt history for the TUI
+/// up-arrow prompt-history menu.
+///
+/// Reuses [`BlocklistAIHistoryModel::all_ai_queries`] and the same
+/// [`sort_and_dedupe_suggestions`] ordering/dedupe as the GUI agent-view
+/// up-arrow path, then applies the GUI's prefix filter
+/// (`text().starts_with(trimmed_query)`), so both front-ends read the same
+/// history with identical ordering, dedupe, and filtering. Whitespace-only and
+/// empty prompts are excluded.
+pub fn tui_prompt_history(
+    terminal_surface_id: EntityId,
+    query: &str,
+    app: &AppContext,
+) -> Vec<AIQueryHistory> {
+    let history_model = BlocklistAIHistoryModel::handle(app).as_ref(app);
+    let suggestions: Vec<HistoryInputSuggestion<'_>> = history_model
+        .all_ai_queries(Some(terminal_surface_id))
+        .map(|entry| HistoryInputSuggestion::AIQuery { entry })
+        .collect();
+    // The ordering of AI-query suggestions is driven entirely by each entry's
+    // `history_order` (populated by `all_ai_queries` from the terminal surface),
+    // so the session-id inputs to `sort_and_dedupe_suggestions` — which only
+    // affect command entries — are irrelevant here.
+    let all_live_session_ids = HashSet::new();
+    let sorted = sort_and_dedupe_suggestions(suggestions, None, &all_live_session_ids);
+
+    let trimmed_query = query.trim();
+    sorted
+        .into_iter()
+        .filter_map(|suggestion| match suggestion {
+            HistoryInputSuggestion::AIQuery { entry } => Some(entry),
+            HistoryInputSuggestion::Command { .. } => None,
+        })
+        .filter(|entry| !entry.query_text.trim().is_empty())
+        .filter(|entry| trimmed_query.is_empty() || entry.query_text.starts_with(trimmed_query))
+        .collect()
+}
+
+#[cfg(test)]
+#[path = "up_arrow_tests.rs"]
+mod tests;
