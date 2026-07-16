@@ -382,6 +382,7 @@ impl TuiOrchestrationModel {
         (conversation_id, child_surface_id, cloud_run_state)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn register_remote_child_state(
         &mut self,
         session_id: TuiSessionId,

@@ -69,7 +69,7 @@ Add `TuiTerminalSessionMode::{Local, CloudPlaceholder(ModelHandle<TuiCloudRunSta
 - `cloud_placeholder_presentation` derives the current callout from startup state plus history status.
 - `render` returns the placeholder before constructing normal transcript/input/footer content.
 - `child_view_ids`, activation/focus, keymap context, and PTY event routing treat an unattached cloud placeholder as self-focused and non-interactive.
-- A cloud-placeholder keymap flag scopes `Shift+Up` directly to the existing tab-focus action because the hidden input view cannot emit `FocusAboveRequested`; no cloud-specific shortcut hint or footer is added.
+- A cloud-placeholder keymap flag scopes `Shift+Up` directly to the existing tab-focus action because the hidden input view cannot emit `FocusAboveRequested`, and scopes Enter to opening the current primary URL regardless of whether the body or tabs own focus. The unfocused footer reuses `Shift + ↑ sub-agents`; the focused cloud-tab footer reuses the regular navigation copy but omits ineffective `Shift+Down`.
 
 Do not add cloud checks throughout transcript, input, menus, footer, or shell-command handlers. No printable input or PTY intent is emitted from placeholder mode.
 
@@ -149,13 +149,13 @@ flowchart LR
 
 ### Deferred manager and placeholder view
 - Unit tests construct `TuiCloudTerminalManager` and assert that it exposes a PTY-less cloud-viewer terminal model and a usable `TerminalSurfaceInit` without starting a local shell.
-- Render-to-lines tests cover PRODUCT (7-13, 15-20, 26-28, 36-40):
+- Render-to-lines tests cover PRODUCT (7-13, 15-20, 26-28, 36-41):
   - Centered dispatching, launched, blocked-auth, failed, and terminal-status callouts.
   - Status glyph/text parity between the tab snapshot and callout.
   - URL wrapping at narrow widths and recentering after resize.
   - Dark/light theme semantic styles.
   - Click and Enter dispatch the same open-URL action.
-  - No transcript, input, zero state, terminal footer, or PTY event routing in placeholder mode.
+  - No transcript, input, zero state, normal terminal metadata footer, or PTY event routing in placeholder mode; only the unfocused sub-agent hint or focused cloud-tab navigation footer renders.
 - `TuiLink` tests cover persistent hover styling, footprint-correct click dispatch, label/URL preservation, and reuse with both cloud and authentication URLs.
 
 ### Orchestration launch and lifecycle

@@ -287,6 +287,8 @@ pub(crate) enum TuiTerminalSessionAction {
     SelectLastOrchestrationChild,
     /// Open the primary URL rendered by a read-only cloud child.
     OpenCloudRunUrl(String),
+    /// Open the currently rendered cloud child URL.
+    OpenPrimaryCloudRunUrl,
 }
 
 /// The authenticated terminal/session surface rendered inside [`RootTuiView`].
@@ -408,6 +410,14 @@ pub(crate) fn init(app: &mut AppContext) {
         id!(TuiTerminalSessionView::ui_name()) & id!(ORCHESTRATION_TAB_BAR_FOCUSED_FLAG);
     let cloud_context = id!(TuiTerminalSessionView::ui_name()) & id!(CLOUD_PLACEHOLDER_FLAG);
     app.register_editable_bindings([
+        EditableBinding::new(
+            "tui:cloud_placeholder:open_url",
+            "Open the cloud run link",
+            TuiTerminalSessionAction::OpenPrimaryCloudRunUrl,
+        )
+        .with_context_predicate(cloud_context.clone())
+        .with_group(TUI_BINDING_GROUP)
+        .with_key_binding("enter"),
         EditableBinding::new(
             "tui:cloud_placeholder:focus_orchestration_tabs",
             "Focus the orchestration tab bar",
@@ -1349,7 +1359,7 @@ impl TuiTerminalSessionView {
                     "{} Authenticate, then run the orchestration request again.",
                     blocker.message()
                 )),
-                link_label: Some("Authenticate here:"),
+                link_label: Some("Click the link or hit Enter to authenticate:"),
                 link_url: Some(blocker.primary_url().to_string()),
             },
             TuiCloudRunStartup::Failed(failure) => TuiCloudPlaceholderPresentation {
@@ -1381,7 +1391,7 @@ impl TuiTerminalSessionView {
                     status: status.clone(),
                     status_label: status_label.to_string(),
                     detail: None,
-                    link_label: Some("View cloud run here:"),
+                    link_label: Some("Click the link or hit Enter to view cloud run here:"),
                     link_url: state.run_url().map(str::to_string),
                 }
             }
@@ -1441,9 +1451,21 @@ impl TuiTerminalSessionView {
             placeholder
         };
         if orchestration_tabs.is_some() {
+            let footer = if self.orchestration_tabs_focused {
+                self.render_cloud_orchestration_tab_footer(builder)
+            } else {
+                TuiText::new("Shift + ↑ sub-agents")
+                    .with_style(builder.muted_text_style())
+                    .truncate()
+                    .finish()
+            };
+            let session = TuiFlex::column()
+                .flex_child(placeholder)
+                .child(TuiContainer::new(footer).with_padding_x(2).finish())
+                .finish();
             TuiFlex::column()
                 .child(TuiChildView::new(&self.orchestration_tab_bar).finish())
-                .flex_child(placeholder)
+                .flex_child(session)
                 .finish()
         } else {
             placeholder
@@ -1671,6 +1693,18 @@ impl TuiTerminalSessionView {
         .finish()
     }
 
+    fn render_cloud_orchestration_tab_footer(&self, builder: &TuiUiBuilder) -> Box<dyn TuiElement> {
+        let primary = builder.primary_text_style();
+        let muted = builder.muted_text_style();
+        TuiText::from_spans([
+            ("Tab or ← →".to_string(), primary),
+            (" to navigate  ".to_string(), muted),
+            ("Shift + ← →".to_string(), primary),
+            (" to go to start/end".to_string(), muted),
+        ])
+        .truncate()
+        .finish()
+    }
     /// The active front-of-queue blocking interaction, if any.
     fn active_blocking_child(&self, ctx: &AppContext) -> Option<ViewHandle<TuiOrchestrationBlock>> {
         self.transcript.as_ref(ctx).active_blocking_child(ctx)
@@ -3148,6 +3182,14 @@ impl TypedActionView for TuiTerminalSessionView {
                 self.set_orchestration_tab_focus(false, ctx)
             }
             TuiTerminalSessionAction::OpenCloudRunUrl(url) => ctx.open_url(url),
+            TuiTerminalSessionAction::OpenPrimaryCloudRunUrl => {
+                if let Some(url) = self
+                    .cloud_placeholder_presentation(ctx)
+                    .and_then(|presentation| presentation.link_url)
+                {
+                    ctx.open_url(&url);
+                }
+            }
             TuiTerminalSessionAction::FocusOrchestrationTabs => self.focus_orchestration_tabs(ctx),
             TuiTerminalSessionAction::SelectPreviousOrchestrationTab => {
                 let key = self
