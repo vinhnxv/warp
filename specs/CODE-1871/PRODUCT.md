@@ -18,7 +18,7 @@ In the TUI today, pressing Up runs the cursor-movement action `MoveUp`. When an 
 3. When any inline menu is already open (slash commands, `/conversations`, model, skills, MCP, or this prompt-history menu), Up cycles that menu's selection and does not trigger the open logic in (1). Only one inline menu is open at a time; the prompt-history menu cannot open on top of another menu.
 4. Whatever text is in the input when the menu opens becomes the menu's initial search query and is preserved as the "original buffer" for later restoration (see Dismissal). Opening with an empty input opens the menu with an empty query.
 5. The menu opens anchored to the input, rendered in the same inline-menu region and visual style used by the existing TUI menus (bordered list above the input, capped at the shared maximum visible row count, with a header title identifying it as prompt history).
-6. The menu is feature-flagged. While the flag is disabled, Up behaves exactly as it does today (cursor movement / existing menu cycling), and the menu never opens.
+6. No feature flag: the prompt-history menu ships enabled by default (per review decision — no flag gates it). Once the conditions in (1) are met, Up opens the menu unconditionally.
 ### Contents, ordering, and search
 7. The menu lists the user's previous agent prompts drawn from the same prompt-history data the GUI uses. Prompts from the current terminal session and prompts from other sessions are both included.
 8. Prompts are de-duplicated by text: repeated identical prompts appear once, keeping the most recent occurrence.
@@ -32,7 +32,7 @@ In the TUI today, pressing Up runs the cursor-movement action `MoveUp`. When an 
 15. Preview writes do not push undo history the user could accidentally "undo" into a broken state; moving off a preview and dismissing restores cleanly (see Dismissal).
 ### Acceptance
 16. Pressing Enter with a prompt highlighted accepts it: the input buffer is set to the selected prompt's text and the prompt is submitted, matching the GUI's accept-a-prompt-from-history behavior. After acceptance the menu closes.
-    - **Open question:** the GUI submits the accepted prompt immediately. For the TUI we may instead prefer to fill the input and leave it for the user to edit/submit. Default in this spec is GUI parity (fill + submit); this is the single most important behavior to confirm at review.
+    - **Decision (confirmed at review): GUI parity** — the accepted prompt is filled into the input and submitted immediately.
 17. Accepting is only possible when a selectable prompt is highlighted. With an empty/filtered-to-nothing list, Enter does not accept a prompt; it behaves as a normal submit of whatever is in the input (which, with the menu open over an empty query, means submitting empty is a no-op as it is today).
 ### Dismissal and buffer restoration
 18. Pressing Escape with the prompt-history menu open closes the menu and restores the input buffer to the exact text the user had before opening the menu (the "original buffer" from invariant 4), discarding any preview text. The cursor returns to a sensible position within the restored text (end of the restored buffer is acceptable).
