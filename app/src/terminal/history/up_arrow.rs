@@ -144,9 +144,21 @@ pub fn tui_prompt_history(
     query: &str,
     app: &AppContext,
 ) -> Vec<AIQueryHistory> {
+    // Exclude prompts the user has ignored/removed, matching the GUI agent-view
+    // up-arrow path so ignored prompts don't reappear in the TUI menu. The
+    // singleton is always registered in production app init; guard for minimal
+    // test harnesses that don't register it.
+    let ignored_prompts = if app.has_singleton_model::<IgnoredSuggestionsModel>() {
+        IgnoredSuggestionsModel::handle(app)
+            .as_ref(app)
+            .get_ignored_suggestions_for_type(SuggestionType::AIQuery)
+    } else {
+        HashSet::new()
+    };
     let history_model = BlocklistAIHistoryModel::handle(app).as_ref(app);
     let suggestions: Vec<HistoryInputSuggestion<'_>> = history_model
         .all_ai_queries(Some(terminal_surface_id))
+        .filter(|entry| !ignored_prompts.contains(&entry.query_text))
         .map(|entry| HistoryInputSuggestion::AIQuery { entry })
         .collect();
     // The ordering of AI-query suggestions is driven entirely by each entry's

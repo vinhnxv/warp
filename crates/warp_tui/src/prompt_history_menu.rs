@@ -301,12 +301,21 @@ impl TuiPromptHistoryMenuModel {
     }
 
     /// Replaces the input buffer text. Preview and restore both go through here.
+    ///
+    /// The write is undo-agnostic: after replacing the text we reset the buffer's
+    /// undo stack so preview and restore never leave undoable intermediate states
+    /// the user could Ctrl+Z into (PRODUCT.md invariant 15). This mirrors the
+    /// GUI's `set_buffer_text_ignoring_undo`; the TUI's `CodeEditorModel` has no
+    /// ephemeral overlay, so we clear the stack instead.
     fn set_input_text(&self, text: &str, ctx: &mut ModelContext<Self>) {
         self.input_editor.update(ctx, |editor, ctx| {
             editor.clear_buffer(ctx);
             if !text.is_empty() {
                 editor.user_insert(text, ctx);
             }
+            editor
+                .content()
+                .update(ctx, |buffer, _| buffer.reset_undo_stack());
         });
     }
 }

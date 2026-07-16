@@ -6,6 +6,7 @@ use warpui::{App, EntityId};
 
 use super::tui_prompt_history;
 use crate::ai::blocklist::BlocklistAIHistoryModel;
+use crate::suggestions::ignored_suggestions_model::{IgnoredSuggestionsModel, SuggestionType};
 
 /// Asserts that querying a history seeded with `prompts` (oldest-first) yields
 /// exactly `expected`.
@@ -13,7 +14,7 @@ fn assert_prompt_history(prompts: &[&str], query: &str, expected: &[&str]) {
     let prompts: Vec<String> = prompts.iter().map(|prompt| (*prompt).to_owned()).collect();
     let query = query.to_owned();
     let expected: Vec<String> = expected.iter().map(|entry| (*entry).to_owned()).collect();
-    App::test((), |mut app| async move {
+    App::test((), |app| async move {
         let terminal_surface_id = EntityId::new();
         app.add_singleton_model(move |_| BlocklistAIHistoryModel::mock_with_ai_queries(prompts));
         app.read(|ctx| {
@@ -51,4 +52,33 @@ fn tui_prompt_history_prefix_filters_by_trimmed_query() {
     // Leading/trailing whitespace in the query is trimmed before matching.
     assert_prompt_history(prompts, "  deploy ", &["deploy the app"]);
     assert_prompt_history(prompts, "xyz", &[]);
+}
+
+#[test]
+fn tui_prompt_history_excludes_ignored_prompts() {
+    let prompts: Vec<String> = ["deploy the app", "delete the cache", "build the project"]
+        .iter()
+        .map(|prompt| (*prompt).to_owned())
+        .collect();
+    App::test((), |app| async move {
+        let terminal_surface_id = EntityId::new();
+        app.add_singleton_model(move |_| BlocklistAIHistoryModel::mock_with_ai_queries(prompts));
+        app.add_singleton_model(|_| {
+            IgnoredSuggestionsModel::new(vec![(
+                "delete the cache".to_owned(),
+                SuggestionType::AIQuery,
+            )])
+        });
+        app.read(|ctx| {
+            let texts: Vec<String> = tui_prompt_history(terminal_surface_id, "", ctx)
+                .into_iter()
+                .map(|entry| entry.query_text)
+                .collect();
+            // The ignored prompt is excluded; the rest remain in order.
+            assert_eq!(
+                texts,
+                vec!["deploy the app".to_owned(), "build the project".to_owned()]
+            );
+        });
+    });
 }

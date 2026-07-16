@@ -5,10 +5,14 @@ use warp::appearance::Appearance;
 use warp::editor::CodeEditorModel;
 use warp::tui_export::BlocklistAIHistoryModel;
 use warp_editor::model::CoreEditorModel;
+use warpui_core::elements::tui::{TuiBufferExt, TuiRect};
+use warpui_core::presenter::tui::TuiPresenter;
 use warpui_core::{App, AppContext, EntityId, ModelHandle};
 
 use super::{reconciled_selection_index, TuiPromptHistoryMenuModel, TuiPromptHistoryRow};
+use crate::inline_menu::render_inline_menu;
 use crate::input_suggestions_mode::TuiInputSuggestionsModeModel;
+use crate::tui_builder::TuiUiBuilder;
 
 const W: u16 = 80;
 
@@ -152,6 +156,30 @@ fn empty_history_shows_explicit_empty_state() {
                 snapshot.status,
                 Some(crate::inline_menu::TuiInlineMenuStatus::Empty(_))
             ));
+        });
+    });
+}
+
+#[test]
+fn open_menu_renders_prompt_history_surface_to_lines() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            let (_input, menu) = setup(ctx, &["deploy the app", "run the tests"]);
+            menu.update(ctx, |m, ctx| m.open(ctx));
+            let snapshot = menu.as_ref(ctx).snapshot(ctx).expect("menu is open");
+            let mut presenter = TuiPresenter::new();
+            let frame = presenter.present_element(
+                render_inline_menu(&snapshot, &TuiUiBuilder::from_app(ctx)),
+                TuiRect::new(0, 0, 50, 12),
+                ctx,
+            );
+            let rendered = frame.buffer.to_lines().join("\n");
+            assert!(
+                rendered.contains("Prompt history"),
+                "rendered menu should show the header:\n{rendered}"
+            );
+            assert!(rendered.contains("deploy the app"));
+            assert!(rendered.contains("run the tests"));
         });
     });
 }
