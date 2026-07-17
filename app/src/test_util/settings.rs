@@ -8,6 +8,15 @@ pub fn initialize_settings_for_tests(app: &mut App) {
 }
 
 #[cfg(test)]
+pub fn initialize_settings_for_tests_with_public_preferences(
+    app: &mut App,
+    public_preferences: warpui_extras::user_preferences::Model,
+) {
+    use warp_core::execution_mode::ExecutionMode;
+    initialize_settings_for_tests_inner(app, ExecutionMode::App, false, Some(public_preferences));
+}
+
+#[cfg(test)]
 pub fn initialize_history_persistence_for_tests(app: &mut App) {
     use crate::{GlobalResourceHandles, GlobalResourceHandlesProvider};
 
@@ -22,6 +31,16 @@ pub fn initialize_settings_for_tests_with_mode(
     app: &mut App,
     mode: warp_core::execution_mode::ExecutionMode,
     is_sandboxed: bool,
+) {
+    initialize_settings_for_tests_inner(app, mode, is_sandboxed, None);
+}
+
+#[cfg(test)]
+fn initialize_settings_for_tests_inner(
+    app: &mut App,
+    mode: warp_core::execution_mode::ExecutionMode,
+    is_sandboxed: bool,
+    public_preferences: Option<warpui_extras::user_preferences::Model>,
 ) {
     use warp_core::execution_mode::AppExecutionMode;
     use warp_core::semantic_selection::SemanticSelection;
@@ -54,7 +73,14 @@ pub fn initialize_settings_for_tests_with_mode(
     use crate::workspace::tab_settings::TabSettings;
     app.add_singleton_model(|ctx| AppExecutionMode::new(mode, is_sandboxed, ctx));
 
-    app.update(init_and_register_user_preferences);
+    if let Some(public_preferences) = public_preferences {
+        app.update(move |ctx| {
+            ctx.add_singleton_model(move |_| settings::PublicPreferences::new(public_preferences));
+            ctx.add_singleton_model(move |_| crate::settings::init_private_user_preferences());
+        });
+    } else {
+        app.update(init_and_register_user_preferences);
+    }
     app.add_singleton_model(|_ctx| SettingsManager::default());
     app.add_singleton_model(WarpConfig::mock);
     app.update(|ctx| {

@@ -453,7 +453,25 @@ mod reload_all_public_settings_tests {
 }
 
 mod write_to_preferences_tests {
+    use warpui_extras::user_preferences::{Error, UserPreferences};
+
     use crate::*;
+
+    struct FailingPreferences;
+
+    impl UserPreferences for FailingPreferences {
+        fn write_value(&self, _key: &str, _value: String) -> Result<(), Error> {
+            Err(Error::Unknown(anyhow::anyhow!("write failed")))
+        }
+
+        fn read_value(&self, _key: &str) -> Result<Option<String>, Error> {
+            Ok(None)
+        }
+
+        fn remove_value(&self, _key: &str) -> Result<(), Error> {
+            Ok(())
+        }
+    }
 
     #[derive(
         Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
@@ -537,6 +555,40 @@ mod write_to_preferences_tests {
         assert!(
             !changed,
             "write_to_preferences should not report a change for semantically equal values"
+        );
+    }
+
+    #[test]
+    fn test_write_errors_are_propagated() {
+        let result = StructSetting::write_to_preferences(
+            &StructWithOptionals::default(),
+            &FailingPreferences,
+        );
+
+        assert!(
+            result.is_err(),
+            "backend write errors must reach setting callers"
+        );
+    }
+
+    #[test]
+    fn test_failed_toml_write_does_not_update_cached_value() {
+        use warpui_extras::user_preferences::toml_backed::TomlBackedUserPreferences;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("settings.toml");
+        let (prefs, parse_error) = TomlBackedUserPreferences::new(file_path.clone());
+        assert!(parse_error.is_none());
+        std::fs::create_dir(&file_path).unwrap();
+
+        let result = StructSetting::write_to_preferences(&StructWithOptionals::default(), &prefs);
+
+        assert!(result.is_err());
+        assert_eq!(
+            prefs
+                .read_value_with_hierarchy(StructSetting::toml_key(), StructSetting::hierarchy())
+                .unwrap(),
+            None
         );
     }
 

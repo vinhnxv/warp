@@ -77,6 +77,34 @@ fn tui_execution_profile_file_format_supports_partial_tables() {
 }
 
 #[test]
+fn tui_execution_profile_explicit_empty_lists_override_legacy_values() {
+    use settings_value::SettingsValue as _;
+
+    let config = TuiExecutionProfileConfig::from_file_value(&serde_json::json!({
+        "command_denylist": [],
+        "command_allowlist": [],
+        "directory_allowlist": [],
+    }))
+    .unwrap();
+    let legacy_profile = AIExecutionProfile {
+        command_denylist: vec![
+            AgentModeCommandExecutionPredicate::new_regex("legacy-denied .*").unwrap(),
+        ],
+        command_allowlist: vec![
+            AgentModeCommandExecutionPredicate::new_regex("legacy-allowed .*").unwrap(),
+        ],
+        directory_allowlist: vec![PathBuf::from("/legacy/workspace")],
+        ..Default::default()
+    };
+
+    let profile = config.into_profile_with_legacy_fields(legacy_profile);
+
+    assert!(profile.command_denylist.is_empty());
+    assert!(profile.command_allowlist.is_empty());
+    assert!(profile.directory_allowlist.is_empty());
+}
+
+#[test]
 fn tui_execution_profile_file_format_rejects_invalid_predicates() {
     use settings_value::SettingsValue as _;
 

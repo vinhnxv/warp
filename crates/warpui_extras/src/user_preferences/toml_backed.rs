@@ -589,6 +589,7 @@ impl super::UserPreferences for TomlBackedUserPreferences {
             return Ok(());
         }
 
+        let original_document = self.document.borrow().clone();
         let mut item = Self::json_value_to_toml_item(&val, max_table_depth);
         // Apply pretty-printing before inserting. The assignment always
         // lands at the top of a section table (either the root or the
@@ -604,7 +605,11 @@ impl super::UserPreferences for TomlBackedUserPreferences {
         table[key] = item;
         drop(doc);
 
-        self.flush()
+        if let Err(error) = self.flush() {
+            *self.document.borrow_mut() = original_document;
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn read_value_with_hierarchy(
@@ -631,6 +636,7 @@ impl super::UserPreferences for TomlBackedUserPreferences {
         if self.is_key_write_inhibited(key, hierarchy) {
             return Ok(());
         }
+        let original_document = self.document.borrow().clone();
 
         let mut doc = self.document.borrow_mut();
         let table = match hierarchy {
@@ -654,7 +660,11 @@ impl super::UserPreferences for TomlBackedUserPreferences {
         table.remove(key);
         drop(doc);
 
-        self.flush()
+        if let Err(error) = self.flush() {
+            *self.document.borrow_mut() = original_document;
+            return Err(error);
+        }
+        Ok(())
     }
 }
 

@@ -1,8 +1,12 @@
+use std::path::PathBuf;
+
 use chrono::{DateTime, Utc};
 use settings::Setting as _;
+use settings_value::SettingsValue as _;
 use warp_core::features::FeatureFlag;
 use warp_graphql::object_permissions::AccessLevel;
 use warpui::{App, SingletonEntity};
+use warpui_extras::user_preferences::{Error, UserPreferences};
 
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
 use crate::ai::execution_profiles::{
@@ -21,8 +25,12 @@ use crate::network::NetworkStatus;
 use crate::server::cloud_objects::update_manager::UpdateManager;
 use crate::server::ids::{ServerId, SyncId};
 use crate::server::sync_queue::SyncQueue;
-use crate::settings::{AISettings, PrivacySettings, TuiExecutionProfileConfig};
-use crate::test_util::settings::initialize_settings_for_tests;
+use crate::settings::{
+    AISettings, AgentModeCommandExecutionPredicate, PrivacySettings, TuiExecutionProfileConfig,
+};
+use crate::test_util::settings::{
+    initialize_settings_for_tests, initialize_settings_for_tests_with_public_preferences,
+};
 use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::LaunchMode;
@@ -80,6 +88,10 @@ fn attacker_owned_shared_default_profile(cloud_uid: ServerId) -> ServerAIExecuti
 /// `AIExecutionProfilesModel` and exercise its CloudModel interactions.
 fn install_singletons(app: &mut App, auth_state: AuthStateProvider) {
     initialize_settings_for_tests(app);
+    install_non_settings_singletons(app, auth_state);
+}
+
+fn install_non_settings_singletons(app: &mut App, auth_state: AuthStateProvider) {
     app.add_singleton_model(|_| auth_state);
     app.add_singleton_model(SyncQueue::mock);
     app.add_singleton_model(|_| NetworkStatus::new());
@@ -89,6 +101,22 @@ fn install_singletons(app: &mut App, auth_state: AuthStateProvider) {
     app.add_singleton_model(|_| TemplatableMCPServerManager::default());
     app.add_singleton_model(PrivacySettings::mock);
     app.add_singleton_model(UserWorkspaces::default_mock);
+}
+
+struct FailingPreferences;
+
+impl UserPreferences for FailingPreferences {
+    fn write_value(&self, _key: &str, _value: String) -> Result<(), Error> {
+        Err(Error::Unknown(anyhow::anyhow!("write failed")))
+    }
+
+    fn read_value(&self, _key: &str) -> Result<Option<String>, Error> {
+        Ok(None)
+    }
+
+    fn remove_value(&self, _key: &str) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 fn tui_launch_mode() -> LaunchMode {
@@ -130,6 +158,55 @@ fn tui_initializes_from_local_execution_profile_setting() {
         });
         profile_model.update(&mut app, |model, ctx| {
             assert_eq!(model.create_profile(ctx), None);
+        });
+    });
+}
+
+#[test]
+fn partial_tui_profile_inherits_omitted_legacy_lists() {
+    App::test((), |mut app| async move {
+        install_singletons(&mut app, AuthStateProvider::new_for_test());
+        let legacy_denylist =
+            vec![AgentModeCommandExecutionPredicate::new_regex("legacy-denied .*").unwrap()];
+        let legacy_allowlist =
+            vec![AgentModeCommandExecutionPredicate::new_regex("legacy-allowed .*").unwrap()];
+        let legacy_directory_allowlist = vec![PathBuf::from("/legacy/workspace")];
+        let partial_profile = TuiExecutionProfileConfig::from_file_value(&serde_json::json!({
+            "run_agents": "always_allow",
+        }))
+        .unwrap();
+
+        AISettings::handle(&app).update(&mut app, |settings, ctx| {
+            settings
+                .agent_mode_command_execution_denylist
+                .set_value(legacy_denylist.clone(), ctx)
+                .unwrap();
+            settings
+                .agent_mode_command_execution_allowlist
+                .set_value(legacy_allowlist.clone(), ctx)
+                .unwrap();
+            settings
+                .agent_mode_coding_file_read_allowlist
+                .set_value(legacy_directory_allowlist.clone(), ctx)
+                .unwrap();
+            settings
+                .tui_execution_profile
+                .set_value(partial_profile, ctx)
+                .unwrap();
+        });
+
+        let profile_model =
+            app.add_singleton_model(|ctx| AIExecutionProfilesModel::new(&tui_launch_mode(), ctx));
+
+        profile_model.read(&app, |model, ctx| {
+            let profile = model.default_profile(ctx);
+            assert_eq!(profile.data().run_agents, RunAgentsPermission::AlwaysAllow);
+            assert_eq!(profile.data().command_denylist, legacy_denylist);
+            assert_eq!(profile.data().command_allowlist, legacy_allowlist);
+            assert_eq!(
+                profile.data().directory_allowlist,
+                legacy_directory_allowlist
+            );
         });
     });
 }
@@ -192,6 +269,45 @@ fn tui_profile_edits_persist_to_local_settings() {
                 RunAgentsPermission::AlwaysAllow
             );
             assert!(settings.tui_execution_profile.is_value_explicitly_set());
+        });
+    });
+}
+
+#[test]
+fn tui_profile_edit_rolls_back_when_persistence_fails() {
+    let _guard = FeatureFlag::SettingsFile.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_settings_for_tests_with_public_preferences(
+            &mut app,
+            Box::new(FailingPreferences),
+        );
+        install_non_settings_singletons(&mut app, AuthStateProvider::new_for_test());
+        let profile_model =
+            app.add_singleton_model(|ctx| AIExecutionProfilesModel::new(&tui_launch_mode(), ctx));
+        let profile_id = profile_model.read(&app, |model, _ctx| model.default_profile_id());
+        let original_profile =
+            profile_model.read(&app, |model, ctx| model.default_profile(ctx).data().clone());
+
+        let changed = profile_model.update(&mut app, |model, ctx| {
+            model.edit_profile_internal(
+                profile_id,
+                |profile| {
+                    profile.run_agents = RunAgentsPermission::AlwaysAllow;
+                    true
+                },
+                ctx,
+            )
+        });
+
+        assert!(!changed);
+        profile_model.read(&app, |model, ctx| {
+            assert_eq!(model.default_profile(ctx).data(), &original_profile);
+        });
+        app.read(|ctx| {
+            assert!(!AISettings::as_ref(ctx)
+                .tui_execution_profile
+                .is_value_explicitly_set());
         });
     });
 }

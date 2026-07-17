@@ -304,11 +304,12 @@ impl AIExecutionProfilesModel {
     fn tui_profile_from_settings(ctx: &AppContext) -> AIExecutionProfile {
         let settings = AISettings::as_ref(ctx);
         if settings.tui_execution_profile.is_value_explicitly_set() {
+            let legacy_profile = super::create_default_from_legacy_settings(ctx);
             return settings
                 .tui_execution_profile
                 .value()
                 .clone()
-                .into_profile();
+                .into_profile_with_legacy_fields(legacy_profile);
         }
 
         let mut profile = super::create_default_from_legacy_settings(ctx);
@@ -1352,7 +1353,9 @@ impl AIExecutionProfilesModel {
                         .set_value(TuiExecutionProfileConfig::from_profile(new_profile), ctx)
                 });
                 if let Err(error) = update_result {
+                    *profile = Self::tui_profile_from_settings(ctx);
                     report_error!(error.context("Failed to persist the TUI execution profile"));
+                    return false;
                 }
                 ctx.emit(AIExecutionProfilesModelEvent::ProfileUpdated(profile_id));
                 return true;

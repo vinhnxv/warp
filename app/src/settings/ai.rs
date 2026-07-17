@@ -36,35 +36,84 @@ use crate::auth::AuthStateProvider;
 use crate::settings::PrivacySettings;
 use crate::terminal::CLIAgent;
 use crate::workspaces::user_workspaces::UserWorkspaces;
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct TuiExecutionProfileConfig(AIExecutionProfile);
+#[derive(Debug, Clone, PartialEq)]
+pub struct TuiExecutionProfileConfig {
+    profile: AIExecutionProfile,
+    legacy_field_presence: TuiLegacyFieldPresence,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct TuiLegacyFieldPresence {
+    command_denylist: bool,
+    command_allowlist: bool,
+    directory_allowlist: bool,
+}
 
 impl Default for TuiExecutionProfileConfig {
     fn default() -> Self {
-        Self(AIExecutionProfile {
-            name: "Default (TUI)".to_string(),
-            is_default_profile: true,
-            ..Default::default()
-        })
+        Self {
+            profile: AIExecutionProfile {
+                name: "Default (TUI)".to_string(),
+                is_default_profile: true,
+                ..Default::default()
+            },
+            legacy_field_presence: TuiLegacyFieldPresence::default(),
+        }
     }
 }
 
 impl TuiExecutionProfileConfig {
     pub(crate) fn from_profile(mut profile: AIExecutionProfile) -> Self {
         profile.is_default_profile = true;
-        Self(profile)
+        Self {
+            profile,
+            legacy_field_presence: TuiLegacyFieldPresence {
+                command_denylist: true,
+                command_allowlist: true,
+                directory_allowlist: true,
+            },
+        }
     }
 
     pub(crate) fn profile(&self) -> &AIExecutionProfile {
-        &self.0
+        &self.profile
     }
 
-    pub(crate) fn into_profile(self) -> AIExecutionProfile {
-        self.0
+    pub(crate) fn into_profile_with_legacy_fields(
+        self,
+        legacy_profile: AIExecutionProfile,
+    ) -> AIExecutionProfile {
+        let mut profile = self.profile;
+        if !self.legacy_field_presence.command_denylist {
+            profile.command_denylist = legacy_profile.command_denylist;
+        }
+        if !self.legacy_field_presence.command_allowlist {
+            profile.command_allowlist = legacy_profile.command_allowlist;
+        }
+        if !self.legacy_field_presence.directory_allowlist {
+            profile.directory_allowlist = legacy_profile.directory_allowlist;
+        }
+        profile
     }
 }
 
+impl Serialize for TuiExecutionProfileConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.profile.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TuiExecutionProfileConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        AIExecutionProfile::deserialize(deserializer).map(Self::from_profile)
+    }
+}
 impl settings_value::SettingsValue for TuiExecutionProfileConfig {
     fn to_file_value(&self) -> serde_json::Value {
         serde_json::to_value(TuiExecutionProfileFile::from(self.profile()))
@@ -72,8 +121,16 @@ impl settings_value::SettingsValue for TuiExecutionProfileConfig {
     }
 
     fn from_file_value(value: &serde_json::Value) -> Option<Self> {
+        let object = value.as_object()?;
+        let legacy_field_presence = TuiLegacyFieldPresence {
+            command_denylist: object.contains_key("command_denylist"),
+            command_allowlist: object.contains_key("command_allowlist"),
+            directory_allowlist: object.contains_key("directory_allowlist"),
+        };
         let file_profile = serde_json::from_value::<TuiExecutionProfileFile>(value.clone()).ok()?;
-        Self::try_from(file_profile).ok()
+        let mut config = Self::try_from(file_profile).ok()?;
+        config.legacy_field_presence = legacy_field_presence;
+        Some(config)
     }
 }
 
