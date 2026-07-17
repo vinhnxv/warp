@@ -188,7 +188,7 @@ pub use crate::tui::{
 pub use crate::tui_test_support::register_tui_session_view_test_singletons;
 pub use crate::util::image::{
     infer_mime_type, is_supported_image_mime_type, process_image_for_agent, ProcessImageResult,
-    MAX_IMAGE_COUNT_FOR_QUERY, MIME_SNIFF_BYTES,
+    MAX_IMAGE_COUNT_FOR_QUERY, MAX_IMAGE_SIZE_BYTES, MIME_SNIFF_BYTES,
 };
 pub use crate::util::repo_detection::{detect_possible_git_repo, RepoDetectionSessionType};
 pub use crate::util::time_format::format_elapsed_seconds;
