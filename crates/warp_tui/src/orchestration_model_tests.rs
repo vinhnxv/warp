@@ -6,7 +6,7 @@ use warp::tui_export::{
 };
 use warpui::platform::WindowStyle;
 use warpui::{AddWindowOptions, ModelHandle, ReadModel, SingletonEntity as _, UpdateModel};
-use warpui_core::elements::tui::{TuiBufferExt, TuiRect};
+use warpui_core::elements::tui::{text_width, TuiBufferExt, TuiRect};
 use warpui_core::presenter::tui::TuiPresenter;
 use warpui_core::{App, TuiView as _, TypedActionView as _, WindowId};
 
@@ -439,14 +439,17 @@ fn remote_child_materialization_is_navigable_and_projects_lifecycle() {
                 TuiRect::new(0, 0, 80, 12),
                 ctx,
             );
-            assert!(frame
-                .buffer
-                .to_lines()
+            let lines = frame.buffer.to_lines();
+            let status_line = lines
                 .iter()
-                .any(|line| line.contains("Starting cloud run…")));
-            assert!(frame
-                .buffer
-                .to_lines()
+                .find(|line| line.contains("Starting cloud run…"))
+                .expect("cloud status is visible");
+            let status_content = status_line.trim();
+            assert_eq!(
+                status_line.find(status_content),
+                Some(usize::from((80 - text_width(status_content)).div_ceil(2)))
+            );
+            assert!(lines
                 .iter()
                 .any(|line| line.contains("Shift + ↑ sub-agents")));
         });
@@ -525,12 +528,12 @@ fn remote_child_materialization_is_navigable_and_projects_lifecycle() {
             let snapshot = TuiOrchestrationModel::as_ref(ctx)
                 .snapshot(conversation_id, ctx)
                 .expect("remote child remains navigable");
-            let tab = snapshot
-                .tabs
+            let child = snapshot
+                .children
                 .iter()
-                .find(|tab| tab.conversation_id == conversation_id)
+                .find(|child| child.conversation_id == conversation_id)
                 .expect("remote child has an orchestration tab");
-            assert_eq!(tab.status, ConversationStatus::Success);
+            assert_eq!(child.status, ConversationStatus::Success);
         });
     });
 }

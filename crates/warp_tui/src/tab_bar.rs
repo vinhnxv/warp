@@ -28,7 +28,7 @@ const ELLIPSIS: &str = "...";
 pub struct TuiTab {
     pub key: String,
     pub label: String,
-    leading: Vec<TuiTabLeading>,
+    leading: Option<TuiTabLeading>,
 }
 
 /// Styled text rendered before a tab label.
@@ -44,13 +44,13 @@ impl TuiTab {
         Self {
             key: key.into(),
             label: label.into(),
-            leading: Vec::new(),
+            leading: None,
         }
     }
 
     /// Adds styled text rendered immediately before the tab label.
     pub fn with_leading_text(mut self, text: impl Into<String>, style: TuiStyle) -> Self {
-        self.leading.push(TuiTabLeading {
+        self.leading = Some(TuiTabLeading {
             text: text.into(),
             style,
         });
@@ -502,9 +502,9 @@ fn render_tab(
         tab_style
     };
 
-    let content_count = tab.leading.len() + usize::from(!tab.label.is_empty());
+    let content_count = usize::from(tab.leading.is_some()) + usize::from(!tab.label.is_empty());
     let mut content = TuiFlex::row().with_spacing(u16::from(content_count > 1));
-    for leading in &tab.leading {
+    if let Some(leading) = &tab.leading {
         content.add_child(
             TuiText::new(leading.text.clone())
                 .with_style(leading.style)
@@ -803,10 +803,10 @@ fn minimum_visible_label_width(tab: &TuiTab) -> u16 {
 fn tab_fixed_columns(tab: &TuiTab, padding_columns: u16) -> u16 {
     let leading_columns = tab
         .leading
-        .iter()
+        .as_ref()
         .map(|leading| text_width(&leading.text))
-        .fold(0u16, u16::saturating_add);
-    let content_count = tab.leading.len() + usize::from(!tab.label.is_empty());
+        .unwrap_or_default();
+    let content_count = usize::from(tab.leading.is_some()) + usize::from(!tab.label.is_empty());
     padding_columns
         .saturating_mul(2)
         .saturating_add(leading_columns)
