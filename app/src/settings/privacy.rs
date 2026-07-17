@@ -307,7 +307,12 @@ impl PrivacySettings {
         }
     }
 
-    #[cfg(any(test, feature = "test-util"))]
+    /// Constructor for external test crates compiled with `test-util`.
+    ///
+    /// Dependency crates do not receive `cfg(test)`, so `warp_tui` cannot use
+    /// [`Self::mock`]. Its fixture registers test auth/server providers and
+    /// uses this constructor to avoid reading persisted settings.
+    #[cfg(feature = "test-util")]
     pub fn new_for_test(ctx: &mut ModelContext<Self>) -> Self {
         Self {
             auth_state: AuthStateProvider::as_ref(ctx).get().clone(),

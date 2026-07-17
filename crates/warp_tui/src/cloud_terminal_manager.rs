@@ -1,3 +1,8 @@
+//! Deferred PTY-less terminal ownership for a TUI cloud-child session.
+//!
+//! This is the TUI counterpart of the GUI shared-session viewer's
+//! `TerminalManager::new_deferred`: it retains a real terminal model and
+//! stable surface identity before a shared-session transport is available.
 use std::any::Any;
 use std::sync::Arc;
 

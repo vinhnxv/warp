@@ -38,7 +38,7 @@ fn orchestration_harness_defaults_to_oz_and_parses_known_harnesses() {
 #[test]
 fn prepared_remote_request_matches_gui_wire_semantics() {
     App::test((), |mut app| async move {
-        crate::tui_test_support::register_tui_session_view_test_singletons(&mut app);
+        crate::test_util::terminal::initialize_app_for_terminal_view(&mut app);
         let request = StartAgentRequest {
             id: Default::default(),
             name: "  researcher  ".to_string(),

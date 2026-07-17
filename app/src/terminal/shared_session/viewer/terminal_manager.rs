@@ -12,7 +12,6 @@ use session_sharing_protocol::common::{
 };
 use session_sharing_protocol::sharer::SessionSourceType;
 use session_sharing_protocol::viewer::SessionEndedReason;
-use settings::Setting as _;
 use warp_errors::report_error;
 use warpui::{
     AppContext, ModelContext, ModelHandle, SingletonEntity, ViewContext, ViewHandle,
@@ -42,16 +41,14 @@ use crate::features::FeatureFlag;
 use crate::network::{NetworkStatus, NetworkStatusEvent, NetworkStatusKind};
 use crate::pane_group::pane::DetachType;
 use crate::pane_group::TerminalViewResources;
-use crate::settings::{InputModeSettings, WarpPromptSeparator};
+use crate::settings::WarpPromptSeparator;
 use crate::terminal::cli_agent_sessions::{
     CLIAgentInputState, CLIAgentSessionsModel, CLIAgentSessionsModelEvent,
 };
 use crate::terminal::event_listener::ChannelEventListener;
 use crate::terminal::input::CommandExecutionSource;
-use crate::terminal::model::session::Sessions;
-use crate::terminal::model::ObfuscateSecrets;
+use crate::terminal::local_tty::terminal_manager::TerminalSurfaceInit;
 use crate::terminal::model_events::ModelEventDispatcher;
-use crate::terminal::session_settings::SessionSettings;
 use crate::terminal::shared_session::manager::Manager;
 use crate::terminal::shared_session::permissions_manager::SessionPermissionsManager;
 use crate::terminal::shared_session::shared_handlers::{
@@ -60,12 +57,10 @@ use crate::terminal::shared_session::shared_handlers::{
     build_selected_conversation_update, ActiveRemoteUpdate, RemoteUpdateGuard,
 };
 use crate::terminal::shared_session::SharedSessionStatus;
-use crate::terminal::terminal_manager::{compute_block_size, terminal_colors_list, BlockSpacing};
+use crate::terminal::terminal_manager::BlockSpacing;
 use crate::terminal::view::ambient_agent::is_cloud_agent_pre_first_exchange;
 use crate::terminal::view::ExecuteCommandEvent;
-use crate::terminal::{
-    Event as TerminalViewEvent, TerminalModel, TerminalView, PTY_READS_BROADCAST_CHANNEL_SIZE,
-};
+use crate::terminal::{Event as TerminalViewEvent, TerminalModel, TerminalView};
 use crate::view_components::ToastFlavor;
 
 enum NetworkState {
@@ -207,76 +202,28 @@ impl TerminalManager {
         is_ambient_agent: bool,
         ctx: &mut AppContext,
     ) -> TerminalManagerInit {
-        // Create all the necessary channels we need for communication.
-        let (wakeups_tx, wakeups_rx) = async_channel::unbounded();
-        let (events_tx, events_rx) = async_channel::unbounded();
-        let (executor_command_tx, _executor_command_rx) = async_channel::unbounded();
-
-        // Although the viewer doesn't have a local PTY, it receives PTY bytes from the sharer
-        // over the network. Those bytes are still broadcast through the ChannelEventListener,
-        // so we keep an inactive listener alive for PTY recordings and other consumers.
-        let (pty_reads_tx, pty_reads_rx) =
-            async_broadcast::broadcast(PTY_READS_BROADCAST_CHANNEL_SIZE);
-        let inactive_pty_reads_rx = pty_reads_rx.deactivate();
-
-        let channel_event_proxy = ChannelEventListener::new(wakeups_tx, events_tx, pty_reads_tx);
-
-        let block_spacing = BlockSpacing::for_gui(ctx);
-        let show_memory_stats = block_spacing.show_memory_stats;
-
-        // TODO: we have to figure out what prompt the viewer will see.
-        // For now, just respect the viewer's settings.
-        let honor_ps1 = *SessionSettings::as_ref(ctx).honor_ps1;
-        let input_mode = *InputModeSettings::as_ref(ctx).input_mode.value();
-        let is_inverted = input_mode.is_inverted_blocklist();
-
-        // TODO: use the sharer's size.
-        let sizes = compute_block_size(initial_size, &block_spacing, ctx);
-
-        let model = if is_ambient_agent {
-            TerminalModel::new_for_cloud_mode_shared_session_viewer(
-                sizes,
-                terminal_colors_list(ctx),
-                channel_event_proxy.clone(),
-                ctx.background_executor().clone(),
-                show_memory_stats,
-                honor_ps1,
-                is_inverted,
-                // When viewing a shared session, we don't want to apply our own
-                // secret redaction rules but rather rely on the sharer obfuscating
-                // the contents before reaching us.
-                ObfuscateSecrets::No,
-            )
-        } else {
-            TerminalModel::new_for_shared_session_viewer(
-                sizes,
-                terminal_colors_list(ctx),
-                channel_event_proxy.clone(),
-                ctx.background_executor().clone(),
-                show_memory_stats,
-                honor_ps1,
-                is_inverted,
-                // When viewing a shared session, we don't want to apply our own
-                // secret redaction rules but rather rely on the sharer obfuscating
-                // the contents before reaching us.
-                ObfuscateSecrets::No,
-            )
-        };
-
-        let colors = model.colors();
-        let model = Arc::new(FairMutex::new(model));
-
-        let sessions: ModelHandle<Sessions> =
-            ctx.add_model(|ctx| Sessions::new(executor_command_tx, ctx));
-        let cloned_model = model.clone();
-        let model_events =
-            ctx.add_model(|ctx| ModelEventDispatcher::new(events_rx, sessions.clone(), ctx));
+        let (surface_init, channel_event_proxy) =
+            TerminalSurfaceInit::new_for_shared_session_viewer(
+                initial_size,
+                BlockSpacing::for_gui(ctx),
+                is_ambient_agent,
+                ctx,
+            );
+        let TerminalSurfaceInit {
+            wakeups_rx,
+            model_events,
+            model,
+            sessions,
+            size_info,
+            colors,
+            inactive_pty_reads_rx,
+        } = surface_init;
         // The prompt is initially empty until we receive the update from the server.
         let prompt_type =
             ctx.add_model(|_| PromptType::new_static(vec![], false, WarpPromptSeparator::None));
+        let cloned_model = model.clone();
 
         let view = ctx.add_typed_action_view(window_id, |ctx| {
-            let size_info = cloned_model.lock().block_list().size().to_owned();
             TerminalView::new(
                 resources,
                 wakeups_rx,

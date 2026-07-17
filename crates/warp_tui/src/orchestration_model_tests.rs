@@ -242,14 +242,13 @@ fn github_auth_blocker_keeps_the_remote_session_and_actionable_url() {
         });
         let request = remote_request(parent_conversation_id);
         let (conversation_id, surface_id, cloud_run_state) = app.update(|ctx| {
-            TuiOrchestrationModel::handle(ctx).update(ctx, |model, ctx| {
-                model.materialize_remote_child(
-                    &request,
-                    "cloud-researcher".to_string(),
-                    Harness::Oz,
-                    ctx,
-                )
-            })
+            TuiSessions::materialize_remote_child_for_test(
+                &fixture.sessions,
+                &request,
+                "cloud-researcher".to_string(),
+                Harness::Oz,
+                ctx,
+            )
         });
         app.update(|ctx| {
             TuiOrchestrationModel::handle(ctx).update(ctx, |model, ctx| {
@@ -399,14 +398,13 @@ fn remote_child_materialization_is_navigable_and_projects_lifecycle() {
         });
         let request = remote_request(parent_conversation_id);
         let (conversation_id, surface_id, cloud_run_state) = app.update(|ctx| {
-            TuiOrchestrationModel::handle(ctx).update(ctx, |model, ctx| {
-                model.materialize_remote_child(
-                    &request,
-                    "cloud-researcher".to_string(),
-                    Harness::Oz,
-                    ctx,
-                )
-            })
+            TuiSessions::materialize_remote_child_for_test(
+                &fixture.sessions,
+                &request,
+                "cloud-researcher".to_string(),
+                Harness::Oz,
+                ctx,
+            )
         });
         app.read(|ctx| {
             let history = BlocklistAIHistoryModel::as_ref(ctx);
@@ -462,6 +460,7 @@ fn remote_child_materialization_is_navigable_and_projects_lifecycle() {
                 .view()
                 .clone();
             view.update(ctx, |view, ctx| {
+                view.refresh_orchestration_tab_state(ctx);
                 view.handle_action(&TuiTerminalSessionAction::FocusOrchestrationTabs, ctx);
             });
         });

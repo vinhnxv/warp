@@ -2109,6 +2109,10 @@ impl OrchestrationEventStreamer {
                 .extend(message_ids);
         }
 
+        // The owner-side event service delivers lifecycle notifications to the
+        // orchestrator conversation, but passive remote-child views do not run
+        // their own SSE stream. Broadcast the same canonical status mapping so
+        // frontends retaining those views can project the child's lifecycle.
         for event in &events {
             if event.run_id == self_run_id {
                 continue;

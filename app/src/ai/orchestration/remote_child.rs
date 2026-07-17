@@ -76,7 +76,11 @@ impl PrepareRemoteChildLaunchError {
     }
 }
 
-/// A recoverable reason a cloud agent could not start.
+/// A recoverable startup condition that requires user action.
+///
+/// The GUI represents this as `ambient_agent::Status::NeedsGithubAuth`.
+/// Orchestrated children retain their surface so the user can follow the
+/// remediation link, but the original child launch still resolves as failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CloudAgentStartupBlocker {
     GitHubAuthRequired { message: String, auth_url: String },
@@ -97,6 +101,10 @@ impl CloudAgentStartupBlocker {
 }
 
 /// A terminal cloud-agent startup failure.
+///
+/// The GUI represents these as `ambient_agent::Status::Failed`. Unlike a
+/// blocker, a failure has no remediation action that requires retaining an
+/// optimistic orchestrated-child surface.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CloudAgentStartupFailure {
     Capacity { message: String },
@@ -117,6 +125,10 @@ impl CloudAgentStartupFailure {
 }
 
 /// Shared interpretation of an error returned while starting a cloud agent.
+///
+/// This distinction preserves the existing orchestrated-child contract:
+/// blockers remain visible for user action, while terminal failures are
+/// eligible for failed-launch cleanup.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CloudAgentStartupIssue {
     Blocked(CloudAgentStartupBlocker),

@@ -139,6 +139,7 @@ pub(crate) enum TuiTerminalSessionEvent {
         conversation_id: AIConversationId,
     },
 }
+
 enum TuiTerminalSessionMode {
     Local,
     CloudPlaceholder(ModelHandle<TuiCloudRunState>),
@@ -1311,6 +1312,7 @@ impl TuiTerminalSessionView {
             controller.send_agent_query_in_conversation(prompt, conversation_id, ctx);
         });
     }
+
     /// Builds a read-only deferred cloud session over the normal terminal surface plumbing.
     pub(crate) fn new_cloud(
         surface_init: TerminalSurfaceInit,
