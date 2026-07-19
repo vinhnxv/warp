@@ -117,6 +117,7 @@ pub(crate) use passive_suggestions::{
     MaaPassiveSuggestionsModel, PassiveSuggestionsModels,
 };
 pub use permissions::{BlocklistAIPermissions, CommandExecutionPermissionAllowedReason};
+pub use persistence::build_ai_query_upsert_event;
 #[cfg_attr(target_family = "wasm", allow(unused))]
 pub(crate) use persistence::PersistedAIInputType;
 pub(crate) use persistence::{PersistedAIInput, SerializedBlockListItem};

@@ -10,4 +10,5 @@
 
 pub mod view;
 
+pub(crate) use view::TuiInputMenus;
 pub use view::{init, TuiInputView, TuiInputViewEvent};

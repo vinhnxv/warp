@@ -149,6 +149,22 @@ pub enum TuiInputAction {
 // ─────────────────────────────────────────────────────────────────────────────
 // View
 // ─────────────────────────────────────────────────────────────────────────────
+pub(crate) struct TuiInputMenus {
+    inline_menus: Vec<TuiInlineMenu>,
+    prompt_history_menu: ModelHandle<TuiPromptHistoryMenuModel>,
+}
+
+impl TuiInputMenus {
+    pub(crate) fn new(
+        inline_menus: Vec<TuiInlineMenu>,
+        prompt_history_menu: ModelHandle<TuiPromptHistoryMenuModel>,
+    ) -> Self {
+        Self {
+            inline_menus,
+            prompt_history_menu,
+        }
+    }
+}
 
 /// The `TuiView`-implementing entry point for the TUI prompt input.
 pub struct TuiInputView {
@@ -206,8 +222,7 @@ impl TuiInputView {
         model: ModelHandle<CodeEditorModel>,
         input_mode: ModelHandle<BlocklistAIInputModel>,
         suggestions_mode: ModelHandle<TuiInputSuggestionsModeModel>,
-        inline_menus: Vec<TuiInlineMenu>,
-        prompt_history_menu: ModelHandle<TuiPromptHistoryMenuModel>,
+        menus: TuiInputMenus,
         transcript: ViewHandle<TuiTranscriptView>,
         can_move_focus_up: impl Fn(&AppContext) -> bool + 'static,
         ctx: &mut ViewContext<Self>,
@@ -216,8 +231,7 @@ impl TuiInputView {
             model,
             input_mode,
             suggestions_mode,
-            inline_menus,
-            prompt_history_menu,
+            menus,
             Some(transcript),
             can_move_focus_up,
             ctx,
@@ -229,8 +243,7 @@ impl TuiInputView {
         model: ModelHandle<CodeEditorModel>,
         input_mode: ModelHandle<BlocklistAIInputModel>,
         suggestions_mode: ModelHandle<TuiInputSuggestionsModeModel>,
-        inline_menus: Vec<TuiInlineMenu>,
-        prompt_history_menu: ModelHandle<TuiPromptHistoryMenuModel>,
+        menus: TuiInputMenus,
         can_move_focus_up: impl Fn(&AppContext) -> bool + 'static,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
@@ -238,8 +251,7 @@ impl TuiInputView {
             model,
             input_mode,
             suggestions_mode,
-            inline_menus,
-            prompt_history_menu,
+            menus,
             None,
             can_move_focus_up,
             ctx,
@@ -250,12 +262,15 @@ impl TuiInputView {
         model: ModelHandle<CodeEditorModel>,
         input_mode: ModelHandle<BlocklistAIInputModel>,
         suggestions_mode: ModelHandle<TuiInputSuggestionsModeModel>,
-        inline_menus: Vec<TuiInlineMenu>,
-        prompt_history_menu: ModelHandle<TuiPromptHistoryMenuModel>,
+        menus: TuiInputMenus,
         transcript: Option<ViewHandle<TuiTranscriptView>>,
         can_move_focus_up: impl Fn(&AppContext) -> bool + 'static,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
+        let TuiInputMenus {
+            inline_menus,
+            prompt_history_menu,
+        } = menus;
         ctx.subscribe_to_model(&model, |_, _, event, ctx| {
             if matches!(event, CodeEditorModelEvent::ContentChanged { .. }) {
                 ctx.notify();

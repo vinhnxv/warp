@@ -79,8 +79,8 @@ pub use crate::ai::blocklist::{
     apply_child_agent_model_override, prepare_local_oz_child_launch, PreparedLocalOzChildLaunch,
 };
 pub use crate::ai::blocklist::{
-    block_context_from_terminal_model, inherit_child_agent_settings, AIActionStatus,
-    AskUserQuestionExecutor, BlocklistAIActionEvent, BlocklistAIActionModel,
+    block_context_from_terminal_model, build_ai_query_upsert_event, inherit_child_agent_settings,
+    AIActionStatus, AskUserQuestionExecutor, BlocklistAIActionEvent, BlocklistAIActionModel,
     BlocklistAIContextModel, BlocklistAIController, BlocklistAIInputModel, InputConfig,
     InputModePolicy, InputModePolicyHandle, InputType, InputTypeAutoDetectionSource,
     PolicyConfigUpdate, RequestFileEditsExecutor, RunAgentsExecutor, RunAgentsExecutorEvent,
@@ -121,6 +121,7 @@ pub use crate::code_review::git_repo_model::{
     GitRepoModels, GitRepoStatusModel, GitStatusMetadata,
 };
 pub use crate::completer::SessionContext;
+pub use crate::persistence::PersistenceWriter;
 pub use crate::search::slash_command_menu::static_commands::commands::{
     self as slash_commands, COMMAND_REGISTRY,
 };

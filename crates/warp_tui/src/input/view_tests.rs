@@ -32,7 +32,7 @@ use warpui_core::{
 };
 
 use super::{
-    input_keymap_context, TuiInputAction, TuiInputView, TuiInputViewEvent,
+    input_keymap_context, TuiInputAction, TuiInputMenus, TuiInputView, TuiInputViewEvent,
     INPUT_HANDLES_ESCAPE_FLAG,
 };
 use crate::editor_element::{TuiEditorAction, TuiEditorElement};
@@ -180,8 +180,7 @@ fn build_view_with_prompt_history(
                 input_model,
                 input_mode,
                 suggestions_mode,
-                vec![inline_menu],
-                prompt_history_menu,
+                TuiInputMenus::new(vec![inline_menu], prompt_history_menu),
                 |_| false,
                 ctx,
             )
@@ -393,8 +392,7 @@ fn build_view(ctx: &mut AppContext) -> ViewHandle<TuiInputView> {
                 input_model,
                 input_mode,
                 suggestions_mode,
-                Vec::new(),
-                prompt_history_menu,
+                TuiInputMenus::new(Vec::new(), prompt_history_menu),
                 |_| false,
                 ctx,
             )
@@ -432,8 +430,7 @@ fn build_view_with_conversation_menu(
                 input_model,
                 input_mode,
                 suggestions_mode,
-                vec![inline_menu_for_view],
-                prompt_history_menu,
+                TuiInputMenus::new(vec![inline_menu_for_view], prompt_history_menu),
                 |_| false,
                 ctx,
             )
@@ -486,8 +483,7 @@ fn build_view_with_inline_menu(
                 input_model,
                 input_mode,
                 suggestions_mode,
-                vec![inline_menu],
-                prompt_history_menu,
+                TuiInputMenus::new(vec![inline_menu], prompt_history_menu),
                 |_| false,
                 ctx,
             )
@@ -530,8 +526,7 @@ fn build_view_with_model_menu(
                 input_model,
                 input_mode,
                 suggestions_mode,
-                vec![inline_menu],
-                prompt_history_menu,
+                TuiInputMenus::new(vec![inline_menu], prompt_history_menu),
                 |_| false,
                 ctx,
             )
@@ -739,8 +734,7 @@ fn shift_up_requests_focus_above_only_on_first_row_without_selection() {
                         model,
                         input_mode,
                         suggestions_mode,
-                        Vec::new(),
-                        prompt_history_menu,
+                        TuiInputMenus::new(Vec::new(), prompt_history_menu),
                         move |_| available_for_view.get(),
                         ctx,
                     )

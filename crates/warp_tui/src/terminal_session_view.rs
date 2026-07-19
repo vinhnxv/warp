@@ -13,8 +13,8 @@ use parking_lot::FairMutex;
 use warp::editor::{CodeEditorModel, CodeEditorModelEvent};
 use warp::settings::{AISettings, AISettingsChangedEvent};
 use warp::tui_export::{
-    block_context_from_terminal_model, build_slash_command_mixer, detect_possible_git_repo,
-    export_conversation_markdown, prepare_conversation_block_restoration,
+    block_context_from_terminal_model, build_ai_query_upsert_event, build_slash_command_mixer,
+    detect_possible_git_repo, export_conversation_markdown, prepare_conversation_block_restoration,
     record_saved_prompt_accepted, record_static_slash_command_accepted, saved_prompt_text_for_id,
     slash_command_selection_behavior, throttle, AIAgentActionId, AIAgentActionResultType,
     AIAgentContext, AIAgentPtyWriteMode, AIConversation, AIConversationId,
@@ -28,14 +28,14 @@ use warp::tui_export::{
     ConversationSelection, ConversationSelectionHandle, ConversationUsageTotals,
     ExecuteCommandEvent, GetRelevantFilesController, GitRepoModels, GitRepoStatusModel,
     GitStatusMetadata, LLMId, LLMPreferences, LLMPreferencesEvent, ModelEvent,
-    ParsedSlashCommandInput, PtyIntent, PtyIntentEvent, RepoDetectionSessionType,
-    RepoDetectionSource, ServerConversationToken, ShellCommandExecutorEvent, SizeInfo, SizeUpdate,
-    SkillReference, SlashCommandDataSource as _, SlashCommandSelectionBehavior,
-    StartAgentExecutorEvent, StartAgentRequest, StaticCommand, TerminalModel, TerminalSurface,
-    TerminalSurfaceInit, TranscriptScope, TuiMcpAction, TuiMcpManager, TuiSlashCommand,
-    TuiSlashCommandDataSource, TuiSlashCommandDataSourceArgs, TuiZeroStateDataSource,
-    UserTakeOverReason, COMMAND_REGISTRY, LOCAL_SKILLS_REMOTE_EXECUTION_ERROR_MESSAGE,
-    WAKEUP_THROTTLE_PERIOD,
+    ParsedSlashCommandInput, PersistenceWriter, PtyIntent, PtyIntentEvent,
+    RepoDetectionSessionType, RepoDetectionSource, ServerConversationToken,
+    ShellCommandExecutorEvent, SizeInfo, SizeUpdate, SkillReference, SlashCommandDataSource as _,
+    SlashCommandSelectionBehavior, StartAgentExecutorEvent, StartAgentRequest, StaticCommand,
+    TerminalModel, TerminalSurface, TerminalSurfaceInit, TranscriptScope, TuiMcpAction,
+    TuiMcpManager, TuiSlashCommand, TuiSlashCommandDataSource, TuiSlashCommandDataSourceArgs,
+    TuiZeroStateDataSource, UserTakeOverReason, COMMAND_REGISTRY,
+    LOCAL_SKILLS_REMOTE_EXECUTION_ERROR_MESSAGE, WAKEUP_THROTTLE_PERIOD,
 };
 use warp_core::features::FeatureFlag;
 use warp_core::settings::Setting;
@@ -63,7 +63,7 @@ use crate::editor_interaction::TuiEditorCommand;
 use crate::exit_confirmation::{ExitConfirmation, CTRL_C_EXIT_WINDOW};
 use crate::inline_menu::{active_inline_menu, TuiInlineMenu, MAX_INLINE_MENU_ROWS};
 use crate::input::view::TuiInputAction;
-use crate::input::{TuiInputView, TuiInputViewEvent};
+use crate::input::{TuiInputMenus, TuiInputView, TuiInputViewEvent};
 use crate::input_mode_policy::{self, TuiInputModePolicy};
 use crate::input_suggestions_mode::TuiInputSuggestionsModeModel;
 use crate::keybindings::{
@@ -950,8 +950,7 @@ impl TuiTerminalSessionView {
                 input_editor_model,
                 input_mode_for_input_view,
                 suggestions_mode_for_input,
-                inline_menus_for_input,
-                prompt_history_menu_for_input,
+                TuiInputMenus::new(inline_menus_for_input, prompt_history_menu_for_input),
                 transcript_for_input,
                 move |ctx| orchestration_tab_bar_for_input.as_ref(ctx).has_tabs(),
                 ctx,
@@ -1816,6 +1815,21 @@ impl TuiTerminalSessionView {
             .is_some_and(|id| id != self.terminal_surface_id)
         {
             return;
+        }
+        if let Some(persistence_event) =
+            build_ai_query_upsert_event(event, self.terminal_surface_id, false, ctx)
+        {
+            if let Some(model_event_sender) = PersistenceWriter::handle(ctx).as_ref(ctx).sender() {
+                let _ = ctx.spawn(
+                    async move { model_event_sender.send(persistence_event) },
+                    |_, result, _| {
+                        if let Err(error) = result {
+                            report_error!(anyhow::Error::new(error)
+                                .context("Error sending TUI upsert AI query event"));
+                        }
+                    },
+                );
+            }
         }
         if matches!(
             event,
