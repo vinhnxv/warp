@@ -274,6 +274,10 @@ pub enum WorkspaceAction {
     /// Repo mode: open a picker menu listing registry entries (R13; works with
     /// the vertical tabs panel closed).
     SelectRepoModePicker,
+    /// Repo mode: open a plain terminal detached from every repo entry
+    /// (clears the selection so the tab neither joins a repo group nor starts
+    /// at an entry root).
+    NewRepoModeLooseTab,
     AddDefaultTab,
     AddTerminalTab {
         hide_homepage: bool,
@@ -993,6 +997,7 @@ impl WorkspaceAction {
             | SelectRepoModeEntry(_)
             | ToggleRepoModeEntryMenu { .. }
             | SelectRepoModePicker
+            | NewRepoModeLooseTab
             | ToggleTabColor { .. }
             | ToggleTabGroupColor { .. }
             | AddDefaultTab

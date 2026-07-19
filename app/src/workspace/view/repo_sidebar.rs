@@ -2,8 +2,9 @@
 //!
 //! Renders a unified tree: one row per registry entry, with the selected
 //! repo's tabs nested directly beneath its row (accordion — selection is
-//! expansion) and tabs not bound to any repo group listed below a divider so
-//! they stay reachable regardless of selection.
+//! expansion). Below a divider, a "Terminals" section lists tabs not tied to
+//! any registry entry and offers a "+ New" button that opens a plain terminal
+//! detached from every repo.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -49,6 +50,8 @@ const BRANCH_CACHE_TTL: Duration = Duration::from_secs(5);
 #[derive(Clone, Default)]
 pub(super) struct RepoSidebarState {
     pub add_button: MouseStateHandle,
+    /// Hover state for the "+ New" button on the Terminals section header.
+    pub new_terminal_button: MouseStateHandle,
     pub entry_rows: RefCell<HashMap<String, MouseStateHandle>>,
     /// Hover state for the clickable PR badge on each repo row.
     pub pr_badges: RefCell<HashMap<String, MouseStateHandle>>,
@@ -73,10 +76,43 @@ pub(super) fn render_repo_header(state: &RepoSidebarState, app: &AppContext) -> 
                 )
                 .finish(),
         )
-        .with_child(render_add_button(state.add_button.clone(), appearance))
+        .with_child(render_header_button(
+            "+ Add",
+            state.add_button.clone(),
+            WorkspaceAction::AddLocalRepositoryOrFolder,
+            appearance,
+        ))
         .finish();
     Container::new(header)
         .with_padding(Padding::uniform(8.).with_bottom(4.))
+        .finish()
+}
+
+/// "Terminals" section header with a "+ New" button that opens a plain
+/// terminal detached from every repo entry.
+fn render_terminals_header(
+    mouse: MouseStateHandle,
+    app_appearance: &Appearance,
+) -> Box<dyn Element> {
+    let theme = app_appearance.theme();
+    let header = Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_child(
+            Text::new("Terminals", app_appearance.ui_font_family(), 11.)
+                .with_color(theme.sub_text_color(theme.background()).into())
+                .finish(),
+        )
+        .with_child(render_header_button(
+            "+ New",
+            mouse,
+            WorkspaceAction::NewRepoModeLooseTab,
+            app_appearance,
+        ))
+        .finish();
+    Container::new(header)
+        .with_padding(Padding::uniform(8.).with_top(0.).with_bottom(4.))
         .finish()
 }
 
@@ -157,18 +193,40 @@ pub(super) fn render_repo_tree(
         // flattened (the row already names the context) and lightly indented.
         if let Some(members) = members {
             column = column.with_child(
-                Container::new(render_groups(state, workspace, Some(members), true, app))
-                    .with_padding(Padding::uniform(0.).with_left(NESTED_TABS_INDENT))
-                    .finish(),
+                Container::new(render_groups(
+                    state,
+                    workspace,
+                    Some(members),
+                    true,
+                    true,
+                    app,
+                ))
+                .with_padding(Padding::uniform(0.).with_left(NESTED_TABS_INDENT))
+                .finish(),
             );
         }
     }
 
-    // Loose tabs (cwd outside every registry entry) stay visible below the
-    // tree regardless of selection; user-created groups keep their chrome.
+    // "Terminals" section: loose tabs (cwd outside every registry entry) stay
+    // visible below the tree regardless of selection, as plain terminal rows —
+    // repo-bound group chrome is stripped (a repo group's tab that cd'd away
+    // still carries its group binding), while user-created groups keep theirs.
+    // The header is always shown so its "+ New" button remains the way to open
+    // a terminal detached from every repo.
+    column = column.with_child(render_divider(appearance));
+    column = column.with_child(render_terminals_header(
+        sidebar.new_terminal_button.clone(),
+        appearance,
+    ));
     if !loose.is_empty() {
-        column = column.with_child(render_divider(appearance));
-        column = column.with_child(render_groups(state, workspace, Some(loose), false, app));
+        column = column.with_child(render_groups(
+            state,
+            workspace,
+            Some(loose),
+            true,
+            false,
+            app,
+        ));
     }
 
     Container::new(column.finish())
@@ -197,7 +255,13 @@ fn render_divider(app_appearance: &Appearance) -> Box<dyn Element> {
     .finish()
 }
 
-fn render_add_button(mouse: MouseStateHandle, app_appearance: &Appearance) -> Box<dyn Element> {
+/// Small accent text button used on section headers ("+ Add", "+ New").
+fn render_header_button(
+    label: &'static str,
+    mouse: MouseStateHandle,
+    action: WorkspaceAction,
+    app_appearance: &Appearance,
+) -> Box<dyn Element> {
     let theme = app_appearance.theme();
     let accent = theme.accent();
     let font = app_appearance.ui_font_family();
@@ -208,7 +272,7 @@ fn render_add_button(mouse: MouseStateHandle, app_appearance: &Appearance) -> Bo
             ThemeFill::Solid(ColorU::transparent_black())
         };
         Container::new(
-            Text::new("+ Add", font, 11.)
+            Text::new(label, font, 11.)
                 .with_color(accent.into())
                 .finish(),
         )
@@ -216,8 +280,8 @@ fn render_add_button(mouse: MouseStateHandle, app_appearance: &Appearance) -> Bo
         .with_background(background)
         .finish()
     })
-    .on_click(|ctx, _, _| {
-        ctx.dispatch_typed_action(WorkspaceAction::AddLocalRepositoryOrFolder);
+    .on_click(move |ctx, _, _| {
+        ctx.dispatch_typed_action(action.clone());
     })
     .finish()
 }

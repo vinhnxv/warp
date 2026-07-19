@@ -167,6 +167,46 @@ impl Workspace {
         ctx.notify();
     }
 
+    /// Collapses the repo selection when the user focuses a tab that lives
+    /// outside the selected repo (e.g. a loose terminal below the divider), so
+    /// the filtered tab strip always contains the active tab.
+    pub(super) fn sync_repo_mode_selection_to_active_tab(&mut self, ctx: &mut ViewContext<Self>) {
+        if !Self::repo_mode_enabled() {
+            return;
+        }
+        let Some(visible) = self.repo_mode_visible_tab_indices(ctx) else {
+            return;
+        };
+        if !visible.contains(&self.active_tab_index) {
+            self.selected_repo_root = None;
+            ctx.notify();
+        }
+    }
+
+    /// Opens a plain terminal detached from every repo entry: clearing the
+    /// selection first means the new tab neither joins a repo group (R6) nor
+    /// starts at an entry root. The tab starts at the user's home directory
+    /// explicitly — the stock new-tab flow can inherit the previous session's
+    /// cwd, which would classify the tab under that repo instead of the
+    /// Terminals section.
+    pub(super) fn new_repo_mode_loose_tab(&mut self, ctx: &mut ViewContext<Self>) {
+        if !Self::repo_mode_enabled() {
+            return;
+        }
+        self.selected_repo_root = None;
+        self.add_tab_with_pane_layout(
+            PanesLayout::SingleTerminal(Box::new(NewTerminalOptions {
+                initial_directory: dirs::home_dir(),
+                hide_homepage: true,
+                ..Default::default()
+            })),
+            Arc::new(HashMap::new()),
+            None,
+            ctx,
+        );
+        ctx.notify();
+    }
+
     pub(super) fn select_repo_mode_entry(&mut self, path: &Path, ctx: &mut ViewContext<Self>) {
         if !Self::repo_mode_enabled() {
             return;
@@ -373,11 +413,11 @@ impl Workspace {
     /// Live partition of tabs across registry entries for display: a tab
     /// belongs to the entry whose path is the deepest ancestor of its focused
     /// terminal's local cwd, so a terminal that cd's between repos follows
-    /// reality rather than the group it was opened under. While the cwd is
-    /// unknown (sessions still bootstrapping after restore, non-terminal
-    /// tabs), the bound group's repo root is used as a fallback. Tabs matching
-    /// no entry land in the second (loose) bucket. Group membership itself is
-    /// not mutated.
+    /// reality rather than the group it was opened under. While a terminal
+    /// tab's cwd is unknown (sessions still bootstrapping after restore), the
+    /// bound group's repo root is used as a fallback. Tabs with no terminal at
+    /// all (Settings, notebooks, ...) never have a cwd and always land loose,
+    /// as do tabs matching no entry. Group membership itself is not mutated.
     pub(super) fn repo_mode_tab_partition(
         &self,
         entry_paths: &[PathBuf],
@@ -387,13 +427,13 @@ impl Workspace {
         let mut loose = Vec::new();
         for (index, tab) in self.tabs.iter().enumerate() {
             let pane_group = tab.pane_group.as_ref(app);
+            let terminal_views = pane_group.terminal_views(app);
             let cwd = pane_group
                 .active_session_view(app)
                 .and_then(|tv| tv.as_ref(app).pwd_if_local(app))
                 .or_else(|| {
-                    pane_group
-                        .terminal_views(app)
-                        .into_iter()
+                    terminal_views
+                        .iter()
                         .find_map(|tv| tv.as_ref(app).pwd_if_local(app))
                 })
                 .map(PathBuf::from);
@@ -403,6 +443,9 @@ impl Workspace {
                     .filter(|p| cwd.starts_with(p))
                     .max_by_key(|p| p.as_os_str().len())
                     .cloned(),
+                // No terminal — the tab can never report a cwd, so the group
+                // fallback (meant for booting sessions) does not apply.
+                None if terminal_views.is_empty() => None,
                 None => tab
                     .group_id
                     .and_then(|gid| self.tab_groups.get(&gid))

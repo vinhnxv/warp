@@ -24022,6 +24022,7 @@ impl TypedActionView for Workspace {
                 self.toggle_repo_mode_entry_menu(path, *position, ctx)
             }
             SelectRepoModePicker => self.open_repo_mode_picker_menu(ctx),
+            NewRepoModeLooseTab => self.new_repo_mode_loose_tab(ctx),
             AddDefaultTab => {
                 let effective_mode = AISettings::as_ref(ctx).default_session_mode(ctx);
                 match effective_mode {
@@ -25418,6 +25419,7 @@ impl TypedActionView for Workspace {
             }
             FocusPane(locator) => {
                 self.focus_pane(*locator, ctx);
+                self.sync_repo_mode_selection_to_active_tab(ctx);
             }
             StartNewConversation { terminal_view_id } => {
                 Self::set_pending_query_state_for_terminal_view(

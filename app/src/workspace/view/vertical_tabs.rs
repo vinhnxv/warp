@@ -411,6 +411,7 @@ fn render_pane_row_element(
         pane_rename_editor: _,
         is_pinned,
         container_is_hovered,
+        in_repo_accordion: _,
     } = props;
     let is_selected = is_active_tab && is_focused;
     let show_pin = FeatureFlag::PinnedTabs.is_enabled() && is_pinned && !container_is_hovered;
@@ -858,6 +859,10 @@ struct PaneProps<'a> {
     /// True when the tab container containing this pane is hovered.
     /// The pin icon is hidden when a tab is hovered.
     container_is_hovered: bool,
+    /// True when the row renders nested under a repo row in the Repositories
+    /// tree. The repo row already shows directory/branch/PR/diff context, so
+    /// terminal rows collapse to just their command/conversation line.
+    in_repo_accordion: bool,
 }
 
 struct PaneRowState {
@@ -1664,7 +1669,7 @@ fn render_vertical_tabs_panel(
     let scroll_content: Box<dyn Element> = if Workspace::repo_mode_enabled() {
         super::repo_sidebar::render_repo_tree(state, workspace, app)
     } else {
-        render_groups(state, workspace, None, false, app)
+        render_groups(state, workspace, None, false, false, app)
     };
 
     let scrollable_groups = ClippedScrollable::vertical(
@@ -1765,11 +1770,16 @@ fn render_vertical_tabs_panel(
 /// (None = all tabs). `flatten_repo_groups` strips group chrome from repo-bound
 /// groups — used when the surrounding UI (the Repositories tree) already names
 /// the context; user-created (non-repo) groups keep their chrome.
+/// `in_repo_accordion` additionally collapses terminal rows to their
+/// command/conversation line (nested under a repo row that already shows the
+/// directory/branch/PR context); the Terminals section flattens without it so
+/// its rows keep the stock layout.
 pub(super) fn render_groups(
     state: &VerticalTabsPanelState,
     workspace: &Workspace,
     repo_filter: Option<Vec<usize>>,
     flatten_repo_groups: bool,
+    in_repo_accordion: bool,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(app);
@@ -1995,6 +2005,7 @@ pub(super) fn render_groups(
                                 insert_after_index: None,
                             },
                             false, // in_tab_group
+                            in_repo_accordion,
                             app,
                         ));
                     }
@@ -2013,6 +2024,7 @@ pub(super) fn render_groups(
                     members,
                     last_member_after_index,
                     is_any_pane_dragging,
+                    in_repo_accordion,
                     app,
                 ));
                 i += run_len;
@@ -2035,6 +2047,7 @@ pub(super) fn render_groups(
                         insert_after_index,
                     },
                     false, // in_tab_group
+                    in_repo_accordion,
                     app,
                 ));
                 i += 1;
@@ -2088,6 +2101,7 @@ pub(super) fn render_groups(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn render_tab_group(
     state: &VerticalTabsPanelState,
     workspace: &Workspace,
@@ -2096,6 +2110,7 @@ fn render_tab_group(
     filtered_pane_ids: Option<&[PaneId]>,
     drag_state: TabGroupDragState,
     in_tab_group: bool,
+    in_repo_accordion: bool,
     app: &AppContext,
 ) -> Box<dyn Element> {
     render_tab_group_internal(
@@ -2107,6 +2122,7 @@ fn render_tab_group(
         drag_state,
         false,
         in_tab_group,
+        in_repo_accordion,
         app,
     )
 }
@@ -2121,6 +2137,7 @@ fn render_tab_group_internal(
     drag_state: TabGroupDragState,
     for_drag_ghost: bool,
     in_tab_group: bool,
+    in_repo_accordion: bool,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(app);
@@ -2271,7 +2288,7 @@ fn render_tab_group_internal(
                     }
                     handles[..branch_line_count].to_vec()
                 };
-                let Some(pane_props) = PaneProps::new(
+                let Some(mut pane_props) = PaneProps::new(
                     pane_group,
                     *pane_id,
                     pane_group_id,
@@ -2300,6 +2317,7 @@ fn render_tab_group_internal(
                 ) else {
                     return Empty::new().finish();
                 };
+                pane_props.in_repo_accordion = in_repo_accordion;
                 rows.add_child(render_summary_tab_item(
                     pane_props,
                     summary
@@ -2359,6 +2377,7 @@ fn render_tab_group_internal(
                 ) else {
                     continue;
                 };
+                pane_props.in_repo_accordion = in_repo_accordion;
                 if stack_panes_flush {
                     pane_props.stack_position = PaneRowStackPosition::Flush {
                         is_first: row_idx == 0,
@@ -2756,6 +2775,7 @@ pub(crate) fn render_tab_group_for_drag_ghost(
         drag_state,
         true,  // for_drag_ghost
         false, // in_tab_group
+        false, // in_repo_accordion
         app,
     )
 }
@@ -3017,6 +3037,7 @@ fn render_grouped_tabs_header(
 /// Renders a tab group: pane-like header followed by indented member rows. A colored group tints the
 /// container (and header) with the group's color as a backdrop; member rows carry their own colors and
 /// layer on top. An uncolored group only paints its background on hover or when a member is active.
+#[allow(clippy::too_many_arguments)]
 fn render_grouped_tab_container(
     state: &VerticalTabsPanelState,
     workspace: &Workspace,
@@ -3024,6 +3045,7 @@ fn render_grouped_tab_container(
     members: &[(usize, Option<Vec<PaneId>>)],
     last_member_after_index: Option<usize>,
     is_any_pane_dragging: bool,
+    in_repo_accordion: bool,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(app);
@@ -3143,6 +3165,7 @@ fn render_grouped_tab_container(
                     filtered_pane_ids.as_deref(),
                     drag_state,
                     true,
+                    in_repo_accordion,
                     app,
                 );
                 content.add_child(
@@ -3471,13 +3494,16 @@ fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
     );
 
     // Top-align the icon when there are multiple lines of content so it sits next to
-    // the first line; center it for single-line rows (Settings, Notebook with no subtitle, etc.).
-    let icon_alignment =
-        if matches!(props.typed, TypedPane::Terminal(_)) || !effective_subtitle.is_empty() {
-            CrossAxisAlignment::Start
-        } else {
-            CrossAxisAlignment::Center
-        };
+    // the first line; center it for single-line rows (Settings, Notebook with no subtitle,
+    // repo-accordion terminals, etc.).
+    let icon_alignment = if (matches!(props.typed, TypedPane::Terminal(_))
+        && !props.in_repo_accordion)
+        || !effective_subtitle.is_empty()
+    {
+        CrossAxisAlignment::Start
+    } else {
+        CrossAxisAlignment::Center
+    };
 
     let text_content = if let TypedPane::Terminal(terminal_pane) = &props.typed {
         render_terminal_row_content(
@@ -3916,6 +3942,7 @@ impl<'a> PaneProps<'a> {
             pane_rename_editor,
             is_pinned,
             container_is_hovered,
+            in_repo_accordion: false,
         })
     }
 
@@ -4372,6 +4399,30 @@ fn render_terminal_row_content(
     let theme = appearance.theme();
     let main_text_color = theme.main_text_color(theme.background());
     let sub_text_color = theme.sub_text_color(theme.background());
+
+    // Repo accordion rows: the repo row above already shows the directory,
+    // branch, PR link, and diff stats, so the terminal row keeps only its
+    // command/conversation line.
+    if props.in_repo_accordion {
+        let first_line = render_pane_title_slot(
+            props,
+            || {
+                render_terminal_primary_line_for_view(
+                    terminal_view,
+                    appearance,
+                    main_text_color,
+                    app,
+                )
+            },
+            12.,
+            main_text_color,
+            ClipConfig::ellipsis(),
+            appearance,
+            app,
+        );
+        return with_unread_indicator(first_line, has_unread_activity(&props.typed, app), theme);
+    }
+
     let primary_info = *TabSettings::as_ref(app).vertical_tabs_primary_info.value();
 
     let title_text = terminal_view.terminal_title_from_shell();
@@ -4469,21 +4520,8 @@ fn render_terminal_row_content(
         }
     };
 
-    let first_line_element = if has_unread_activity(&props.typed, app) {
-        Flex::row()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
-            .with_child(Shrinkable::new(1., first_line).finish())
-            .with_child(
-                Container::new(render_title_indicator(theme))
-                    .with_margin_left(4.)
-                    .finish(),
-            )
-            .finish()
-    } else {
-        first_line
-    };
+    let first_line_element =
+        with_unread_indicator(first_line, has_unread_activity(&props.typed, app), theme);
 
     let mut content = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
@@ -4505,6 +4543,28 @@ fn render_terminal_row_content(
         .finish(),
     );
     content.finish()
+}
+
+/// Appends the unread-activity dot to a row's first line when needed.
+fn with_unread_indicator(
+    first_line: Box<dyn Element>,
+    has_unread: bool,
+    theme: &WarpTheme,
+) -> Box<dyn Element> {
+    if !has_unread {
+        return first_line;
+    }
+    Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+        .with_child(Shrinkable::new(1., first_line).finish())
+        .with_child(
+            Container::new(render_title_indicator(theme))
+                .with_margin_left(4.)
+                .finish(),
+        )
+        .finish()
 }
 
 fn chip_entrypoint_for_granularity(
@@ -4780,86 +4840,90 @@ fn render_summary_tab_item(
         text_col.add_child(title_region);
     }
 
-    // Working-directory region.
-    let visible_directory_count = summary
-        .working_directories
-        .len()
-        .min(MAX_VISIBLE_WORKING_DIRECTORIES);
-    for (idx, working_dir) in summary
-        .working_directories
-        .iter()
-        .take(MAX_VISIBLE_WORKING_DIRECTORIES)
-        .enumerate()
-    {
-        let margin = if idx == 0 {
-            REGION_GAP
-        } else {
-            INTRA_REGION_GAP
-        };
-        text_col.add_child(
-            Container::new(render_text_line(
-                working_dir,
-                sub_text_color,
-                ClipConfig::start(),
-                appearance,
-            ))
-            .with_margin_top(margin)
-            .finish(),
+    // Repo accordion rows keep only the title region: the repo row above
+    // already carries the directory/branch/PR context.
+    if !props.in_repo_accordion {
+        // Working-directory region.
+        let visible_directory_count = summary
+            .working_directories
+            .len()
+            .min(MAX_VISIBLE_WORKING_DIRECTORIES);
+        for (idx, working_dir) in summary
+            .working_directories
+            .iter()
+            .take(MAX_VISIBLE_WORKING_DIRECTORIES)
+            .enumerate()
+        {
+            let margin = if idx == 0 {
+                REGION_GAP
+            } else {
+                INTRA_REGION_GAP
+            };
+            text_col.add_child(
+                Container::new(render_text_line(
+                    working_dir,
+                    sub_text_color,
+                    ClipConfig::start(),
+                    appearance,
+                ))
+                .with_margin_top(margin)
+                .finish(),
+            );
+        }
+        let hidden_directory_count = summary_overflow_count(
+            summary.working_directories.len(),
+            MAX_VISIBLE_WORKING_DIRECTORIES,
         );
-    }
-    let hidden_directory_count = summary_overflow_count(
-        summary.working_directories.len(),
-        MAX_VISIBLE_WORKING_DIRECTORIES,
-    );
-    if hidden_directory_count > 0 {
-        let margin = if visible_directory_count == 0 {
-            REGION_GAP
-        } else {
-            INTRA_REGION_GAP
-        };
-        text_col.add_child(
-            Container::new(render_summary_overflow_line(
-                hidden_directory_count,
-                sub_text_color,
-                appearance,
-            ))
-            .with_margin_top(margin)
-            .finish(),
-        );
-    }
+        if hidden_directory_count > 0 {
+            let margin = if visible_directory_count == 0 {
+                REGION_GAP
+            } else {
+                INTRA_REGION_GAP
+            };
+            text_col.add_child(
+                Container::new(render_summary_overflow_line(
+                    hidden_directory_count,
+                    sub_text_color,
+                    appearance,
+                ))
+                .with_margin_top(margin)
+                .finish(),
+            );
+        }
 
-    // Branch region. Each branch line gets the existing 4px top margin from APP-3875.
-    let pr_chip_entrypoint = chip_entrypoint_for_granularity(props.display_granularity);
-    for (idx, branch_entry) in summary
-        .branch_entries
-        .iter()
-        .take(MAX_VISIBLE_BRANCH_LINES)
-        .enumerate()
-    {
-        text_col.add_child(
-            Container::new(render_summary_branch_line(
-                branch_entry,
-                pr_badge_mouse_states.get(idx).cloned(),
-                pr_chip_entrypoint,
-                appearance,
-            ))
-            .with_margin_top(REGION_GAP)
-            .finish(),
-        );
-    }
+        // Branch region. Each branch line gets the existing 4px top margin from APP-3875.
+        let pr_chip_entrypoint = chip_entrypoint_for_granularity(props.display_granularity);
+        for (idx, branch_entry) in summary
+            .branch_entries
+            .iter()
+            .take(MAX_VISIBLE_BRANCH_LINES)
+            .enumerate()
+        {
+            text_col.add_child(
+                Container::new(render_summary_branch_line(
+                    branch_entry,
+                    pr_badge_mouse_states.get(idx).cloned(),
+                    pr_chip_entrypoint,
+                    appearance,
+                ))
+                .with_margin_top(REGION_GAP)
+                .finish(),
+            );
+        }
 
-    let hidden_branch_count =
-        summary_overflow_count(summary.branch_entries.len(), MAX_VISIBLE_BRANCH_LINES);
-    if hidden_branch_count > 0 {
-        text_col.add_child(
-            Container::new(render_summary_overflow_line(
-                hidden_branch_count,
-                sub_text_color,
-                appearance,
-            ))
-            .with_margin_top(REGION_GAP)
-            .finish(),
-        );
+        let hidden_branch_count =
+            summary_overflow_count(summary.branch_entries.len(), MAX_VISIBLE_BRANCH_LINES);
+        if hidden_branch_count > 0 {
+            text_col.add_child(
+                Container::new(render_summary_overflow_line(
+                    hidden_branch_count,
+                    sub_text_color,
+                    appearance,
+                ))
+                .with_margin_top(REGION_GAP)
+                .finish(),
+            );
+        }
     }
 
     let content = Flex::row()
@@ -7223,93 +7287,39 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
     let (title_element, subtitle_element): (Box<dyn Element>, Option<Box<dyn Element>>) =
         if let TypedPane::Terminal(terminal_pane) = &props.typed {
             let terminal_view = terminal_pane.terminal_view(app).as_ref(app);
-            let terminal_title = terminal_view.terminal_title_from_shell();
-            let git_branch = terminal_view.current_git_branch(app);
-            let working_directory = resolved_terminal_working_directory(terminal_view, app);
-            let working_directory_text = working_directory
-                .clone()
-                .unwrap_or_else(|| terminal_title.clone());
-            let branch_display =
-                branch_label_display(git_branch.as_deref(), working_directory_text.as_str());
 
-            // Title based on "Pane title as"
-            let title: Box<dyn Element> = render_pane_title_slot(
-                &props,
-                || match primary_info {
-                    VerticalTabsPrimaryInfo::Command => render_terminal_primary_line_for_view(
-                        terminal_view,
-                        appearance,
-                        main_text_color,
-                        app,
-                    ),
-                    VerticalTabsPrimaryInfo::WorkingDirectory => {
-                        Text::new_inline(working_directory_text.clone(), font_family, 12.)
-                            .with_clip(ClipConfig::start())
-                            .with_color(main_text_color.into())
-                            .finish()
-                    }
-                    VerticalTabsPrimaryInfo::Branch => match branch_display {
-                        (branch_text, true) => {
-                            render_git_branch_text(&branch_text, main_text_color, 12., appearance)
-                        }
-                        (fallback_text, false) => Text::new_inline(fallback_text, font_family, 12.)
-                            .with_clip(ClipConfig::start())
-                            .with_color(main_text_color.into())
-                            .finish(),
+            // Repo accordion rows: command/conversation only; the repo row
+            // above carries the directory/branch/PR/diff context.
+            if props.in_repo_accordion {
+                let title: Box<dyn Element> = render_pane_title_slot(
+                    &props,
+                    || {
+                        render_terminal_primary_line_for_view(
+                            terminal_view,
+                            appearance,
+                            main_text_color,
+                            app,
+                        )
                     },
-                },
-                12.,
-                main_text_color,
-                ClipConfig::ellipsis(),
-                appearance,
-                app,
-            );
-
-            // Subtitle based on "Additional metadata"
-            let subtitle: Option<Box<dyn Element>> = match compact_subtitle {
-                VerticalTabsCompactSubtitle::Branch => compact_branch_subtitle_display(
-                    git_branch.as_deref(),
-                    working_directory.as_deref(),
+                    12.,
+                    main_text_color,
+                    ClipConfig::ellipsis(),
+                    appearance,
+                    app,
+                );
+                (title, None)
+            } else {
+                render_compact_terminal_title_and_subtitle(
+                    &props,
+                    terminal_view,
+                    primary_info,
+                    compact_subtitle,
+                    main_text_color,
+                    sub_text_color,
+                    appearance,
+                    app,
                 )
-                .map(|(text, show_branch_icon)| {
-                    if show_branch_icon {
-                        render_git_branch_text(&text, sub_text_color, 10., appearance)
-                    } else {
-                        Text::new_inline(text, font_family, 10.)
-                            .with_clip(ClipConfig::start())
-                            .with_color(sub_text_color.into())
-                            .finish()
-                    }
-                }),
-                VerticalTabsCompactSubtitle::WorkingDirectory => working_directory.map(|wd| {
-                    Text::new_inline(wd, font_family, 10.)
-                        .with_clip(ClipConfig::start())
-                        .with_color(sub_text_color.into())
-                        .finish()
-                }),
-                VerticalTabsCompactSubtitle::Command => {
-                    let agent_text = terminal_agent_text(terminal_view, app);
-                    let (conv_title, cli_title) =
-                        preferred_agent_tab_titles(&agent_text, agent_tab_text_preference(app));
-                    let line_data = terminal_primary_line_data(
-                        terminal_view.is_long_running_and_user_controlled(),
-                        conv_title,
-                        cli_title,
-                        terminal_title.as_str(),
-                        working_directory_text.as_str(),
-                        terminal_title_fallback_font(&agent_text),
-                        terminal_view.last_completed_command_text(),
-                    );
-                    Some(
-                        Text::new_inline(line_data.text().to_string(), font_family, 10.)
-                            .with_clip(ClipConfig::ellipsis())
-                            .with_color(sub_text_color.into())
-                            .finish(),
-                    )
-                }
-            };
-
-            (title, subtitle)
+            }
         } else {
             let title = render_pane_title_slot(
                 &props,
@@ -7392,6 +7402,108 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
         .finish();
 
     render_pane_row_element(props, Padding::uniform(8.), true, content, theme)
+}
+
+/// Compact-mode title/subtitle for a terminal row, driven by the "Pane title
+/// as" and "Additional metadata" settings.
+#[allow(clippy::too_many_arguments)]
+fn render_compact_terminal_title_and_subtitle(
+    props: &PaneProps<'_>,
+    terminal_view: &TerminalView,
+    primary_info: VerticalTabsPrimaryInfo,
+    compact_subtitle: VerticalTabsCompactSubtitle,
+    main_text_color: WarpThemeFill,
+    sub_text_color: WarpThemeFill,
+    appearance: &Appearance,
+    app: &AppContext,
+) -> (Box<dyn Element>, Option<Box<dyn Element>>) {
+    let font_family = appearance.ui_font_family();
+    let terminal_title = terminal_view.terminal_title_from_shell();
+    let git_branch = terminal_view.current_git_branch(app);
+    let working_directory = resolved_terminal_working_directory(terminal_view, app);
+    let working_directory_text = working_directory
+        .clone()
+        .unwrap_or_else(|| terminal_title.clone());
+    let branch_display =
+        branch_label_display(git_branch.as_deref(), working_directory_text.as_str());
+
+    // Title based on "Pane title as"
+    let title: Box<dyn Element> = render_pane_title_slot(
+        props,
+        || match primary_info {
+            VerticalTabsPrimaryInfo::Command => render_terminal_primary_line_for_view(
+                terminal_view,
+                appearance,
+                main_text_color,
+                app,
+            ),
+            VerticalTabsPrimaryInfo::WorkingDirectory => {
+                Text::new_inline(working_directory_text.clone(), font_family, 12.)
+                    .with_clip(ClipConfig::start())
+                    .with_color(main_text_color.into())
+                    .finish()
+            }
+            VerticalTabsPrimaryInfo::Branch => match branch_display {
+                (branch_text, true) => {
+                    render_git_branch_text(&branch_text, main_text_color, 12., appearance)
+                }
+                (fallback_text, false) => Text::new_inline(fallback_text, font_family, 12.)
+                    .with_clip(ClipConfig::start())
+                    .with_color(main_text_color.into())
+                    .finish(),
+            },
+        },
+        12.,
+        main_text_color,
+        ClipConfig::ellipsis(),
+        appearance,
+        app,
+    );
+
+    // Subtitle based on "Additional metadata"
+    let subtitle: Option<Box<dyn Element>> = match compact_subtitle {
+        VerticalTabsCompactSubtitle::Branch => {
+            compact_branch_subtitle_display(git_branch.as_deref(), working_directory.as_deref())
+                .map(|(text, show_branch_icon)| {
+                    if show_branch_icon {
+                        render_git_branch_text(&text, sub_text_color, 10., appearance)
+                    } else {
+                        Text::new_inline(text, font_family, 10.)
+                            .with_clip(ClipConfig::start())
+                            .with_color(sub_text_color.into())
+                            .finish()
+                    }
+                })
+        }
+        VerticalTabsCompactSubtitle::WorkingDirectory => working_directory.map(|wd| {
+            Text::new_inline(wd, font_family, 10.)
+                .with_clip(ClipConfig::start())
+                .with_color(sub_text_color.into())
+                .finish()
+        }),
+        VerticalTabsCompactSubtitle::Command => {
+            let agent_text = terminal_agent_text(terminal_view, app);
+            let (conv_title, cli_title) =
+                preferred_agent_tab_titles(&agent_text, agent_tab_text_preference(app));
+            let line_data = terminal_primary_line_data(
+                terminal_view.is_long_running_and_user_controlled(),
+                conv_title,
+                cli_title,
+                terminal_title.as_str(),
+                working_directory_text.as_str(),
+                terminal_title_fallback_font(&agent_text),
+                terminal_view.last_completed_command_text(),
+            );
+            Some(
+                Text::new_inline(line_data.text().to_string(), font_family, 10.)
+                    .with_clip(ClipConfig::ellipsis())
+                    .with_color(sub_text_color.into())
+                    .finish(),
+            )
+        }
+    };
+
+    (title, subtitle)
 }
 
 impl Workspace {
