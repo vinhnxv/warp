@@ -110,7 +110,7 @@ const DETAIL_SIDECAR_MIN_WIDTH: f32 = 240.;
 const DETAIL_SIDECAR_CORNER_RADIUS: f32 = 4.;
 /// Fixed height of the metadata row (line 3 in expanded mode). Matches the passive badge height
 /// so the row doesn't resize when badges are toggled.
-const METADATA_ROW_HEIGHT: f32 = BADGE_ICON_SIZE + 2.;
+pub(super) const METADATA_ROW_HEIGHT: f32 = BADGE_ICON_SIZE + 2.;
 const TAB_COLOR_OPACITY: Opacity = 15;
 const TAB_COLOR_HOVER_OPACITY: Opacity = 50;
 /// Opacity for a colored row that is part of a multi-selection.
@@ -1659,9 +1659,17 @@ fn render_vertical_tabs_panel(
     let appearance = Appearance::as_ref(app);
     let theme = appearance.theme();
 
+    // Repo mode replaces the flat tab list with a unified tree: repo rows with
+    // the selected repo's tabs nested beneath, loose tabs at the bottom.
+    let scroll_content: Box<dyn Element> = if Workspace::repo_mode_enabled() {
+        super::repo_sidebar::render_repo_tree(state, workspace, app)
+    } else {
+        render_groups(state, workspace, None, false, app)
+    };
+
     let scrollable_groups = ClippedScrollable::vertical(
         state.scroll_state.clone(),
-        render_groups(state, workspace, app),
+        scroll_content,
         ScrollbarWidth::Custom(4.),
         theme.nonactive_ui_detail().into(),
         theme.active_ui_detail().into(),
@@ -1670,7 +1678,7 @@ fn render_vertical_tabs_panel(
     .with_overlayed_scrollbar()
     .finish();
 
-    let panel_content = Flex::column()
+    let mut panel_content = Flex::column()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
         .with_child(render_control_bar(
@@ -1678,12 +1686,15 @@ fn render_vertical_tabs_panel(
             workspace,
             &workspace.vertical_tabs_search_input,
             app,
-        ))
-        .with_child(super::repo_sidebar::render_repo_sidebar(
+        ));
+    if Workspace::repo_mode_enabled() {
+        // The "Repositories" header stays fixed above the scrolling tree.
+        panel_content = panel_content.with_child(super::repo_sidebar::render_repo_header(
             &state.repo_sidebar,
-            workspace,
             app,
-        ))
+        ));
+    }
+    let panel_content = panel_content
         .with_child(Shrinkable::new(1., scrollable_groups).finish())
         .finish();
 
@@ -1750,15 +1761,26 @@ fn render_vertical_tabs_panel(
         .finish()
 }
 
-fn render_groups(
+/// Renders the tab list. `repo_filter` restricts which tab indices are shown
+/// (None = all tabs). `flatten_repo_groups` strips group chrome from repo-bound
+/// groups — used when the surrounding UI (the Repositories tree) already names
+/// the context; user-created (non-repo) groups keep their chrome.
+pub(super) fn render_groups(
     state: &VerticalTabsPanelState,
     workspace: &Workspace,
+    repo_filter: Option<Vec<usize>>,
+    flatten_repo_groups: bool,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(app);
     let theme = appearance.theme();
 
     if workspace.tabs.is_empty() {
+        // Sub-blocks of the repo tree stay silent when empty; the standalone
+        // list keeps its empty-state message.
+        if repo_filter.is_some() {
+            return Empty::new().finish();
+        }
         return Container::new(
             Text::new_inline("No tabs open", appearance.ui_font_family(), 12.)
                 .with_color(theme.sub_text_color(theme.background()).into())
@@ -1777,7 +1799,6 @@ fn render_groups(
     };
     let uses_outer_group_container = uses_outer_group_container(display_granularity);
     let query = state.search_query.as_str();
-    let repo_filter = workspace.repo_mode_visible_tab_indices();
     let visible_tabs: Vec<(usize, Option<Vec<PaneId>>)> = if query.is_empty() {
         workspace
             .tabs
@@ -1902,7 +1923,9 @@ fn render_groups(
     };
 
     if visible_tabs.is_empty() {
-        if query.is_empty() {
+        // Repo-tree sub-blocks render nothing when the query filters everything
+        // out; the standalone list owns the "no match" message.
+        if query.is_empty() || repo_filter.is_some() {
             return Empty::new().finish();
         } else {
             return Container::new(
@@ -1953,6 +1976,32 @@ fn render_groups(
                     .take_while(|(idx, _)| workspace.tabs[*idx].group_id == Some(group_id))
                     .count();
                 let members = &visible_tabs[i..i + run_len];
+
+                // Repo mode: when this block is nested under the repo's row in
+                // the Repositories tree, the group chrome is redundant — the
+                // row names the context. Render members as flat rows.
+                let flatten_repo_group = flatten_repo_groups && group.repo_root.is_some();
+                if flatten_repo_group {
+                    for (member_index, member_pane_ids) in members {
+                        groups.add_child(render_tab_group(
+                            state,
+                            workspace,
+                            *member_index,
+                            &workspace.tabs[*member_index],
+                            member_pane_ids.as_deref(),
+                            TabGroupDragState {
+                                is_any_pane_dragging,
+                                insert_before_index: *member_index,
+                                insert_after_index: None,
+                            },
+                            false, // in_tab_group
+                            app,
+                        ));
+                    }
+                    i += run_len;
+                    continue;
+                }
+
                 // The group's last member needs an "after" drop target only when
                 // it's also the absolute last visible tab.
                 let last_member_after_index =
@@ -3297,7 +3346,7 @@ fn render_group_header(props: GroupHeaderProps<'_>, app: &AppContext) -> Box<dyn
     .finish()
 }
 
-fn render_passive_terminal_diff_stats_badge(
+pub(super) fn render_passive_terminal_diff_stats_badge(
     git_line_changes: &GitLineChanges,
     appearance: &Appearance,
 ) -> Box<dyn Element> {
@@ -4181,7 +4230,7 @@ fn terminal_agent_text(terminal_view: &TerminalView, app: &AppContext) -> Termin
     agent_text
 }
 
-fn terminal_pull_request_badge_label(pull_request_url: &str) -> String {
+pub(super) fn terminal_pull_request_badge_label(pull_request_url: &str) -> String {
     github_pr_display_text_from_url(pull_request_url)
         .map(|label| label.strip_prefix("PR ").unwrap_or(&label).to_string())
         .unwrap_or_else(|| pull_request_url.to_string())
@@ -4488,7 +4537,7 @@ fn compact_branch_subtitle_display(
         })
 }
 
-fn render_git_branch_text(
+pub(super) fn render_git_branch_text(
     branch: &str,
     text_color: WarpThemeFill,
     font_size: f32,
@@ -5405,7 +5454,7 @@ fn render_terminal_diff_stats_badge(
     .finish()
 }
 
-fn render_terminal_pull_request_badge(
+pub(super) fn render_terminal_pull_request_badge(
     label: String,
     url: String,
     entrypoint: VerticalTabsChipEntrypoint,

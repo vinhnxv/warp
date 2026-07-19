@@ -73,6 +73,9 @@ pub enum VerticalTabsChipEntrypoint {
     Tab,
     /// The chip was rendered inside the detail sidecar that appears on row hover.
     DetailsSidecar,
+    /// The chip was rendered on a repository row in the Repositories section
+    /// (repo mode).
+    RepoSidebar,
 }
 
 impl VerticalTabsChipEntrypoint {
@@ -81,6 +84,7 @@ impl VerticalTabsChipEntrypoint {
             Self::Pane => "pane",
             Self::Tab => "tab",
             Self::DetailsSidecar => "details_sidecar",
+            Self::RepoSidebar => "repo_sidebar",
         }
     }
 }

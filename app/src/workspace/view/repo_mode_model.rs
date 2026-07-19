@@ -13,6 +13,7 @@ use repo_mode::{canonicalize_repo_path, display_name_for_path, is_dead_path, Rep
 use warpui::{AppContext, SingletonEntity, UpdateView, ViewContext};
 
 use super::Workspace;
+use crate::context_chips::display_chip::GitLineChanges;
 use crate::features::FeatureFlag;
 use crate::menu::MenuItemFields;
 use crate::pane_group::{NewTerminalOptions, PanesLayout};
@@ -29,6 +30,14 @@ pub struct RepoModeListEntry {
     pub is_dead: bool,
     pub last_opened_ts: Option<NaiveDateTime>,
     pub added_ts: NaiveDateTime,
+}
+
+/// Git badge data for a repository row, sourced from the repo's terminals so
+/// the row always matches what the tab rows display.
+#[derive(Clone, Debug, Default)]
+pub struct RepoModeEntryBadges {
+    pub diff_stats: Option<GitLineChanges>,
+    pub pull_request_url: Option<String>,
 }
 
 impl Workspace {
@@ -163,8 +172,7 @@ impl Workspace {
             return;
         }
         let path_buf = canonicalize_repo_path(path).unwrap_or_else(|_| path.to_path_buf());
-        let path_str = path_buf.to_string_lossy().into_owned();
-        self.selected_repo_root = Some(path_str.clone());
+        self.selected_repo_root = Some(path_buf.to_string_lossy().into_owned());
 
         // R3: record recency for the next launch. The section order is pinned
         // by `repo_mode_launch_order`, so this bump cannot reshuffle it now.
@@ -172,14 +180,21 @@ impl Workspace {
             projects.upsert_project(path_buf.clone(), ctx);
         });
 
-        let has_group = self
-            .tab_groups
-            .values()
-            .any(|g| g.repo_root.as_deref() == Some(path_str.as_str()));
-        if !has_group {
+        // Focus the MRU tab that lives in this repo (by live cwd partition);
+        // with no such tab, open a fresh one at the entry root.
+        let entry_paths: Vec<PathBuf> = self
+            .repo_mode_entries(ctx)
+            .into_iter()
+            .map(|e| e.path)
+            .collect();
+        let (mut by_entry, _) = self.repo_mode_tab_partition(&entry_paths, ctx);
+        let members = by_entry.remove(&path_buf).unwrap_or_default();
+        if members.is_empty() {
             self.create_repo_mode_group_with_tab(&path_buf, ctx);
-        } else {
-            self.activate_repo_mode_group_mru(&path_buf, ctx);
+        } else if !members.contains(&self.active_tab_index) {
+            if let Some(index) = self.mru_first_among(&members) {
+                self.activate_tab(index, ctx);
+            }
         }
         ctx.notify();
     }
@@ -191,6 +206,7 @@ impl Workspace {
     ) {
         let mut group = TabGroup::new();
         group.repo_root = Some(path.to_string_lossy().into_owned());
+        group.name = Some(display_name_for_path(path));
         let group_id = group.id;
         self.tab_groups.insert(group_id, group);
 
@@ -209,35 +225,30 @@ impl Workspace {
         }
     }
 
-    fn activate_repo_mode_group_mru(&mut self, path: &Path, ctx: &mut ViewContext<Self>) {
-        let path_str = path.to_string_lossy();
-        let Some(group_id) = self
-            .tab_groups
-            .values()
-            .find(|g| g.repo_root.as_deref() == Some(path_str.as_ref()))
-            .map(|g| g.id)
-        else {
-            return;
-        };
-        let already_active = self
-            .tabs
-            .get(self.active_tab_index)
-            .is_some_and(|t| t.group_id == Some(group_id));
-        if already_active {
-            return;
+    /// Most-recently-used index among `indices`, by `tab_mru_order` (front =
+    /// most recent). Falls back to the first index given.
+    fn mru_first_among(&self, indices: &[usize]) -> Option<usize> {
+        for pane_group_id in &self.tab_mru_order {
+            if let Some(&index) = indices.iter().find(|&&i| {
+                self.tabs
+                    .get(i)
+                    .is_some_and(|t| t.pane_group.id() == *pane_group_id)
+            }) {
+                return Some(index);
+            }
         }
-        if let Some(index) = self.mru_first_tab_index_in_group(group_id) {
-            self.activate_tab(index, ctx);
-        }
+        indices.first().copied()
     }
 
     /// Most-recently-used member of `group_id`, by `tab_mru_order` (front = most
     /// recent). Falls back to the first member by tab index.
     pub(super) fn mru_first_tab_index_in_group(&self, group_id: TabGroupId) -> Option<usize> {
         for pane_group_id in &self.tab_mru_order {
-            if let Some(index) = self.tabs.iter().position(|t| {
-                t.group_id == Some(group_id) && t.pane_group.id() == *pane_group_id
-            }) {
+            if let Some(index) = self
+                .tabs
+                .iter()
+                .position(|t| t.group_id == Some(group_id) && t.pane_group.id() == *pane_group_id)
+            {
                 return Some(index);
             }
         }
@@ -260,11 +271,9 @@ impl Workspace {
             ctx.notify();
             return;
         }
-        let items = vec![
-            MenuItemFields::new("Remove from Repositories")
-                .with_on_select_action(WorkspaceAction::RemoveRepoModeEntry(path.to_path_buf()))
-                .into_item(),
-        ];
+        let items = vec![MenuItemFields::new("Remove from Repositories")
+            .with_on_select_action(WorkspaceAction::RemoveRepoModeEntry(path.to_path_buf()))
+            .into_item()];
         ctx.update_view(&self.tab_right_click_menu, |menu, view_ctx| {
             menu.set_items(items, view_ctx);
         });
@@ -286,20 +295,16 @@ impl Workspace {
             ctx.notify();
             return;
         }
-        let mut items = vec![
-            MenuItemFields::new("All")
-                .with_on_select_action(WorkspaceAction::SelectRepoModeAll)
-                .into_item(),
-        ];
+        let mut items = vec![MenuItemFields::new("All")
+            .with_on_select_action(WorkspaceAction::SelectRepoModeAll)
+            .into_item()];
         for entry in self.repo_mode_entries(ctx) {
             if entry.is_dead {
                 continue;
             }
             items.push(
                 MenuItemFields::new(entry.display_name.as_str())
-                    .with_on_select_action(WorkspaceAction::SelectRepoModeEntry(
-                        entry.path.clone(),
-                    ))
+                    .with_on_select_action(WorkspaceAction::SelectRepoModeEntry(entry.path.clone()))
                     .into_item(),
             );
         }
@@ -313,6 +318,106 @@ impl Workspace {
         ctx.notify();
     }
 
+    /// Diff stats + PR link for a repo row, read from terminals whose current
+    /// git repository IS this entry's path — group membership is irrelevant, so
+    /// a terminal that cd'd into another repo never leaks that repo's status
+    /// onto this row (membership is static per R12, but badges describe the
+    /// repository, not the group). MRU tabs are consulted first so the badges
+    /// track the terminal the user last touched.
+    pub(super) fn repo_mode_entry_badges(
+        &self,
+        entry_path: &Path,
+        app: &AppContext,
+    ) -> RepoModeEntryBadges {
+        let mut badges = RepoModeEntryBadges::default();
+
+        // Tab indices in MRU order, then any tabs missing from the MRU list.
+        let mut indices: Vec<usize> = self
+            .tab_mru_order
+            .iter()
+            .filter_map(|pane_group_id| {
+                self.tabs
+                    .iter()
+                    .position(|t| t.pane_group.id() == *pane_group_id)
+            })
+            .collect();
+        for index in 0..self.tabs.len() {
+            if !indices.contains(&index) {
+                indices.push(index);
+            }
+        }
+
+        for index in indices {
+            let Some(tab) = self.tabs.get(index) else {
+                continue;
+            };
+            for terminal_view in tab.pane_group.as_ref(app).terminal_views(app) {
+                let terminal_view = terminal_view.as_ref(app);
+                if terminal_view.current_local_repo_path() != Some(entry_path) {
+                    continue;
+                }
+                if badges.diff_stats.is_none() {
+                    badges.diff_stats = terminal_view.current_diff_line_changes(app);
+                }
+                if badges.pull_request_url.is_none() {
+                    badges.pull_request_url = terminal_view.current_pull_request_url(app);
+                }
+                if badges.diff_stats.is_some() && badges.pull_request_url.is_some() {
+                    return badges;
+                }
+            }
+        }
+        badges
+    }
+
+    /// Live partition of tabs across registry entries for display: a tab
+    /// belongs to the entry whose path is the deepest ancestor of its focused
+    /// terminal's local cwd, so a terminal that cd's between repos follows
+    /// reality rather than the group it was opened under. While the cwd is
+    /// unknown (sessions still bootstrapping after restore, non-terminal
+    /// tabs), the bound group's repo root is used as a fallback. Tabs matching
+    /// no entry land in the second (loose) bucket. Group membership itself is
+    /// not mutated.
+    pub(super) fn repo_mode_tab_partition(
+        &self,
+        entry_paths: &[PathBuf],
+        app: &AppContext,
+    ) -> (HashMap<PathBuf, Vec<usize>>, Vec<usize>) {
+        let mut by_entry: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+        let mut loose = Vec::new();
+        for (index, tab) in self.tabs.iter().enumerate() {
+            let pane_group = tab.pane_group.as_ref(app);
+            let cwd = pane_group
+                .active_session_view(app)
+                .and_then(|tv| tv.as_ref(app).pwd_if_local(app))
+                .or_else(|| {
+                    pane_group
+                        .terminal_views(app)
+                        .into_iter()
+                        .find_map(|tv| tv.as_ref(app).pwd_if_local(app))
+                })
+                .map(PathBuf::from);
+            let owner = match cwd {
+                Some(cwd) => entry_paths
+                    .iter()
+                    .filter(|p| cwd.starts_with(p))
+                    .max_by_key(|p| p.as_os_str().len())
+                    .cloned(),
+                None => tab
+                    .group_id
+                    .and_then(|gid| self.tab_groups.get(&gid))
+                    .and_then(|g| g.repo_root.as_deref())
+                    .map(PathBuf::from)
+                    .filter(|root| entry_paths.iter().any(|p| p == root)),
+            };
+            match owner {
+                Some(path) => by_entry.entry(path).or_default().push(index),
+                None => loose.push(index),
+            }
+        }
+        (by_entry, loose)
+    }
+
     /// Bound tab-group id for the current selection, if any.
     pub(super) fn selected_repo_mode_group_id(&self) -> Option<TabGroupId> {
         let selected = self.selected_repo_root.as_deref()?;
@@ -322,32 +427,21 @@ impl Workspace {
             .map(|g| g.id)
     }
 
-    /// Tabs visible under the current repo-mode selection (all tabs when "All"/flag off).
-    /// When a repo is selected but its group is missing, returns an empty list (R10) —
-    /// never ungrouped tabs.
-    pub(super) fn repo_mode_visible_tab_indices(&self) -> Option<Vec<usize>> {
+    /// Tabs visible under the current repo-mode selection (all tabs when no
+    /// selection / flag off), by the live cwd partition. A selected entry with
+    /// no matching tabs yields an empty list — never unrelated tabs (R10).
+    pub(super) fn repo_mode_visible_tab_indices(&self, app: &AppContext) -> Option<Vec<usize>> {
         if !Self::repo_mode_enabled() {
             return None;
         }
-        let Some(selected) = self.selected_repo_root.as_deref() else {
-            return None;
-        };
-        let Some(group_id) = self
-            .tab_groups
-            .values()
-            .find(|g| g.repo_root.as_deref() == Some(selected))
-            .map(|g| g.id)
-        else {
-            return Some(Vec::new());
-        };
-        Some(
-            self.tabs
-                .iter()
-                .enumerate()
-                .filter(|(_, tab)| tab.group_id == Some(group_id))
-                .map(|(i, _)| i)
-                .collect(),
-        )
+        let selected = PathBuf::from(self.selected_repo_root.as_deref()?);
+        let entry_paths: Vec<PathBuf> = self
+            .repo_mode_entries(app)
+            .into_iter()
+            .map(|e| e.path)
+            .collect();
+        let (mut by_entry, _) = self.repo_mode_tab_partition(&entry_paths, app);
+        Some(by_entry.remove(&selected).unwrap_or_default())
     }
 }
 

@@ -4007,6 +4007,17 @@ impl Workspace {
                 // KTD4/U6: if a selection was restored but its bound group was
                 // pruned (no remaining members), recreate an empty group+tab.
                 if Self::repo_mode_enabled() {
+                    // Bound groups created before naming landed show the stock
+                    // "New Group" label; backfill the repo basename.
+                    for group in self.tab_groups.values_mut() {
+                        if group.name.is_none() {
+                            if let Some(root) = group.repo_root.as_deref() {
+                                group.name = Some(repo_mode::display_name_for_path(
+                                    std::path::Path::new(root),
+                                ));
+                            }
+                        }
+                    }
                     if let Some(root) = self.selected_repo_root.clone() {
                         let group_id = self
                             .tab_groups
@@ -4028,8 +4039,7 @@ impl Workspace {
                                     .get(self.active_tab_index)
                                     .is_some_and(|t| t.group_id == Some(group_id));
                                 if !active_in_group {
-                                    if let Some(index) =
-                                        self.mru_first_tab_index_in_group(group_id)
+                                    if let Some(index) = self.mru_first_tab_index_in_group(group_id)
                                     {
                                         self.activate_tab_internal(index, ctx);
                                     }
@@ -20999,7 +21009,7 @@ impl Workspace {
             // Collapse tabs into render slots: each ungrouped tab is a
             // `Single`, and each contiguous run of same-group tabs is one
             // `Group`.
-            let slots = self.tab_bar_slots();
+            let slots = self.tab_bar_slots(ctx);
 
             // Render each slot in the tab bar, either an individual tab or tab group.
             for slot in &slots {
@@ -27973,9 +27983,9 @@ impl Workspace {
     /// Collapses `self.tabs` into layout slots: each ungrouped tab is a `Single`,
     /// and each contiguous run of same-group tabs becomes one `Group`. Shared by
     /// tab/group rendering and insertion index calculations.
-    fn tab_bar_slots(&self) -> Vec<TabBarSlot> {
+    fn tab_bar_slots(&self, ctx: &AppContext) -> Vec<TabBarSlot> {
         let grouped_tabs_enabled = FeatureFlag::GroupedTabs.is_enabled();
-        let visible = self.repo_mode_visible_tab_indices();
+        let visible = self.repo_mode_visible_tab_indices(ctx);
         let mut slots: Vec<TabBarSlot> = Vec::with_capacity(self.tabs.len());
         for (idx, tab) in self.tabs.iter().enumerate() {
             if let Some(ref visible) = visible {
@@ -28057,7 +28067,7 @@ impl Workspace {
         // group, never inside; each ungrouped tab keeps its own row. Rects
         // clipped by overflow or outside the tab bar are dropped.
         let mut visible_tabs: Vec<(usize, RectF)> = Vec::with_capacity(self.tabs.len());
-        for slot in self.tab_bar_slots() {
+        for slot in self.tab_bar_slots(ctx) {
             match slot {
                 TabBarSlot::Single { index } => {
                     if let Some(tab_position) =

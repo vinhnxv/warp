@@ -18,22 +18,36 @@ fn test_no_selection_shows_stock_tab_set() {
         initialize_app(&mut app);
         register_projects_model(&mut app, Vec::new());
         let workspace = mock_workspace(&mut app);
-        workspace.update(&mut app, |workspace, _ctx| {
+        workspace.update(&mut app, |workspace, ctx| {
             assert_eq!(workspace.selected_repo_root, None);
-            assert_eq!(workspace.repo_mode_visible_tab_indices(), None);
+            assert_eq!(workspace.repo_mode_visible_tab_indices(ctx), None);
         });
     });
 }
 
-/// Covers AE2 / R6: selecting an entry filters the visible set to its group;
-/// the other repo's tabs stay alive and untouched.
+/// Covers AE2 / R6: selecting an entry filters the visible set to its tabs
+/// (group-root fallback while cwds are unknown); the other repo's tabs stay
+/// alive and untouched.
 #[test]
 fn test_selection_filters_visible_tabs_to_group() {
     let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
     let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let now = Utc::now().naive_utc();
+    let projects = vec![
+        Project {
+            path: "/repo/a".to_string(),
+            added_ts: now,
+            last_opened_ts: Some(now),
+        },
+        Project {
+            path: "/repo/b".to_string(),
+            added_ts: now,
+            last_opened_ts: Some(now),
+        },
+    ];
     App::test((), |mut app| async move {
         initialize_app(&mut app);
-        register_projects_model(&mut app, Vec::new());
+        register_projects_model(&mut app, projects);
         let workspace = mock_workspace(&mut app);
         workspace.update(&mut app, |workspace, ctx| {
             // Tabs: [default, a1, a2, b1]
@@ -55,17 +69,23 @@ fn test_selection_filters_visible_tabs_to_group() {
             workspace.tabs[3].group_id = Some(group_b_id);
 
             workspace.selected_repo_root = Some("/repo/a".to_string());
-            assert_eq!(workspace.repo_mode_visible_tab_indices(), Some(vec![1, 2]));
+            assert_eq!(
+                workspace.repo_mode_visible_tab_indices(ctx),
+                Some(vec![1, 2])
+            );
 
             workspace.selected_repo_root = Some("/repo/b".to_string());
-            assert_eq!(workspace.repo_mode_visible_tab_indices(), Some(vec![3]));
+            assert_eq!(workspace.repo_mode_visible_tab_indices(ctx), Some(vec![3]));
             // The other repo's tabs are still present (background, not closed).
             assert_eq!(workspace.tab_count(), 4);
 
-            // Selected entry whose group is missing: empty set, never
-            // ungrouped tabs (R10).
+            // Selected entry with no matching tabs: empty set, never
+            // unrelated tabs (R10).
             workspace.selected_repo_root = Some("/repo/missing".to_string());
-            assert_eq!(workspace.repo_mode_visible_tab_indices(), Some(Vec::new()));
+            assert_eq!(
+                workspace.repo_mode_visible_tab_indices(ctx),
+                Some(Vec::new())
+            );
         });
     });
 }
@@ -87,7 +107,10 @@ fn test_select_entry_creates_group_and_new_tabs_join_it() {
             let initial_tabs = workspace.tab_count();
             workspace.select_repo_mode_entry(&root, ctx);
 
-            assert_eq!(workspace.selected_repo_root.as_deref(), Some(root_str.as_str()));
+            assert_eq!(
+                workspace.selected_repo_root.as_deref(),
+                Some(root_str.as_str())
+            );
             let group_id = workspace
                 .selected_repo_mode_group_id()
                 .expect("bound group should exist after select");
@@ -133,7 +156,10 @@ fn test_last_tab_close_keeps_selection_and_reopens() {
             workspace.remove_tab(member_index, false, false, ctx);
 
             // Selection survives and a fresh group + tab exist (R11).
-            assert_eq!(workspace.selected_repo_root.as_deref(), Some(root_str.as_str()));
+            assert_eq!(
+                workspace.selected_repo_root.as_deref(),
+                Some(root_str.as_str())
+            );
             let new_group_id = workspace
                 .selected_repo_mode_group_id()
                 .expect("group recreated after last tab close");
