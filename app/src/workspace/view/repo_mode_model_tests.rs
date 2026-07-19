@@ -131,10 +131,10 @@ fn test_select_entry_creates_group_and_new_tabs_join_it() {
     });
 }
 
-/// Covers R11 / F5: closing the last tab of the selected entry keeps the
-/// selection and auto-opens a fresh tab at the entry root.
+/// Covers R11 / F5: closing the last tab of the selected entry falls back to
+/// "All" without auto-opening a fresh tab.
 #[test]
-fn test_last_tab_close_keeps_selection_and_reopens() {
+fn test_last_tab_close_falls_back_to_all() {
     let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
     let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
     let dir = tempfile::tempdir().expect("tempdir");
@@ -153,24 +153,46 @@ fn test_last_tab_close_keeps_selection_and_reopens() {
                 .position(|t| t.group_id == Some(group_id))
                 .expect("member tab");
 
+            let tab_count_before = workspace.tabs.len();
             workspace.remove_tab(member_index, false, false, ctx);
 
-            // Selection survives and a fresh group + tab exist (R11).
-            assert_eq!(
-                workspace.selected_repo_root.as_deref(),
-                Some(root_str.as_str())
+            // Selection falls back to "All"; no group or tab is recreated (R11).
+            assert_eq!(workspace.selected_repo_root, None);
+            assert!(
+                !workspace
+                    .tab_groups
+                    .values()
+                    .any(|g| g.repo_root.as_deref() == Some(root_str.as_str())),
+                "bound group should stay pruned after last tab close"
             );
-            let new_group_id = workspace
-                .selected_repo_mode_group_id()
-                .expect("group recreated after last tab close");
-            assert_eq!(
-                workspace
-                    .tabs
-                    .iter()
-                    .filter(|t| t.group_id == Some(new_group_id))
-                    .count(),
-                1
-            );
+            assert_eq!(workspace.tabs.len(), tab_count_before - 1);
+        });
+    });
+}
+
+/// Covers R11 (window level): closing the window's very last tab with repo
+/// mode on opens a fresh loose home terminal instead of closing the window.
+#[test]
+fn test_window_last_tab_close_opens_loose_home_tab() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            assert_eq!(workspace.tabs.len(), 1);
+            let old_pane_group_id = workspace.tabs[0].pane_group.id();
+
+            workspace.remove_tab(0, false, false, ctx);
+
+            // The old tab is gone, replaced by a single ungrouped tab; the
+            // window survives with no repo selected.
+            assert_eq!(workspace.tabs.len(), 1);
+            assert_ne!(workspace.tabs[0].pane_group.id(), old_pane_group_id);
+            assert_eq!(workspace.tabs[0].group_id, None);
+            assert_eq!(workspace.selected_repo_root, None);
+            assert_eq!(workspace.active_tab_index, 0);
         });
     });
 }

@@ -4005,7 +4005,7 @@ impl Workspace {
                 self.activate_tab_internal(active_tab_index, ctx);
 
                 // KTD4/U6: if a selection was restored but its bound group was
-                // pruned (no remaining members), recreate an empty group+tab.
+                // pruned (no remaining members), fall back to "All" (R11).
                 if Self::repo_mode_enabled() {
                     // Bound groups created before naming landed show the stock
                     // "New Group" label; backfill the repo basename.
@@ -4026,10 +4026,7 @@ impl Workspace {
                             .map(|g| g.id);
                         match group_id {
                             None => {
-                                self.create_repo_mode_group_with_tab(
-                                    std::path::Path::new(&root),
-                                    ctx,
-                                );
+                                self.selected_repo_root = None;
                             }
                             Some(group_id) => {
                                 // KTD3: the restored active tab may sit outside the
@@ -11909,7 +11906,7 @@ impl Workspace {
 
     fn remove_tab(
         &mut self,
-        index: usize,
+        mut index: usize,
         add_to_undo_stack: bool,
         detach_panes_for_close: bool,
         ctx: &mut ViewContext<Self>,
@@ -11924,12 +11921,28 @@ impl Workspace {
             .clear_detail_sidecar_if_for_pane_group(pane_group.id());
 
         // If this is the last tab, close the window instead of actually removing
-        // the tab.
+        // the tab. Repo mode keeps the window (and its repo sidebar) alive
+        // instead: open a fresh loose home terminal first, then fall through to
+        // remove the old tab normally.
         if self.tabs.len() == 1 {
-            if ContextFlag::CloseWindow.is_enabled() {
-                ctx.close_window();
+            if Self::repo_mode_enabled() {
+                let removed_pane_group_id = pane_group.id();
+                self.new_repo_mode_loose_tab(ctx);
+                let Some(new_index) = self
+                    .tabs
+                    .iter()
+                    .position(|t| t.pane_group.id() == removed_pane_group_id)
+                else {
+                    debug_assert!(false, "Tab to remove vanished while opening its replacement");
+                    return;
+                };
+                index = new_index;
+            } else {
+                if ContextFlag::CloseWindow.is_enabled() {
+                    ctx.close_window();
+                }
+                return;
             }
-            return;
         }
 
         // Preserve split-off child-agent tabs by moving their lone pane back
@@ -11965,8 +11978,8 @@ impl Workspace {
         let removed_pane_group_id = tab_data.pane_group.id();
         self.tab_mru_order.retain(|id| *id != removed_pane_group_id);
 
-        // Capture before prune so we can auto-reopen when the last tab of a
-        // selected repo-mode group closes (R11).
+        // Capture before prune so we can drop the selection when the last tab
+        // of a selected repo-mode group closes (R11).
         let pruned_repo_root = tab_data
             .group_id
             .and_then(|gid| self.tab_groups.get(&gid).and_then(|g| g.repo_root.clone()));
@@ -12005,8 +12018,9 @@ impl Workspace {
             _ => {}
         }
 
-        // R11: stay on the selected entry and open a fresh tab at its root when
-        // the last bound-group tab was closed.
+        // R11: fall back to "All" when the last bound-group tab was closed, so
+        // the filtered strip still contains the newly activated tab instead of
+        // auto-opening a fresh terminal at the entry root.
         if Self::repo_mode_enabled() {
             if let Some(root) = pruned_repo_root {
                 if self.selected_repo_root.as_deref() == Some(root.as_str())
@@ -12015,7 +12029,7 @@ impl Workspace {
                         .values()
                         .any(|g| g.repo_root.as_deref() == Some(root.as_str()))
                 {
-                    self.create_repo_mode_group_with_tab(std::path::Path::new(&root), ctx);
+                    self.selected_repo_root = None;
                 }
             }
         }

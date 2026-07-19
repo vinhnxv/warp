@@ -57,7 +57,7 @@ The user builds Warp from this source tree and upgrades by pulling upstream mast
 - R7. Per-repo tab grouping, the registry, and the current selection survive app restart.
 - R8. Repo mode is gated behind a local feature flag; with the flag off, the app is visually and behaviorally identical to stock Warp.
 - R10. An "All" state heads the Repositories section and is the default when no prior selection is persisted (`selected_repo_root` is NULL), including first launch: it shows the stock tab set (grouped and ungrouped tabs alike). When a selection was saved, restore it per R7. Ungrouped tabs — plain new tabs, tabs dragged in from another window, tabs orphaned by entry removal — appear only under "All".
-- R11. Closing the last tab of the selected entry keeps the entry selected and auto-opens a fresh tab at the entry's root.
+- R11. Closing the last tab of the selected entry falls back to "All" (the tab just closes; no auto-opened replacement). Closing the window's very last tab keeps the window and its sidebar alive by opening one loose home-directory terminal under "Other tabs" instead of closing the window (stock last-tab-closes-window behavior stays with the flag off). *Amended 2026-07-20: originally kept the entry selected and auto-opened a fresh root tab; dropped after dogfooding — the surprise terminal was unwanted. The window-level keep-alive was added in the same pass: with a persistent repo sidebar, closing the last tab silently quitting the app was worse than one neutral replacement tab.*
 - R12. Group membership is static: it is assigned when a tab opens under a selected entry and does not change when the tab's cwd drifts or the tab is dragged elsewhere.
 - R13. When the vertical tabs panel is closed, repo switching remains available via command-palette "Select Repository" / "Show All Repositories" actions (hotkeys deferred).
 
@@ -100,7 +100,7 @@ The user builds Warp from this source tree and upgrades by pulling upstream mast
   - **Covers:** R8, R9
 - F5. Last tab closed under a selected entry
   - **Trigger:** User closes the last visible tab while an entry (not "All") is selected.
-  - **Steps:** Entry stays selected; a fresh tab opens at the entry's root and joins its group.
+  - **Steps:** The tab closes; the empty group is pruned and the selection falls back to "All". No replacement tab opens.
   - **Covers:** R11
 
 ### Acceptance Examples
@@ -152,7 +152,7 @@ Product Contract preservation: changed during planning dialogue and headless doc
 - **KTD1 — Registry backend is `projects` / `ProjectManagementModel`, not `PersistedWorkspace`.** The `projects` table (`path`, `added_ts`, `last_opened_ts`) is purpose-built for explicit user adds. `ProjectManagementModel` already has `upsert_project` and `all_projects`; U3 adds `remove_project` (persist delete) if missing. `PersistedWorkspace.user_added_workspace` only bumps `navigated_ts` on `workspace_metadata` and `workspaces()` returns every indexed root — there is no user-added filter, so it cannot back R1/R4. Folder-picker UX can still mirror `open_folder_picker_for_worktree_submenu`, then call `upsert_project` after canonicalize. Accepted: Projects events are WIP-tagged; we use the store, not the unfinished UI.
 - **KTD2 — Section mounts as a fixed block above the tab scroller in `vertical_tabs.rs` via one small hook.** The section body lives in a new sibling module (`app/src/workspace/view/repo_sidebar.rs`). Hook placement: between the control bar and `ClippedScrollable` in `render_vertical_tabs_panel` so the list stays visible while tabs scroll. Visual precedent: conversation-list section headers (`app/src/workspace/view/conversation_list/`), not the Settings gear button. Style divider + header typography after that pattern and theme tokens.
 - **KTD3 — One tab group per (window, entry), filtering at render level via one shared visible-tab accessor.** Each selected entry maps to at most one `TabGroup` per window, created lazily on first selection. Filtering must compose with vertical-tabs search: **repo selection first, then search within the visible set**. Both horizontal strip and vertical list consume the same accessor so AE2 cannot leak via search. When the active tab falls outside the visible set, activation falls back to the group's MRU-first member.
-- **KTD4 — Entry↔group binding persisted via a nullable `repo_root` column on `tab_groups`.** Upstream snapshots skip empty groups and prune groups when their last tab closes, so the binding cannot ride the snapshot alone. A nullable column (migration template: `2026-06-01-000000_add_tab_groups`) plus a `TabGroupSnapshot` field carries the binding; on restore, surviving groups re-adopt their entries. *Amended 2026-07-20:* when a restored selection's bound group was pruned, the group and a fresh root tab are recreated eagerly at restore (matches R11's auto-open behavior); lazy recreation on next selection still applies to non-selected entries. Selection state rides a nullable `windows.selected_repo_root` column (end-to-end precedent: `vertical_tabs_panel_open`).
+- **KTD4 — Entry↔group binding persisted via a nullable `repo_root` column on `tab_groups`.** Upstream snapshots skip empty groups and prune groups when their last tab closes, so the binding cannot ride the snapshot alone. A nullable column (migration template: `2026-06-01-000000_add_tab_groups`) plus a `TabGroupSnapshot` field carries the binding; on restore, surviving groups re-adopt their entries. *Amended 2026-07-20 (twice):* when a restored selection's bound group was pruned, the selection now falls back to "All" at restore (matches amended R11 — no eager group/tab recreation); lazy recreation on next selection still applies via `select_repo_mode_entry`. Selection state rides a nullable `windows.selected_repo_root` column (end-to-end precedent: `vertical_tabs_panel_open`).
 - **KTD5 — Flag wiring follows the repo's compile+runtime bridge.** Cargo feature `repo_mode` in `app/Cargo.toml`, `FeatureFlag::RepoMode` variant in `crates/warp_features/src/lib.rs`, `#[cfg(feature = "repo_mode")]` mapping in `app/src/features.rs` (pattern at the `grouped_tabs` arm). *Amended 2026-07-20:* this personal build keeps `repo_mode` in the `default` feature list so plain `cargo build` enables it; AE3 flag-off parity is verified by building with the feature temporarily removed from `default`. Tests use `override_enabled(true)` guards. Persistence migrations remain unconditional (additive nullable columns); flag-off builds ignore the columns (AE3).
 - **KTD6 — Static membership; no `WorkingDirectories` integration.** Membership is assigned at open time from the selected entry. Tracking cwd drift would pull in the per-pane cwd module for marginal value; drag-in tabs from other windows arrive ungrouped and land under "All" (upstream drag never transfers `group_id`).
 - **KTD7 — New crate `crates/repo_mode` holds entry identity and path rules only.** Canonicalization/dedup (via `dunce::canonicalize`, used consistently everywhere including `ProjectManagementModel` upsert/remove), dead-path check, git-or-folder kind via a `.git`-exists check (file or directory, covering linked worktrees; *amended 2026-07-20:* `repo_metadata` not needed for classification) — pure, unit-testable, no `app/` dependency. **All/Repo selection state machine and filtering live entirely in `RepoModeModel` / additive `app/` modules** — not in the crate. The workspace member glob (`crates/*`) auto-includes it; glue is one `[workspace.dependencies]` line plus one `app/Cargo.toml` line. Size gate: if domain logic stays under ~400 LOC with a single consumer, folding into `app/src/workspace/repo_mode/` is acceptable during U1 without amending R9.
@@ -198,7 +198,7 @@ stateDiagram-v2
   All --> Repo: select entry (lazy-create group if pruned)
   Repo --> All: select All
   Repo --> Repo: select other entry
-  Repo --> Repo: last tab closed - stay selected, auto-open tab at root
+  Repo --> All: last tab closed - selection falls back to All
   Repo --> All: entry removed - tabs ungroup
 ```
 
@@ -284,13 +284,13 @@ flowchart TB
 - **Requirements:** R6, R10, R11, R12, R13
 - **Dependencies:** U2, U3, U4
 - **Files:** `app/src/workspace/view.rs` (thin call sites), `app/src/workspace/view/repo_sidebar.rs`, `app/src/workspace/repo_mode_model.rs`, additive helper module if needed for visible-tab accessor, `app/src/workspace/view_tests.rs`
-- **Approach:** Selection lives on `RepoModeModel` per window. One shared visible-tab accessor feeds horizontal strip and vertical list; composes with search as repo-first then query (KTD3). New tab while selected: `NewTerminalOptions` with `initial_directory` = entry root, then join bound group (KTD8); lazily create group if pruned (KTD4). Last-tab-close: keep selection, auto-open at root (R11) before empty-group prune races. Membership static (KTD6). Palette select actions work with panel closed (R13).
+- **Approach:** Selection lives on `RepoModeModel` per window. One shared visible-tab accessor feeds horizontal strip and vertical list; composes with search as repo-first then query (KTD3). New tab while selected: `NewTerminalOptions` with `initial_directory` = entry root, then join bound group (KTD8); lazily create group if pruned (KTD4). Last-tab-close: prune group, drop selection back to "All" (R11 as amended). Membership static (KTD6). Palette select actions work with panel closed (R13).
 - **Test scenarios:**
   - Covers AE2: two groups; selecting B hides A's tabs; A's processes keep running.
   - Covers AE5: fresh launch with NULL selection shows stock set with "All" active.
   - Covers AE6: `cd` outside the repo does not change `group_id`.
   - New tab under selection joins the group at entry root; new tab under "All" is ungrouped.
-  - Last tab of selected entry closed: entry stays selected, fresh tab opens at root (Covers R11 / F5).
+  - Last tab of selected entry closed: selection falls back to "All", no tab auto-opens (Covers R11 / F5).
   - Active tab outside the filtered set after switch: MRU-first member of the group activates.
   - Drag-in tab from another window appears only under "All" (Covers R10 / KTD6).
   - With repo B selected, searching for an A tab title returns no rows (search composition).
