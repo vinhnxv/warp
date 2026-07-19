@@ -671,6 +671,7 @@ default = [
     "tab_configs",
     "grouped_tabs",
     "pinned_tabs",
+    "repo_mode",
     "agent_harness",
     "hoa_onboarding_flow",
     "hoa_remote_control",

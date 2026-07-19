@@ -988,6 +988,14 @@ pub fn init(app: &mut AppContext) {
         .with_enabled(|| FeatureFlag::RepoMode.is_enabled())
         .with_group(bindings::BindingGroup::Navigation.as_str())
         .with_context_predicate(id!("Workspace")),
+        EditableBinding::new(
+            "workspace:select_repo_mode_picker",
+            "Select Repository...",
+            WorkspaceAction::SelectRepoModePicker,
+        )
+        .with_enabled(|| FeatureFlag::RepoMode.is_enabled())
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_context_predicate(id!("Workspace")),
     ]);
 
     // Tab grouping bindings (keyless by default; gated on `GroupedTabs`).

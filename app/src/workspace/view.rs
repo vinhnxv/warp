@@ -1155,6 +1155,12 @@ pub struct Workspace {
     vertical_tabs_panel_open: bool,
     /// Canonical path of the selected repo-mode entry, or None for "All".
     selected_repo_root: Option<String>,
+    /// Repositories-section order captured on first render after launch (R3:
+    /// order settles at launch; entries added later append at the end).
+    repo_mode_launch_order: RefCell<Option<Vec<String>>>,
+    /// Anchor for the repo-mode entry context menu / picker menu (reuses
+    /// `tab_right_click_menu`), or None when closed.
+    show_repo_mode_menu: Option<TabContextMenuAnchor>,
     vertical_tabs_panel: VerticalTabsPanelState,
     left_panel_view: ViewHandle<LeftPanelView>,
     left_panel_views: Vec<ToolPanelView>,
@@ -3460,6 +3466,8 @@ impl Workspace {
             left_panel_open: false,
             vertical_tabs_panel_open: false,
             selected_repo_root: None,
+            repo_mode_launch_order: RefCell::new(None),
+            show_repo_mode_menu: None,
             vertical_tabs_panel: Default::default(),
             left_panel_view,
             left_panel_views,
@@ -4000,12 +4008,33 @@ impl Workspace {
                 // pruned (no remaining members), recreate an empty group+tab.
                 if Self::repo_mode_enabled() {
                     if let Some(root) = self.selected_repo_root.clone() {
-                        let has_group = self
+                        let group_id = self
                             .tab_groups
                             .values()
-                            .any(|g| g.repo_root.as_deref() == Some(root.as_str()));
-                        if !has_group {
-                            self.create_repo_mode_group_with_tab(std::path::Path::new(&root), ctx);
+                            .find(|g| g.repo_root.as_deref() == Some(root.as_str()))
+                            .map(|g| g.id);
+                        match group_id {
+                            None => {
+                                self.create_repo_mode_group_with_tab(
+                                    std::path::Path::new(&root),
+                                    ctx,
+                                );
+                            }
+                            Some(group_id) => {
+                                // KTD3: the restored active tab may sit outside the
+                                // filtered set; fall back to the group's MRU member.
+                                let active_in_group = self
+                                    .tabs
+                                    .get(self.active_tab_index)
+                                    .is_some_and(|t| t.group_id == Some(group_id));
+                                if !active_in_group {
+                                    if let Some(index) =
+                                        self.mru_first_tab_index_in_group(group_id)
+                                    {
+                                        self.activate_tab_internal(index, ctx);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -9836,6 +9865,7 @@ impl Workspace {
                 self.show_tab_right_click_menu = None;
                 self.show_tab_group_right_click_menu = None;
                 self.show_tab_selection_right_click_menu = None;
+                self.show_repo_mode_menu = None;
                 self.hide_move_to_group_sidecar(ctx);
                 ctx.notify();
             }
@@ -11976,7 +12006,6 @@ impl Workspace {
                         .any(|g| g.repo_root.as_deref() == Some(root.as_str()))
                 {
                     self.create_repo_mode_group_with_tab(std::path::Path::new(&root), ctx);
-                    return;
                 }
             }
         }
@@ -23979,6 +24008,10 @@ impl TypedActionView for Workspace {
             RemoveRepoModeEntry(path) => self.remove_repo_mode_entry(path, ctx),
             SelectRepoModeAll => self.select_repo_mode_all(ctx),
             SelectRepoModeEntry(path) => self.select_repo_mode_entry(path, ctx),
+            ToggleRepoModeEntryMenu { path, position } => {
+                self.toggle_repo_mode_entry_menu(path, *position, ctx)
+            }
+            SelectRepoModePicker => self.open_repo_mode_picker_menu(ctx),
             AddDefaultTab => {
                 let effective_mode = AISettings::as_ref(ctx).default_session_mode(ctx);
                 match effective_mode {
@@ -26772,6 +26805,21 @@ impl View for Workspace {
 
                 self.add_move_to_group_sidecar_overlay(&mut stack, app);
             }
+        }
+
+        // Repo-mode entry context menu / picker menu (reuses the
+        // `tab_right_click_menu` view). Rendered regardless of tab bar mode so
+        // the palette picker works with the vertical tabs panel closed (R13).
+        if let Some(TabContextMenuAnchor::Pointer(position)) = self.show_repo_mode_menu {
+            stack.add_positioned_overlay_child(
+                ChildView::new(&self.tab_right_click_menu).finish(),
+                OffsetPositioning::offset_from_parent(
+                    position,
+                    ParentOffsetBounds::WindowByPosition,
+                    ParentAnchor::TopLeft,
+                    ChildAnchor::TopLeft,
+                ),
+            );
         }
 
         // Multi-tab selection menu (reuses the `tab_right_click_menu` view).

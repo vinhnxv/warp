@@ -54,7 +54,7 @@ impl ProjectManagementModel {
 
     /// Add a project to the list. If it already exists, update the last_opened_ts.
     pub fn upsert_project(&mut self, path: PathBuf, ctx: &mut ModelContext<Self>) {
-        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        let path = dunce::canonicalize(&path).unwrap_or(path);
         let now = Utc::now().naive_utc();
 
         let project = if let Some(existing_project) = self.projects.get_mut(&path) {
@@ -77,7 +77,7 @@ impl ProjectManagementModel {
 
     /// Remove a project from the list and persist the deletion.
     pub fn remove_project(&mut self, path: PathBuf, ctx: &mut ModelContext<Self>) {
-        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        let path = dunce::canonicalize(&path).unwrap_or(path);
         if self.projects.remove(&path).is_some() {
             self.delete_project(&path);
             ctx.emit(ProjectEvent::Removed { path });

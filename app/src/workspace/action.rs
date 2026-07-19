@@ -266,6 +266,11 @@ pub enum WorkspaceAction {
     SelectRepoModeAll,
     /// Repo mode: select a registered entry by canonical path.
     SelectRepoModeEntry(PathBuf),
+    /// Repo mode: open the context menu for a registry entry row.
+    ToggleRepoModeEntryMenu { path: PathBuf, position: Vector2F },
+    /// Repo mode: open a picker menu listing registry entries (R13; works with
+    /// the vertical tabs panel closed).
+    SelectRepoModePicker,
     AddDefaultTab,
     AddTerminalTab {
         hide_homepage: bool,
@@ -983,6 +988,8 @@ impl WorkspaceAction {
             | RemoveRepoModeEntry(_)
             | SelectRepoModeAll
             | SelectRepoModeEntry(_)
+            | ToggleRepoModeEntryMenu { .. }
+            | SelectRepoModePicker
             | ToggleTabColor { .. }
             | ToggleTabGroupColor { .. }
             | AddDefaultTab
