@@ -16,9 +16,9 @@ Figma: none provided.
 
 ## Non-goals
 - Viewing or interacting with the cloud child's shared terminal session in the TUI.
-- Rendering the cloud child's transcript in the placeholder.
-- Sending follow-up prompts or steering the cloud child from the placeholder.
-- Stopping, killing, deleting, or restarting a cloud child from the placeholder.
+- Rendering the cloud child's transcript in the read-only cloud session.
+- Sending follow-up prompts or steering the cloud child from the read-only cloud session.
+- Stopping, killing, deleting, or restarting a cloud child from the read-only cloud session.
 - Automatically retrying an orchestrated child after GitHub authentication completes.
 - Changing `StartAgentExecutor`, `RunAgentsExecutor`, their result types, or their existing timeout and blocked-launch semantics.
 - Changing the existing GUI cloud-pane launch, retry, status, or session-attachment behavior.
@@ -33,21 +33,21 @@ Figma: none provided.
 5. Multiple cloud children may launch concurrently. Each child displays and updates only its own name, status, startup issue, and run link.
 6. Local and cloud children can coexist in the same orchestration tree and use the same existing ordering and navigation behavior.
 
-### Placeholder layout
-7. Before cloud session viewing is supported, a focused cloud child renders a read-only placeholder instead of a terminal transcript, prompt input, inline menus, normal footer, zero state, or shell content.
-8. The placeholder's primary callout is centered horizontally and vertically within the content area available beneath the orchestration tab bar.
-9. The placeholder displays:
+### Cloud session layout
+7. Before cloud session viewing is supported, a focused cloud child renders a read-only status view instead of a terminal transcript, prompt input, inline menus, normal footer, zero state, or shell content.
+8. The cloud session's primary callout is centered horizontally and vertically within the content area available beneath the orchestration tab bar.
+9. The cloud session displays:
    - A status glyph using the same semantic status treatment as other TUI orchestration surfaces.
    - A concise status or startup message.
    - The relevant actionable link when one exists.
 10. The child's orchestration tab/header also displays the same current status. The header and callout never disagree about the child's state.
-11. The placeholder adapts to light, dark, and custom terminal themes using semantic styles rather than fixed colors.
-12. On narrow terminal widths, callout text and visible URLs wrap without overflowing or dropping URL content. Resizing recenters and reflows the placeholder without changing its state.
+11. The cloud session adapts to light, dark, and custom terminal themes using semantic styles rather than fixed colors.
+12. On narrow terminal widths, callout text and visible URLs wrap without overflowing or dropping URL content. Resizing recenters and reflows the cloud session without changing its state.
 
 ### Starting and successful launch
-13. From session creation until a run ID or startup issue is received, the placeholder shows a running/attention glyph and a message equivalent to `Starting cloud run…`.
+13. From session creation until a run ID or startup issue is received, the cloud session shows a running/attention glyph and a message equivalent to `Starting cloud run…`.
 14. A successful server response associates the returned task ID and run ID with the existing child session and resolves that child as launched in the parent `run_agents` result.
-15. Once the run ID is available, the placeholder displays `Click the link or hit Enter to view cloud run here:` followed by the run's Oz URL.
+15. Once the run ID is available, the cloud session displays `Click the link or hit Enter to view cloud run here:` followed by the run's Oz URL.
 16. The Oz URL targets the current Warp channel's Oz web application and the assigned run ID. The link never waits for a shared terminal session to become available.
 17. The visible URL is selectable and copyable as text.
 18. Clicking the link opens it in the user's configured browser.
@@ -55,7 +55,7 @@ Figma: none provided.
 20. Opening a link does not change TUI session selection, orchestration tab focus, child status, or launch state.
 
 ### Ongoing lifecycle status
-21. After launch, the placeholder and orchestration tab reflect the child's server lifecycle using the existing TUI status meanings:
+21. After launch, the cloud session and orchestration tab reflect the child's server lifecycle using the existing TUI status meanings:
    - Queued, started, restarted, and in-progress states display as in progress.
    - Blocked displays as blocked.
    - Succeeded and idle display as succeeded.
@@ -64,11 +64,11 @@ Figma: none provided.
 22. Lifecycle status continues updating while the cloud child session is focused or in the background.
 23. A terminal lifecycle state does not remove the cloud child session. The Oz run link remains available after success, failure, error, or cancellation.
 24. Duplicate, replayed, delayed, or out-of-order lifecycle notifications must not create duplicate sessions or associate one child's status with another child.
-25. If a lifecycle state is unknown, the placeholder fails closed to an error state rather than presenting the run as successful.
+25. If a lifecycle state is unknown, the cloud session fails closed to an error state rather than presenting the run as successful.
 
 ### GitHub authentication required
 26. If cloud startup fails because GitHub authentication is required before a server-side run is created, the existing child session is retained and displays a blocked status.
-27. The blocked placeholder shows:
+27. The blocked cloud session shows:
    - The server-provided or shared fallback explanation.
    - The actionable GitHub authentication URL.
    - Clear text that the orchestration request must be run again after authentication.
@@ -84,9 +84,9 @@ Figma: none provided.
 35. If request preparation fails before dispatch—for example, a missing parent run ID or unresolved required skill—the child reports that preparation failure rather than timing out.
 
 ### Interaction boundaries
-36. The cloud placeholder accepts no prompt or shell input. Printable keys are never forwarded to a local PTY or remote run.
-37. The placeholder does not expose stop, kill, delete, retry, or follow-up actions.
-38. When orchestration tabs are available and the cloud placeholder itself is focused, the bottom footer shows the same `Shift + ↑ sub-agents` hint as a regular TUI session. `Shift+Up` focuses the orchestration tab bar directly even though no prompt input is rendered.
-39. While cloud orchestration tabs are focused, the footer shows the regular tab navigation hints for Tab/Left/Right and Shift+Left/Right, but omits `Shift+Down` because returning focus to the read-only placeholder has no user-visible effect.
-40. Existing application exit behavior remains available; focusing a cloud placeholder must not make terminal-control keybindings act on a nonexistent local process.
+36. The cloud session accepts no prompt or shell input. Printable keys are never forwarded to a local PTY or remote run.
+37. The cloud session does not expose stop, kill, delete, retry, or follow-up actions.
+38. When orchestration tabs are available and the cloud session itself is focused, the bottom footer shows the same `Shift + ↑ sub-agents` hint as a regular TUI session. `Shift+Up` focuses the orchestration tab bar directly even though no prompt input is rendered.
+39. While cloud orchestration tabs are focused, the footer shows the regular tab navigation hints for Tab/Left/Right and Shift+Left/Right, but omits `Shift+Down` because returning focus to the read-only cloud session has no user-visible effect.
+40. Existing application exit behavior remains available; focusing a cloud session must not make terminal-control keybindings act on a nonexistent local process.
 41. The reusable link interaction behaves consistently for the Oz run URL and GitHub authentication URL, including hover treatment, click target, Enter activation, selection, and copying.

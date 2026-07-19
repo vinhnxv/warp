@@ -30,7 +30,7 @@ use warpui::SingletonEntity;
 use warpui_core::{AppContext, Entity, EntityId, ModelContext, ModelHandle, ViewHandle};
 
 use crate::cloud_run::TuiCloudRunState;
-use crate::session_registry::{RegisteredRemoteChildSession, TuiSessionId, TuiSessions};
+use crate::session_registry::{RemoteChildSession, TuiSessionId, TuiSessions};
 use crate::tab_bar::TuiTabBarPagingState;
 use crate::terminal_session_view::TuiTerminalSessionView;
 
@@ -66,8 +66,9 @@ pub(crate) struct TuiOrchestrationModel {
     /// Paging intent shared by the per-session tab-bar views.
     tab_bar_paging: TuiTabBarPagingState<AIConversationId>,
 }
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum TuiOrchestrationEvent {
-    MaterializeLocalOz {
+    CreateLocalChildSession {
         parent_session_id: TuiSessionId,
         request: Box<StartAgentRequest>,
         model_id: Option<String>,
@@ -75,12 +76,12 @@ pub(crate) enum TuiOrchestrationEvent {
         task_id: warp::tui_export::AmbientAgentTaskId,
         conversation_name: String,
     },
-    MaterializeRemote {
+    CreateRemoteChildSession {
         parent_session_id: TuiSessionId,
         request: Box<StartAgentRequest>,
         prepared: Box<PreparedRemoteChildLaunch>,
     },
-    RemoveSession(TuiSessionId),
+    RemoveChildSession(TuiSessionId),
 }
 
 pub(crate) struct MaterializedLocalOzChildSession {
@@ -290,7 +291,7 @@ impl TuiOrchestrationModel {
                     request.parent_conversation_id,
                     ctx,
                 );
-                self.launch_remote_child(
+                self.begin_remote_child_launch(
                     parent_session_id,
                     request,
                     RemoteChildLaunchConfig {
@@ -310,7 +311,7 @@ impl TuiOrchestrationModel {
         }
     }
 
-    fn launch_remote_child(
+    fn begin_remote_child_launch(
         &mut self,
         parent_session_id: TuiSessionId,
         request: StartAgentRequest,
@@ -324,32 +325,45 @@ impl TuiOrchestrationModel {
                 return;
             }
         };
-        ctx.emit(TuiOrchestrationEvent::MaterializeRemote {
+        ctx.emit(TuiOrchestrationEvent::CreateRemoteChildSession {
             parent_session_id,
             request: Box::new(request),
             prepared: Box::new(prepared),
         });
     }
 
-    pub(crate) fn launch_registered_remote_child(
+    /// Registers the remote child's conversation state, then starts its server-side launch.
+    pub(crate) fn register_remote_child_session(
         &mut self,
-        child: RegisteredRemoteChildSession,
+        child: RemoteChildSession,
+        request: StartAgentRequest,
+        prepared: PreparedRemoteChildLaunch,
         ctx: &mut ModelContext<Self>,
     ) {
-        let RegisteredRemoteChildSession {
-            session_id,
-            conversation_id,
-            surface_id,
-            cloud_run_state,
+        let PreparedRemoteChildLaunch {
+            display_name,
+            orchestration_harness,
             spawn_request,
+        } = prepared;
+        let conversation_id = self.initialize_remote_child_session(
+            &child,
+            &request,
+            display_name,
+            orchestration_harness,
+            ctx,
+        );
+        let RemoteChildSession {
+            session_id,
+            session_view: _,
+            cloud_run_state,
         } = child;
-        self.child_session_by_conversation
-            .insert(conversation_id, session_id);
+        let surface_id = session_id.surface_id();
         let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
         let cloud_run_state_for_launch = cloud_run_state.clone();
         ctx.spawn(
             async move { ai_client.spawn_agent(spawn_request).await },
             move |me, result, ctx| {
+                let result = result.map_err(|error| classify_cloud_agent_startup_error(&error));
                 me.finish_remote_child_launch(
                     conversation_id,
                     surface_id,
@@ -362,12 +376,45 @@ impl TuiOrchestrationModel {
         ctx.notify();
     }
 
+    fn initialize_remote_child_session(
+        &mut self,
+        child: &RemoteChildSession,
+        request: &StartAgentRequest,
+        display_name: String,
+        orchestration_harness: Harness,
+        ctx: &mut ModelContext<Self>,
+    ) -> AIConversationId {
+        let surface_id = child.session_id.surface_id();
+        let conversation_id = BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+            let conversation_id = history.start_new_child_conversation(
+                surface_id,
+                display_name,
+                request.parent_conversation_id,
+                Some(orchestration_harness),
+                ctx,
+            );
+            history.mark_conversation_as_remote_child(conversation_id, ctx);
+            history.set_active_conversation_id(conversation_id, surface_id, ctx);
+            history.record_new_conversation_request_complete(request.id, conversation_id, ctx);
+            conversation_id
+        });
+        child.cloud_run_state.update(ctx, |state, ctx| {
+            state.set_conversation_id(conversation_id, ctx);
+        });
+        child.session_view.update(ctx, |view, ctx| {
+            view.initialize_orchestrated_child_conversation(conversation_id, ctx);
+        });
+        self.child_session_by_conversation
+            .insert(conversation_id, child.session_id);
+        conversation_id
+    }
+
     fn finish_remote_child_launch(
         &mut self,
         conversation_id: AIConversationId,
         child_surface_id: EntityId,
         cloud_run_state: ModelHandle<TuiCloudRunState>,
-        result: anyhow::Result<warp::tui_export::SpawnAgentResponse>,
+        result: Result<warp::tui_export::SpawnAgentResponse, CloudAgentStartupIssue>,
         ctx: &mut ModelContext<Self>,
     ) {
         match result {
@@ -386,26 +433,7 @@ impl TuiOrchestrationModel {
                     );
                 });
             }
-            Err(error) => self.apply_remote_child_startup_issue(
-                conversation_id,
-                child_surface_id,
-                cloud_run_state,
-                classify_cloud_agent_startup_error(&error),
-                ctx,
-            ),
-        }
-    }
-
-    fn apply_remote_child_startup_issue(
-        &mut self,
-        conversation_id: AIConversationId,
-        child_surface_id: EntityId,
-        cloud_run_state: ModelHandle<TuiCloudRunState>,
-        issue: CloudAgentStartupIssue,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        match issue {
-            CloudAgentStartupIssue::Blocked(blocker) => {
+            Err(CloudAgentStartupIssue::Blocked(blocker)) => {
                 let message = blocker.message().to_string();
                 cloud_run_state.update(ctx, |state, ctx| {
                     state.set_blocked(blocker, ctx);
@@ -421,7 +449,7 @@ impl TuiOrchestrationModel {
                     );
                 });
             }
-            CloudAgentStartupIssue::Failed(failure) => {
+            Err(CloudAgentStartupIssue::Failed(failure)) => {
                 let message = failure.message().to_string();
                 cloud_run_state.update(ctx, |state, ctx| {
                     state.set_failed(failure, ctx);
@@ -500,7 +528,7 @@ impl TuiOrchestrationModel {
             ctx,
         );
         ctx.spawn(launch, move |me, result, ctx| match result {
-            Ok(prepared) => ctx.emit(TuiOrchestrationEvent::MaterializeLocalOz {
+            Ok(prepared) => ctx.emit(TuiOrchestrationEvent::CreateLocalChildSession {
                 parent_session_id,
                 request: Box::new(request),
                 model_id,
@@ -585,7 +613,7 @@ impl TuiOrchestrationModel {
             history.delete_conversation(*conversation_id, terminal_surface_id, ctx);
         });
         if let Some(session_id) = self.child_session_by_conversation.remove(conversation_id) {
-            ctx.emit(TuiOrchestrationEvent::RemoveSession(session_id));
+            ctx.emit(TuiOrchestrationEvent::RemoveChildSession(session_id));
         }
         ctx.notify();
     }

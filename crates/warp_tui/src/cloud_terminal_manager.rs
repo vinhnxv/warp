@@ -8,7 +8,10 @@ use std::sync::Arc;
 
 use parking_lot::FairMutex;
 use pathfinder_geometry::vector::Vector2F;
-use warp::tui_export::{BlockSpacing, TerminalManagerTrait, TerminalModel, TerminalSurfaceInit};
+use warp::tui_export::{
+    initialize_tui_cloud_viewer_terminal, BlockSpacing, TerminalManagerTrait, TerminalModel,
+    TerminalSurfaceInit,
+};
 use warpui_core::AppContext;
 
 /// Retains the PTY-less terminal model for a deferred cloud session.
@@ -24,8 +27,7 @@ impl TuiCloudTerminalManager {
         block_spacing: BlockSpacing,
         ctx: &mut AppContext,
     ) -> (Self, TerminalSurfaceInit) {
-        let surface_init =
-            TerminalSurfaceInit::new_for_tui_cloud_viewer(initial_size, block_spacing, ctx);
+        let surface_init = initialize_tui_cloud_viewer_terminal(initial_size, block_spacing, ctx);
         let manager = Self {
             model: surface_init.model.clone(),
             _inactive_pty_reads_rx: surface_init.inactive_pty_reads_rx.clone(),

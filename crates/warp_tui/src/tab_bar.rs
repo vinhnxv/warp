@@ -812,6 +812,7 @@ fn tab_fixed_columns(tab: &TuiTab, padding_columns: u16) -> u16 {
         .saturating_add(leading_columns)
         .saturating_add(u16::try_from(content_count.saturating_sub(1)).unwrap_or(u16::MAX))
 }
+
 #[cfg(test)]
 #[path = "tab_bar_tests.rs"]
 mod tests;

@@ -96,6 +96,37 @@ fn add_child_session(
     (session_id, conversation_id)
 }
 
+fn add_remote_child_session(
+    app: &mut App,
+    fixture: &OrchestrationFixture,
+    parent_session_id: TuiSessionId,
+    request: &StartAgentRequest,
+    display_name: String,
+    orchestration_harness: Harness,
+) -> (
+    AIConversationId,
+    warpui::EntityId,
+    ModelHandle<crate::cloud_run::TuiCloudRunState>,
+) {
+    let child = app.update(|ctx| {
+        TuiSessions::create_remote_child_session(&fixture.sessions, parent_session_id, ctx)
+    });
+    let surface_id = child.session_id.surface_id();
+    let cloud_run_state = child.cloud_run_state.clone();
+    let conversation_id = app.update(|ctx| {
+        TuiOrchestrationModel::handle(ctx).update(ctx, |model, ctx| {
+            model.initialize_remote_child_session(
+                &child,
+                request,
+                display_name,
+                orchestration_harness,
+                ctx,
+            )
+        })
+    });
+    (conversation_id, surface_id, cloud_run_state)
+}
+
 /// Registers a session with a live active conversation.
 fn add_dispatching_session(
     app: &mut App,
@@ -208,6 +239,7 @@ fn assert_failed_launch_cleaned_up(
         expected_session_count,
     );
 }
+
 #[test]
 fn local_harness_children_fail_cleanly() {
     App::test((), |mut app| async move {
@@ -241,25 +273,26 @@ fn github_auth_blocker_keeps_the_remote_session_and_actionable_url() {
                 .id()
         });
         let request = remote_request(parent_conversation_id);
-        let (conversation_id, surface_id, cloud_run_state) = app.update(|ctx| {
-            TuiSessions::materialize_remote_child_for_test(
-                &fixture.sessions,
-                &request,
-                "cloud-researcher".to_string(),
-                Harness::Oz,
-                ctx,
-            )
-        });
+        let (conversation_id, surface_id, cloud_run_state) = add_remote_child_session(
+            &mut app,
+            &fixture,
+            parent_session_id,
+            &request,
+            "cloud-researcher".to_string(),
+            Harness::Oz,
+        );
         app.update(|ctx| {
             TuiOrchestrationModel::handle(ctx).update(ctx, |model, ctx| {
-                model.apply_remote_child_startup_issue(
+                model.finish_remote_child_launch(
                     conversation_id,
                     surface_id,
                     cloud_run_state.clone(),
-                    CloudAgentStartupIssue::Blocked(CloudAgentStartupBlocker::GitHubAuthRequired {
-                        message: "GitHub authentication required".to_string(),
-                        auth_url: "https://example.com/auth".to_string(),
-                    }),
+                    Err(CloudAgentStartupIssue::Blocked(
+                        CloudAgentStartupBlocker::GitHubAuthRequired {
+                            message: "GitHub authentication required".to_string(),
+                            auth_url: "https://example.com/auth".to_string(),
+                        },
+                    )),
                     ctx,
                 );
             });
@@ -386,7 +419,7 @@ fn snapshot_is_shared_across_tree_and_filters_conversations_without_sessions() {
 }
 
 #[test]
-fn remote_child_materialization_is_navigable_and_projects_lifecycle() {
+fn remote_child_session_is_navigable_and_projects_lifecycle() {
     App::test((), |mut app| async move {
         let fixture = orchestration_fixture(&mut app);
         let parent_session_id = add_dispatching_session(&mut app, &fixture, true);
@@ -397,15 +430,14 @@ fn remote_child_materialization_is_navigable_and_projects_lifecycle() {
                 .id()
         });
         let request = remote_request(parent_conversation_id);
-        let (conversation_id, surface_id, cloud_run_state) = app.update(|ctx| {
-            TuiSessions::materialize_remote_child_for_test(
-                &fixture.sessions,
-                &request,
-                "cloud-researcher".to_string(),
-                Harness::Oz,
-                ctx,
-            )
-        });
+        let (conversation_id, surface_id, cloud_run_state) = add_remote_child_session(
+            &mut app,
+            &fixture,
+            parent_session_id,
+            &request,
+            "cloud-researcher".to_string(),
+            Harness::Oz,
+        );
         app.read(|ctx| {
             let history = BlocklistAIHistoryModel::as_ref(ctx);
             let conversation = history.conversation(&conversation_id).unwrap();

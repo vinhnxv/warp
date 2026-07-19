@@ -16,7 +16,7 @@ pub(crate) enum TuiCloudRunStartup {
     Spawned,
 }
 
-/// Per-session metadata for a cloud child placeholder.
+/// Per-session metadata for a cloud child session.
 pub(crate) struct TuiCloudRunState {
     conversation_id: Option<AIConversationId>,
     startup: TuiCloudRunStartup,

@@ -36,7 +36,7 @@ use crate::features::FeatureFlag;
 use crate::persistence::ModelEvent;
 use crate::send_telemetry_on_executor;
 use crate::server::telemetry::TelemetryEvent;
-use crate::settings::{DebugSettings, InputModeSettings, PrivacySettings, SshSettings};
+use crate::settings::{DebugSettings, PrivacySettings, SshSettings};
 use crate::terminal::available_shells::{AvailableShell, AvailableShells};
 use crate::terminal::color::List as ColorList;
 use crate::terminal::event_listener::ChannelEventListener;
@@ -47,7 +47,6 @@ use crate::terminal::model::session::Sessions;
 #[cfg(unix)]
 use crate::terminal::model::terminal_model::BlockIndex;
 use crate::terminal::model::terminal_model::ExitReason;
-use crate::terminal::model::ObfuscateSecrets;
 #[cfg(unix)]
 use crate::terminal::model_events::ModelEvent as TerminalModelEvent;
 use crate::terminal::model_events::ModelEventDispatcher;
@@ -125,83 +124,6 @@ pub struct TerminalSurfaceInit {
 }
 
 impl TerminalSurfaceInit {
-    /// Creates the shared terminal state used by a deferred or connected
-    /// shared-session viewer without spawning a local PTY.
-    pub(crate) fn new_for_shared_session_viewer(
-        initial_size: Vector2F,
-        block_spacing: BlockSpacing,
-        is_ambient_agent: bool,
-        ctx: &mut AppContext,
-    ) -> (Self, ChannelEventListener) {
-        let (wakeups_tx, wakeups_rx) = async_channel::unbounded();
-        let (events_tx, events_rx) = async_channel::unbounded();
-        let (executor_command_tx, _executor_command_rx) = async_channel::unbounded();
-        let (pty_reads_tx, pty_reads_rx) =
-            async_broadcast::broadcast(PTY_READS_BROADCAST_CHANNEL_SIZE);
-        let inactive_pty_reads_rx = pty_reads_rx.deactivate();
-        let channel_event_proxy = ChannelEventListener::new(wakeups_tx, events_tx, pty_reads_tx);
-        let sizes = terminal_manager::compute_block_size(initial_size, &block_spacing, ctx);
-        let honor_ps1 = *SessionSettings::as_ref(ctx).honor_ps1;
-        let input_mode = *InputModeSettings::as_ref(ctx).input_mode.value();
-        let is_inverted = input_mode.is_inverted_blocklist();
-        let model = if is_ambient_agent {
-            TerminalModel::new_for_cloud_mode_shared_session_viewer(
-                sizes,
-                terminal_manager::terminal_colors_list(ctx),
-                channel_event_proxy.clone(),
-                ctx.background_executor().clone(),
-                block_spacing.show_memory_stats,
-                honor_ps1,
-                is_inverted,
-                ObfuscateSecrets::No,
-            )
-        } else {
-            TerminalModel::new_for_shared_session_viewer(
-                sizes,
-                terminal_manager::terminal_colors_list(ctx),
-                channel_event_proxy.clone(),
-                ctx.background_executor().clone(),
-                block_spacing.show_memory_stats,
-                honor_ps1,
-                is_inverted,
-                ObfuscateSecrets::No,
-            )
-        };
-        let colors = model.colors();
-        let size_info = model.block_list().size().to_owned();
-        let model = Arc::new(FairMutex::new(model));
-        let sessions = ctx.add_model(|ctx| Sessions::new(executor_command_tx, ctx));
-        let model_events =
-            ctx.add_model(|ctx| ModelEventDispatcher::new(events_rx, sessions.clone(), ctx));
-        (
-            Self {
-                wakeups_rx,
-                model_events,
-                model,
-                sessions,
-                size_info,
-                colors,
-                inactive_pty_reads_rx,
-            },
-            channel_event_proxy,
-        )
-    }
-
-    /// Creates a deferred cloud-viewer terminal surface without spawning a local PTY.
-    #[cfg(feature = "tui")]
-    pub fn new_for_tui_cloud_viewer(
-        initial_size: Vector2F,
-        block_spacing: BlockSpacing,
-        ctx: &mut AppContext,
-    ) -> Self {
-        Self::new_for_shared_session_viewer(
-            initial_size,
-            block_spacing,
-            /*is_ambient_agent*/ true,
-            ctx,
-        )
-        .0
-    }
     /// Creates mock terminal surface inputs without spawning a PTY.
     #[cfg(any(test, all(feature = "tui", feature = "test-util")))]
     pub fn new_for_test(ctx: &mut AppContext) -> Self {

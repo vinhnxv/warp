@@ -178,6 +178,8 @@ pub use crate::terminal::model::session::active_session::{ActiveSession, ActiveS
 pub use crate::terminal::model::session::Sessions;
 pub use crate::terminal::model::terminal_model::BlockIndex;
 pub use crate::terminal::model_events::{ModelEvent, ModelEventDispatcher};
+#[cfg(feature = "tui")]
+pub use crate::terminal::shared_session::viewer::terminal_manager::initialize_tui_cloud_viewer_terminal;
 pub use crate::terminal::shared_session::IsSharedSessionCreator;
 pub use crate::terminal::terminal_manager::BlockSpacing;
 pub use crate::terminal::view::blocklist_filter::should_show_task_in_blocklist;

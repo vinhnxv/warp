@@ -17,7 +17,7 @@ use crate::auth::auth_state::AuthState;
 use crate::auth::AuthStateProvider;
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::server::cloud_objects::update_manager::UpdateManager;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 use crate::server::server_api::auth::MockAuthClient;
 use crate::server::server_api::auth::{AuthClient, SyncedUserSettings};
 use crate::server::server_api::ServerApiProvider;
@@ -307,27 +307,6 @@ impl PrivacySettings {
         }
     }
 
-    /// Constructor for external test crates compiled with `test-util`.
-    ///
-    /// Dependency crates do not receive `cfg(test)`, so `warp_tui` cannot use
-    /// [`Self::mock`]. Its fixture registers test auth/server providers and
-    /// uses this constructor to avoid reading persisted settings.
-    #[cfg(feature = "test-util")]
-    pub fn new_for_test(ctx: &mut ModelContext<Self>) -> Self {
-        Self {
-            auth_state: AuthStateProvider::as_ref(ctx).get().clone(),
-            auth_client: ServerApiProvider::as_ref(ctx).get_auth_client(),
-            is_crash_reporting_enabled: true,
-            is_telemetry_enabled: true,
-            is_cloud_conversation_storage_enabled: true,
-            user_secret_regex_list: CustomSecretRegexList::new(None),
-            has_initialized_default_secret_regexes: HasInitializedDefaultSecretRegexes::new(None),
-            is_telemetry_force_enabled: false,
-            is_enterprise_secret_redaction_enabled: false,
-            enterprise_secret_regex_list: Vec::new(),
-        }
-    }
-
     pub fn is_telemetry_force_enabled(&self) -> bool {
         self.is_telemetry_force_enabled
     }
@@ -474,7 +453,7 @@ impl PrivacySettings {
     }
 
     /// Constructor for tests only.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     pub fn mock(_ctx: &mut ModelContext<Self>) -> Self {
         Self {
             auth_state: Arc::new(AuthState::new_for_test()),

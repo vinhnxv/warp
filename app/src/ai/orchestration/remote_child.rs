@@ -1,3 +1,7 @@
+//! Prepares orchestrated remote-child launches and classifies their startup errors.
+//!
+//! This module owns frontend-neutral request construction and startup issue semantics;
+//! frontend-specific callers remain responsible for lifecycle state and presentation.
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use prost::Message as _;
