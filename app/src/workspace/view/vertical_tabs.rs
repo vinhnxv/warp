@@ -1772,7 +1772,7 @@ fn render_vertical_tabs_panel(
 /// the context; user-created (non-repo) groups keep their chrome.
 /// `in_repo_accordion` additionally collapses terminal rows to their
 /// command/conversation line (nested under a repo row that already shows the
-/// directory/branch/PR context); the Terminals section flattens without it so
+/// directory/branch/PR context); the "Other tabs" section flattens without it so
 /// its rows keep the stock layout.
 pub(super) fn render_groups(
     state: &VerticalTabsPanelState,

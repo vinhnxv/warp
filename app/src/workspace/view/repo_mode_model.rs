@@ -188,7 +188,7 @@ impl Workspace {
     /// starts at an entry root. The tab starts at the user's home directory
     /// explicitly — the stock new-tab flow can inherit the previous session's
     /// cwd, which would classify the tab under that repo instead of the
-    /// Terminals section.
+    /// "Other tabs" section.
     pub(super) fn new_repo_mode_loose_tab(&mut self, ctx: &mut ViewContext<Self>) {
         if !Self::repo_mode_enabled() {
             return;

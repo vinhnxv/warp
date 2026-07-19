@@ -2,7 +2,7 @@
 //!
 //! Renders a unified tree: one row per registry entry, with the selected
 //! repo's tabs nested directly beneath its row (accordion — selection is
-//! expansion). Below a divider, a "Terminals" section lists tabs not tied to
+//! expansion). Below a divider, an "Other tabs" section lists tabs not tied to
 //! any registry entry and offers a "+ New" button that opens a plain terminal
 //! detached from every repo.
 
@@ -50,7 +50,7 @@ const BRANCH_CACHE_TTL: Duration = Duration::from_secs(5);
 #[derive(Clone, Default)]
 pub(super) struct RepoSidebarState {
     pub add_button: MouseStateHandle,
-    /// Hover state for the "+ New" button on the Terminals section header.
+    /// Hover state for the "+ New" button on the "Other tabs" section header.
     pub new_terminal_button: MouseStateHandle,
     pub entry_rows: RefCell<HashMap<String, MouseStateHandle>>,
     /// Hover state for the clickable PR badge on each repo row.
@@ -88,9 +88,9 @@ pub(super) fn render_repo_header(state: &RepoSidebarState, app: &AppContext) -> 
         .finish()
 }
 
-/// "Terminals" section header with a "+ New" button that opens a plain
+/// "Other tabs" section header with a "+ New" button that opens a plain
 /// terminal detached from every repo entry.
-fn render_terminals_header(
+fn render_other_tabs_header(
     mouse: MouseStateHandle,
     app_appearance: &Appearance,
 ) -> Box<dyn Element> {
@@ -100,7 +100,7 @@ fn render_terminals_header(
         .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
         .with_child(
-            Text::new("Terminals", app_appearance.ui_font_family(), 11.)
+            Text::new("Other tabs", app_appearance.ui_font_family(), 11.)
                 .with_color(theme.sub_text_color(theme.background()).into())
                 .finish(),
         )
@@ -207,14 +207,14 @@ pub(super) fn render_repo_tree(
         }
     }
 
-    // "Terminals" section: loose tabs (cwd outside every registry entry) stay
+    // "Other tabs" section: loose tabs (cwd outside every registry entry) stay
     // visible below the tree regardless of selection, as plain terminal rows —
     // repo-bound group chrome is stripped (a repo group's tab that cd'd away
     // still carries its group binding), while user-created groups keep theirs.
     // The header is always shown so its "+ New" button remains the way to open
     // a terminal detached from every repo.
     column = column.with_child(render_divider(appearance));
-    column = column.with_child(render_terminals_header(
+    column = column.with_child(render_other_tabs_header(
         sidebar.new_terminal_button.clone(),
         appearance,
     ));
