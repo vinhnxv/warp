@@ -59,12 +59,13 @@ fn test_resolve_file_target_warp_uses_default_layout() {
 #[cfg(feature = "local_fs")]
 fn test_resolve_file_target_to_open_in_warp_never_leaves_warp() {
     use crate::util::file::external_editor::settings::{
-        OpenCodePanelsFileEditor, OpenConversationLayoutPreference, OpenFileEditor, OpenFileLayout,
-        PreferMarkdownViewer, PreferTabbedEditorView,
+        DefaultFolderEditor, OpenCodePanelsFileEditor, OpenConversationLayoutPreference,
+        OpenFileEditor, OpenFileLayout, PreferMarkdownViewer, PreferTabbedEditorView,
     };
 
     let settings = EditorSettings {
         open_file_editor: OpenFileEditor::new(Some(EditorChoice::ExternalEditor(Editor::VSCode))),
+        default_folder_editor: DefaultFolderEditor::new(None),
         open_code_panels_file_editor: OpenCodePanelsFileEditor::new(Some(
             EditorChoice::ExternalEditor(Editor::VSCode),
         )),

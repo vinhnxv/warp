@@ -79,6 +79,17 @@ define_settings_group!(EditorSettings, settings: [
         max_table_depth: 0,
         description: "The editor used to open files.",
     },
+    default_folder_editor: DefaultFolderEditor {
+        type: EditorChoice,
+        default: EditorChoice::SystemDefault,
+        supported_platforms: SupportedPlatforms::ALL,
+        sync_to_cloud: SyncToCloud::Never,
+        surface: settings::SettingSurfaces::GUI,
+        private: false,
+        toml_path: "code.editor.default_folder_editor",
+        max_table_depth: 0,
+        description: "The editor the primary toolbar button uses to open folders.",
+    },
     open_code_panels_file_editor: OpenCodePanelsFileEditor {
         type: EditorChoice,
         default: EditorChoice::Warp,
@@ -157,3 +168,62 @@ impl OpenConversationPreference {
         matches!(self, Self::NewTab)
     }
 }
+
+/// Computes the value to seed `default_folder_editor` with the first time it is
+/// read while unset.
+///
+/// - If the user's existing `open_file_editor` is already an external editor,
+///   reuse that editor.
+/// - Otherwise fall back to the first installed editor.
+/// - If no editor is installed, return `None` so the setting stays unset (the
+///   primary toolbar button then falls back to revealing the folder in the
+///   system file manager).
+///
+/// Pure helper (no `AppContext`) so the seeding rules can be unit tested; the
+/// caller is responsible for supplying the already-installed-filtered editors.
+fn seed_default_folder_editor(
+    open_file_editor: EditorChoice,
+    installed_editors: &[super::Editor],
+) -> Option<super::Editor> {
+    if let EditorChoice::ExternalEditor(editor) = open_file_editor {
+        return Some(editor);
+    }
+    installed_editors.first().copied()
+}
+
+/// Resolves the external editor the primary toolbar button should open folders
+/// in.
+///
+/// When `default_folder_editor` has been set explicitly it is used directly;
+/// when it has never been set the first-run seed (see
+/// [`seed_default_folder_editor`]) is applied against the currently installed
+/// editors. Returns `None` when no external editor is configured or installed.
+pub fn resolve_default_folder_editor(ctx: &mut warpui::AppContext) -> Option<super::Editor> {
+    use settings::Setting as _;
+    use warpui::SingletonEntity as _;
+
+    let editor_settings = EditorSettings::as_ref(ctx);
+    let explicitly_set = editor_settings
+        .default_folder_editor
+        .is_value_explicitly_set();
+    let default_folder_editor = *editor_settings.default_folder_editor;
+    let open_file_editor = *editor_settings.open_file_editor;
+
+    if explicitly_set {
+        return match default_folder_editor {
+            EditorChoice::ExternalEditor(editor) => Some(editor),
+            _ => None,
+        };
+    }
+
+    let installed_editors: Vec<super::Editor> = super::SUPPORTED_EDITORS
+        .iter()
+        .copied()
+        .filter(|editor| editor.is_installed(ctx))
+        .collect();
+    seed_default_folder_editor(open_file_editor, &installed_editors)
+}
+
+#[cfg(test)]
+#[path = "settings_tests.rs"]
+mod tests;
