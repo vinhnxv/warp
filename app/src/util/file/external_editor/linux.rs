@@ -330,10 +330,24 @@ pub fn open_file_path_with_line_and_col(
     full_path: &Path,
     ctx: &mut AppContext,
 ) {
-    if full_path.is_file() {
-        let with_editor = with_editor.or_else(|| get_app_for_file_from_mime(full_path));
+    let is_dir = full_path.is_dir();
+    if full_path.is_file() || is_dir {
+        // A directory can only be opened through an explicitly chosen editor.
+        // `get_app_for_file_from_mime` classifies a directory as `inode/directory`
+        // whose default handler is a file manager, never an editor, so we skip
+        // MIME inference for folders.
+        let with_editor = if is_dir {
+            with_editor
+        } else {
+            with_editor.or_else(|| get_app_for_file_from_mime(full_path))
+        };
         if let Some(editor) = with_editor {
-            if let Some(mut command) = editor.command(full_path, line_column_number) {
+            let command = if is_dir {
+                editor.folder_command(full_path)
+            } else {
+                editor.command(full_path, line_column_number)
+            };
+            if let Some(mut command) = command {
                 if let Err(err) = command.spawn() {
                     report_error!(
                         anyhow::Error::new(err).context("Error launching editor"),
@@ -624,6 +638,54 @@ impl Editor {
                         report_error!(
                             anyhow::Error::new(err).context("Failed to build editor open command")
                         );
+                        None
+                    }
+                },
+                None => None,
+            },
+        }
+    }
+
+    /// Builds a command to open a *directory* in this editor.
+    ///
+    /// Unlike [`Self::command`], this never uses the `<scheme>://file<path>` URL
+    /// that URL-scheme editors (VS Code, VS Code Insiders, Windsurf) use for
+    /// files — that URL is unreliable for directories. Every editor instead
+    /// opens the folder through its `.desktop` `Exec` entry: the `%f`/`%F` field
+    /// code accepts a directory path just like a file. Line/column are omitted
+    /// because they are meaningless for a folder.
+    fn folder_command(&self, folder_path: &Path) -> Option<Command> {
+        use Editor::*;
+        match self {
+            // Zed is launched from its channel-specific binary rather than its
+            // `.desktop` Exec, mirroring [`Self::command`].
+            Zed | ZedPreview => {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let binary_path = match self {
+                    Zed => format!("{home}/.local/zed.app/bin/zed"),
+                    ZedPreview => format!("{home}/.local/zed-preview.app/bin/zed"),
+                    _ => unreachable!(),
+                };
+
+                // Build command using setsid for proper detachment, passing the
+                // directory verbatim (no line/column).
+                let folder_path_str = folder_path.display().to_string();
+                let mut command = Command::new("/usr/bin/setsid");
+                command.args(["-f", &binary_path, &folder_path_str]);
+
+                command.stdin(std::process::Stdio::null());
+                command.stdout(std::process::Stdio::null());
+                command.stderr(std::process::Stdio::null());
+                Some(command)
+            }
+            // Every other editor opens a directory through its `.desktop` Exec,
+            // substituting the folder for `%f`/`%F`.
+            _ => match self.get_metadata() {
+                Some(metadata) => match metadata.build_default_command(folder_path) {
+                    Ok(command) => Some(command),
+                    Err(err) => {
+                        report_error!(anyhow::Error::new(err)
+                            .context("Failed to build editor folder open command"));
                         None
                     }
                 },

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use warp_util::path::LineAndColumnArg;
 
-use super::{tokenize_exec, DesktopExecError, EditorMetadata};
+use super::{tokenize_exec, DesktopExecError, Editor, EditorMetadata};
 
 #[cfg(test)]
 fn with_files(tag: &str, contents: &str, cb: impl FnOnce(PathBuf, PathBuf) -> anyhow::Result<()>) {
@@ -681,5 +681,57 @@ fn test_deprecated_field_codes_are_dropped() {
             assert_eq!(cmd.get_args().collect::<Vec<_>>(), [file_path.as_str()]);
             Ok(())
         },
+    );
+}
+
+// ---------- Folder-launch behavior ----------
+
+// A directory substitutes into the `.desktop` `%F` field code exactly like a
+// file, with no `:line:col` suffix and no `--line` flag. This is the
+// folder-launch path that URL-scheme editors (VS Code, ...) and JetBrains IDEs
+// take for directories, routing them through the `.desktop` `Exec` rather than
+// a `<scheme>://file<dir>` URL.
+#[test]
+fn test_folder_path_substitution_omits_line_and_column() {
+    let data = r#"
+    [Desktop Entry]
+    Version=1.0
+    Type=Application
+    Exec=/usr/bin/code --new-window %F
+    "#;
+    with_files(
+        "test_folder_path_substitution_omits_line_and_column",
+        data,
+        |desktop, _content| {
+            let metadata = EditorMetadata::try_new(desktop)?;
+            let folder = PathBuf::from("/home/user/my-project");
+            let cmd = metadata.build_default_command(&folder)?;
+
+            assert_eq!(cmd.get_program(), "/usr/bin/code");
+            assert_eq!(
+                cmd.get_args().collect::<Vec<_>>(),
+                ["--new-window", "/home/user/my-project"]
+            );
+            Ok(())
+        },
+    );
+}
+
+// Zed opens a directory from its channel-specific binary (not the `.desktop`
+// Exec), with the folder passed verbatim and no line/column.
+#[test]
+fn test_folder_command_zed_uses_binary_without_position() {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let binary_path = format!("{home}/.local/zed.app/bin/zed");
+    let folder = PathBuf::from("/home/user/my-project");
+
+    let command = Editor::Zed
+        .folder_command(&folder)
+        .expect("Zed folder command should be built from its binary path");
+
+    assert_eq!(command.get_program(), "/usr/bin/setsid");
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        ["-f", binary_path.as_str(), "/home/user/my-project"]
     );
 }

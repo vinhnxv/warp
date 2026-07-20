@@ -18,8 +18,23 @@ use super::Editor;
 static INSTALLED_EDITOR_METADATA: OnceLock<HashMap<Editor, EditorMetadata>> = OnceLock::new();
 
 struct EditorMetadata {
-    #[allow(unused)]
     executable_path: PathBuf,
+}
+
+impl EditorMetadata {
+    /// Builds a command that opens a *directory* by launching the editor
+    /// executable directly with `folder_path` as its sole argument
+    /// (`<editor.exe> <folder>`).
+    ///
+    /// Unlike [`Editor::command`], this never uses the `<scheme>://file<path>`
+    /// URL that URL-scheme editors (VS Code, Cursor, Windsurf) use for files —
+    /// that URL is unreliable for directories. Line/column are omitted because
+    /// they are meaningless for a folder.
+    fn folder_command(&self, folder_path: &Path) -> Command {
+        let mut command = Command::new(&self.executable_path);
+        command.arg(folder_path);
+        command
+    }
 }
 
 /// Enum denoting the method to determine the installation location for a supported editor.
@@ -199,6 +214,19 @@ impl Editor {
 
         Some(command)
     }
+
+    /// Builds a command to open a *directory* in this editor, or `None` if the
+    /// editor is not installed. The folder is opened by launching the editor
+    /// executable resolved from the Windows registry (`executable_path`), rather
+    /// than through a `<scheme>://file<dir>` URL.
+    fn folder_command(&self, folder_path: &Path) -> Option<Command> {
+        Some(
+            INSTALLED_EDITOR_METADATA
+                .get_or_init(compute_installed_editors)
+                .get(self)?
+                .folder_command(folder_path),
+        )
+    }
 }
 
 /// Opens the given file in the specified editor.
@@ -214,10 +242,16 @@ pub fn open_file_path_with_line_and_col(
     full_path: &Path,
     ctx: &mut AppContext,
 ) {
-    if full_path.is_file() {
+    let is_dir = full_path.is_dir();
+    if full_path.is_file() || is_dir {
         with_editor = with_editor.filter(|editor| editor.is_installed(ctx));
         if let Some(editor) = with_editor {
-            if let Some(mut command) = editor.command(line_column_number, full_path) {
+            let command = if is_dir {
+                editor.folder_command(full_path)
+            } else {
+                editor.command(line_column_number, full_path)
+            };
+            if let Some(mut command) = command {
                 if let Err(err) = command.spawn() {
                     report_error!(
                         anyhow::Error::new(err).context("Error launching editor"),
@@ -231,3 +265,7 @@ pub fn open_file_path_with_line_and_col(
 
     ctx.open_file_path(full_path);
 }
+
+#[cfg(test)]
+#[path = "windows_tests.rs"]
+mod tests;

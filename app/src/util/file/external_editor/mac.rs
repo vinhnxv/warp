@@ -155,6 +155,18 @@ impl<'a> Editor {
         line_column_number: Option<LineAndColumnArg>,
         full_path: &Path,
     ) -> (OpenFileInEditorMethod, Vec<String>) {
+        // Directories cannot be opened reliably through the `<scheme>://file<dir>`
+        // URL that URL-scheme editors (VS Code, Cursor, Windsurf, ...) use for
+        // files. Launch the editor's application bundle directly with the
+        // directory as an argument (`open -a <bundle> <dir>`), and omit
+        // line/column, which is meaningless for a folder.
+        if full_path.is_dir() {
+            return (
+                OpenFileInEditorMethod::FromApplicationBundleInfo,
+                vec![full_path.to_string_lossy().to_string()],
+            );
+        }
+
         let full_path_with_line_column =
             Self::format_file_path_with_line_and_column(full_path, line_column_number);
         match self {
@@ -329,7 +341,7 @@ pub fn open_file_path_with_line_and_col(
     full_path: &Path,
     ctx: &mut AppContext,
 ) {
-    if full_path.is_file() {
+    if full_path.is_file() || full_path.is_dir() {
         let editor = if with_editor.is_some_and(|editor| editor.is_installed(ctx)) {
             with_editor
         } else {
