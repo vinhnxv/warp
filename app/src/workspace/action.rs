@@ -515,19 +515,19 @@ pub enum WorkspaceAction {
         path: PathBuf,
     },
     /// Open the active tab's resolved folder in the user's default folder IDE
-    /// (R2). Falls back to revealing the folder in Finder when no default IDE
+    ///. Falls back to revealing the folder in Finder when no default IDE
     /// is set or installed. Never rewrites the default-folder-IDE setting,
-    /// which is managed from Settings (U3).
+    /// which is managed from Settings.
     OpenCurrentFolderInDefaultIde,
     /// Open the active tab's resolved folder in a specific IDE chosen from the
-    /// toolbar dropdown (R3). This is a one-off launch and does not change the
+    /// toolbar dropdown. This is a one-off launch and does not change the
     /// default-folder-IDE setting.
     OpenCurrentFolderIn(Editor),
     /// Reveal the active tab's resolved folder in Finder / Explorer / the OS
-    /// file manager (R3).
+    /// file manager.
     RevealCurrentFolder,
     /// Toggle the toolbar dropdown listing the installed IDEs + Reveal in
-    /// Finder (R3). Opening it (re)builds the menu from the currently installed
+    /// Finder. Opening it (re)builds the menu from the currently installed
     /// IDEs.
     ToggleOpenFolderMenu,
     TerminateApp,

@@ -1376,7 +1376,7 @@ pub enum TelemetryEvent {
         value: String,
     },
     /// Emitted when the user opens the active tab's folder from the toolbar
-    /// "open folder in IDE" control (R8). `target` is the IDE's display name, or
+    /// "open folder in IDE" control. `target` is the IDE's display name, or
     /// `"finder"` for a reveal-in-Finder; `from_dropdown` distinguishes the
     /// primary click (`false`) from a dropdown selection (`true`). The payload
     /// deliberately excludes the folder path so it stays UGC-free.

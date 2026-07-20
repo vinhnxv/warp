@@ -20,7 +20,9 @@ use crate::util::file::external_editor::settings::{
     OpenCodePanelsFileEditor, OpenFileEditor, OpenFileLayout, PreferMarkdownViewer,
     PreferTabbedEditorView,
 };
-use crate::util::file::external_editor::{Editor, EditorSettings, SUPPORTED_EDITORS};
+use crate::util::file::external_editor::{
+    installed_editors, Editor, EditorSettings, SUPPORTED_EDITORS,
+};
 use crate::view_components::{Dropdown, DropdownItem};
 
 const TABBED_FILE_VIEWER_TOGGLE_HEADER: &str = "Group files into single editor pane";
@@ -54,7 +56,13 @@ impl ExternalEditorView {
         let editor_to_open_files = *settings.as_ref(ctx).open_file_editor;
         let code_panels_editor_to_open_files = *settings.as_ref(ctx).open_code_panels_file_editor;
         let layout_to_open_files = *settings.as_ref(ctx).open_file_layout;
-        let folder_editor_to_open_folders = resolve_default_folder_editor(ctx);
+        // Only resolve the folder default when the feature is on: resolving it
+        // probes every installed editor, which is wasted work while the row is
+        // hidden.
+        let folder_editor_to_open_folders = FeatureFlag::OpenFolderInIde
+            .is_enabled()
+            .then(|| resolve_default_folder_editor(ctx))
+            .flatten();
 
         let editor_dropdown = ctx.add_typed_action_view(|ctx| {
             let mut dropdown = Dropdown::new(ctx);
@@ -68,7 +76,13 @@ impl ExternalEditorView {
         });
         let folder_editor_dropdown = ctx.add_typed_action_view(|ctx| {
             let mut dropdown = Dropdown::new(ctx);
-            Self::init_folder_editor_dropdown(folder_editor_to_open_folders, &mut dropdown, ctx);
+            if FeatureFlag::OpenFolderInIde.is_enabled() {
+                Self::init_folder_editor_dropdown(
+                    folder_editor_to_open_folders,
+                    &mut dropdown,
+                    ctx,
+                );
+            }
             dropdown
         });
         let code_panels_editor_dropdown = ctx.add_typed_action_view(|ctx| {
@@ -107,10 +121,12 @@ impl ExternalEditorView {
                         ctx,
                     );
                 });
-                me.folder_editor_dropdown.update(ctx, |dropdown, ctx| {
-                    let selected = resolve_default_folder_editor(ctx);
-                    Self::init_folder_editor_dropdown(selected, dropdown, ctx);
-                });
+                if FeatureFlag::OpenFolderInIde.is_enabled() {
+                    me.folder_editor_dropdown.update(ctx, |dropdown, ctx| {
+                        let selected = resolve_default_folder_editor(ctx);
+                        Self::init_folder_editor_dropdown(selected, dropdown, ctx);
+                    });
+                }
                 ctx.notify()
             },
         );
@@ -210,11 +226,7 @@ impl ExternalEditorView {
         dropdown: &mut Dropdown<ExternalEditorAction>,
         ctx: &mut ViewContext<Dropdown<ExternalEditorAction>>,
     ) {
-        let installed: Vec<Editor> = SUPPORTED_EDITORS
-            .iter()
-            .copied()
-            .filter(|editor| editor.is_installed(ctx))
-            .collect();
+        let installed = installed_editors(ctx);
         let items: Vec<DropdownItem<ExternalEditorAction>> =
             Self::folder_editor_dropdown_items(&installed)
                 .into_iter()

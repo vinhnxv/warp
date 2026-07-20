@@ -57,6 +57,16 @@ pub const SUPPORTED_EDITORS: &[Editor] = &[
     Editor::Windsurf,
 ];
 
+/// Returns the subset of [`SUPPORTED_EDITORS`] currently installed on this
+/// machine, in the same order as `SUPPORTED_EDITORS`.
+pub fn installed_editors(ctx: &mut AppContext) -> Vec<Editor> {
+    SUPPORTED_EDITORS
+        .iter()
+        .copied()
+        .filter(|editor| editor.is_installed(ctx))
+        .collect()
+}
+
 #[derive(
     Debug,
     Clone,

@@ -657,27 +657,10 @@ impl Editor {
     fn folder_command(&self, folder_path: &Path) -> Option<Command> {
         use Editor::*;
         match self {
-            // Zed is launched from its channel-specific binary rather than its
-            // `.desktop` Exec, mirroring [`Self::command`].
-            Zed | ZedPreview => {
-                let home = std::env::var("HOME").unwrap_or_default();
-                let binary_path = match self {
-                    Zed => format!("{home}/.local/zed.app/bin/zed"),
-                    ZedPreview => format!("{home}/.local/zed-preview.app/bin/zed"),
-                    _ => unreachable!(),
-                };
-
-                // Build command using setsid for proper detachment, passing the
-                // directory verbatim (no line/column).
-                let folder_path_str = folder_path.display().to_string();
-                let mut command = Command::new("/usr/bin/setsid");
-                command.args(["-f", &binary_path, &folder_path_str]);
-
-                command.stdin(std::process::Stdio::null());
-                command.stdout(std::process::Stdio::null());
-                command.stderr(std::process::Stdio::null());
-                Some(command)
-            }
+            // Zed launches from its channel-specific binary rather than its
+            // `.desktop` Exec. Passing no line/column, `command` builds exactly
+            // the folder-launch invocation we want, so reuse it.
+            Zed | ZedPreview => self.command(folder_path, None),
             // Every other editor opens a directory through its `.desktop` Exec,
             // substituting the folder for `%f`/`%F`.
             _ => match self.get_metadata() {

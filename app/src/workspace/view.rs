@@ -457,13 +457,13 @@ use crate::util::bindings::{
 #[cfg(feature = "local_fs")]
 use crate::util::file::external_editor::settings::OpenConversationPreference;
 // `resolve_default_folder_editor` and `Editor` are used unconditionally by the
-// "open folder in IDE" handlers (unit U5), so they are imported without the
+// "open folder in IDE" handlers, so they are imported without the
 // `local_fs` gate that the file-open paths above rely on.
+#[cfg(feature = "local_fs")]
+use crate::util::file::external_editor::installed_editors;
 use crate::util::file::external_editor::settings::resolve_default_folder_editor;
 use crate::util::file::external_editor::Editor;
-#[cfg(feature = "local_fs")]
 use crate::util::file::external_editor::EditorSettings;
-use crate::util::file::external_editor::SUPPORTED_EDITORS;
 use crate::util::links;
 use crate::util::openable_file_type::FileTarget;
 #[cfg(feature = "local_fs")]
@@ -606,7 +606,7 @@ const ELLIPSE_SVG_PATH: &str = "bundled/svg/ellipse.svg";
 const AI_ASSISTANT_BUTTON_ID: &str = "workspace_view:ai_assistant_button";
 
 /// Save-position id for the open-folder split button, used to anchor its
-/// dropdown menu (unit U6).
+/// dropdown menu.
 const OPEN_FOLDER_BUTTON_POSITION_ID: &str = "workspace_view:open_folder_button";
 
 const VERSION_DEPRECATION_BANNER_TEXT: &str = "Your app is out of date and some features may not work as expected. Please update immediately.";
@@ -1064,7 +1064,7 @@ pub struct Workspace {
     show_new_session_dropdown_menu: Option<NewSessionMenuAnchor>,
     /// Split button in the top-right toolbar that opens the active tab's folder
     /// in an IDE (or reveals it in Finder), gated by `FeatureFlag::OpenFolderInIde`
-    /// (unit U6, R1/R3/R5). Built once in the constructor; its disabled state and
+    ///. Built once in the constructor; its disabled state and
     /// tooltip are refreshed by [`Workspace::refresh_open_folder_button_state`].
     /// Only rendered when the flag is enabled.
     open_folder_button: CompactibleSplitActionButton,
@@ -2907,7 +2907,7 @@ impl Workspace {
             move_to_group_sidecar_menu,
         ) = Self::build_menus(ctx);
 
-        // Open-folder split button + its dropdown (unit U6). The menu uses the
+        // Open-folder split button + its dropdown. The menu uses the
         // `Fixed` variant so its `Separator` between the IDE rows and the Reveal
         // entry renders cleanly. It's always constructed but only rendered when
         // `FeatureFlag::OpenFolderInIde` is enabled.
@@ -3597,7 +3597,7 @@ impl Workspace {
         // pushed by `subscribe_to_settings_errors` and `dismiss_workspace_banner`.
         ws.sync_settings_error_state_into_settings_pane(ctx);
         // Seed the open-folder button's disabled state + tooltip now that the
-        // initial tabs are configured (unit U6).
+        // initial tabs are configured.
         ws.refresh_open_folder_button_state(ctx);
 
         let weak_handle = ctx.handle();
@@ -5392,7 +5392,7 @@ impl Workspace {
     }
 
     /// Resolves the folder the "open folder in IDE" action should open for the
-    /// active tab (unit U4, R4/R5). This is the shared seam consumed by the
+    /// active tab. This is the shared seam consumed by the
     /// open handlers and the toolbar button's enable/disable state.
     ///
     /// Returns `None` when the active session is remote/SSH or its cwd no longer
@@ -5400,7 +5400,7 @@ impl Workspace {
     /// owns the cwd, or the cwd itself when no known repo owns it.
     pub fn resolve_open_folder_target(&self, ctx: &AppContext) -> Option<PathBuf> {
         // `canonical_session_pwd_if_local` already returns `None` for remote/SSH
-        // sessions (R5) and for a cwd that no longer exists locally, so no extra
+        // sessions and for a cwd that no longer exists locally, so no extra
         // existence check is needed here.
         let cwd = self
             .active_tab_pane_group()
@@ -5410,19 +5410,20 @@ impl Workspace {
             .map(PathBuf::from);
 
         resolve_open_folder_target_from(cwd, |path| {
+            // `cwd` is already canonicalized, so use the no-I/O lookup.
             DetectedRepositories::as_ref(ctx)
-                .get_root_for_path(&LocalOrRemotePath::Local(path.to_path_buf()))
+                .get_root_for_canonical_path(&LocalOrRemotePath::Local(path.to_path_buf()))
                 .and_then(|root| PathBuf::try_from(root).ok())
         })
     }
 
-    /// Shared flow for the three "open current folder" actions (unit U5, KTD3):
+    /// Shared flow for the three "open current folder" actions:
     /// resolve the target folder, then on a hit launch the IDE (or reveal in
     /// Finder) and emit telemetry. Early-returns with no launch and no telemetry
     /// when the folder can't be resolved (remote/SSH or missing cwd, R5).
     ///
     /// This never writes the default-folder-IDE setting — a dropdown pick opens
-    /// one-off; the default is managed from Settings (U3).
+    /// one-off; the default is managed from Settings.
     fn open_current_folder(
         &self,
         action: OpenFolderAction,
@@ -5444,7 +5445,7 @@ impl Workspace {
             }
         }
 
-        // R8: record which app the folder opened in and whether it came from the
+        // Record which app the folder opened in and whether it came from the
         // primary click (`false`) or the dropdown (`true`).
         send_telemetry_from_ctx!(
             TelemetryEvent::OpenedFolderInIde {
@@ -5624,7 +5625,7 @@ impl Workspace {
 
         // The open-folder button's enabled/disabled state and tooltip depend on
         // the active tab (remote vs. local cwd, default IDE), so refresh them on
-        // every tab switch (unit U6, R5).
+        // every tab switch.
         self.refresh_open_folder_button_state(ctx);
     }
 
@@ -21452,8 +21453,8 @@ impl Workspace {
                 );
             }
 
-            // Open-folder split button, immediately left of Settings (unit U6,
-            // R1). Flag-gated: nothing is added to the toolbar when off.
+            // Open-folder split button, immediately left of Settings.
+            // Flag-gated: nothing is added to the toolbar when off.
             if FeatureFlag::OpenFolderInIde.is_enabled() {
                 target.add_child(
                     Container::new(self.render_open_folder_button())
@@ -21908,7 +21909,7 @@ impl Workspace {
         .finish()
     }
 
-    /// Renders the pre-built open-folder split button (unit U6, R1). Its
+    /// Renders the pre-built open-folder split button. Its
     /// disabled state and tooltip are kept current by
     /// [`Self::refresh_open_folder_button_state`]; here we only lay it out.
     /// Rendered compact (icon + chevron) so it blends into the icon-only
@@ -21918,7 +21919,7 @@ impl Workspace {
     }
 
     /// Refreshes the open-folder button's disabled state and tooltip from the
-    /// active tab (unit U6, R5/KTD5). No-op when the feature flag is off so the
+    /// active tab. No-op when the feature flag is off so the
     /// installed-editor probe never runs for users without the feature.
     ///
     /// - A `None` resolver result means the active session is remote/SSH (or has
@@ -21938,24 +21939,17 @@ impl Workspace {
         };
         let tooltip = open_folder_button_tooltip(default_editor, is_remote);
 
-        let mut button = self.open_folder_button.clone();
-        button.set_disabled(is_remote, ctx);
-        button.set_tooltip(Some(tooltip), ctx);
-        self.open_folder_button = button;
+        self.open_folder_button.set_disabled(is_remote, ctx);
+        self.open_folder_button.set_tooltip(Some(tooltip), ctx);
     }
 
-    /// Toggles the open-folder dropdown (unit U6, R3). When opening, (re)builds
+    /// Toggles the open-folder dropdown. When opening, (re)builds
     /// the menu from the currently installed IDEs so newly-installed editors
     /// appear without restarting.
     fn toggle_open_folder_menu(&mut self, ctx: &mut ViewContext<Self>) {
         self.show_open_folder_menu = !self.show_open_folder_menu;
         if self.show_open_folder_menu {
-            let installed: Vec<Editor> = SUPPORTED_EDITORS
-                .iter()
-                .copied()
-                .filter(|editor| editor.is_installed(ctx))
-                .collect();
-            let items = open_folder_menu_items(&installed);
+            let items = open_folder_menu_items(&installed_editors(ctx));
             self.open_folder_menu.update(ctx, |menu, ctx| {
                 menu.set_items(items, ctx);
             });
@@ -25147,21 +25141,21 @@ impl TypedActionView for Workspace {
                 ctx.open_file_path(path);
             }
             OpenCurrentFolderInDefaultIde => {
-                // R2: primary click. Read the default folder IDE (U3); when none
-                // is set/installed, fall back to revealing in Finder (KTD5).
+                // Primary click. Read the default folder IDE; when none
+                // is set/installed, fall back to revealing in Finder.
                 let action = default_open_folder_action(resolve_default_folder_editor(ctx));
                 self.open_current_folder(action, false, ctx);
             }
             OpenCurrentFolderIn(editor) => {
-                // R3: one-off open in a specific IDE picked from the dropdown.
+                // One-off open in a specific IDE picked from the dropdown.
                 self.open_current_folder(OpenFolderAction::LaunchEditor(*editor), true, ctx);
             }
             RevealCurrentFolder => {
-                // R3: reveal the resolved folder in Finder / Explorer.
+                // Reveal the resolved folder in Finder / Explorer.
                 self.open_current_folder(OpenFolderAction::Reveal, true, ctx);
             }
             ToggleOpenFolderMenu => {
-                // R3: open/close the installed-IDE + Reveal dropdown.
+                // Open/close the installed-IDE + Reveal dropdown.
                 self.toggle_open_folder_menu(ctx);
             }
             NewTabInAgentMode {
@@ -27343,7 +27337,7 @@ impl View for Workspace {
             }
         }
 
-        // Open-folder split-button dropdown (unit U6, R3). Anchored under the
+        // Open-folder split-button dropdown. Anchored under the
         // button via its shared save-position id and right-aligned so it never
         // overflows the window's right edge.
         if self.show_open_folder_menu {
@@ -29450,16 +29444,16 @@ fn should_reserve_traffic_light_space_in_tab_bar(side: TrafficLightSide) -> bool
     side == TrafficLightSide::Right
 }
 
-/// Pure decision for the "open folder in IDE" target (unit U4, R4/R5).
+/// Pure decision for the "open folder in IDE" target.
 ///
 /// Given the active tab's already-resolved local working directory and a
 /// repo-root lookup, returns the folder the action should open:
 /// - `None` when there is no local cwd. `cwd` is `None` for remote/SSH sessions
 ///   and for a cwd that no longer exists locally, because the caller sources it
 ///   from [`TerminalView::canonical_session_pwd_if_local`], which already
-///   applies both guards (R5). No filesystem check is repeated here.
-/// - the deepest-ancestor repo root that owns the cwd, when one exists (R4).
-/// - the cwd itself when no known repo owns it (R4).
+///   applies both guards. No filesystem check is repeated here.
+/// - the deepest-ancestor repo root that owns the cwd, when one exists.
+/// - the cwd itself when no known repo owns it.
 ///
 /// The repo-root lookup is injected as a closure so this decision can be unit
 /// tested without an `AppContext`. The ctx-bound adapter
@@ -29478,18 +29472,18 @@ fn resolve_open_folder_target_from(
 /// the target folder is known and (for the default action) the default IDE has
 /// been looked up. Factored out of the ctx-bound handler so the launch-vs-reveal
 /// branch and the telemetry payload it produces are unit-testable without an
-/// `AppContext` (unit U5, R2/R3/R8).
+/// `AppContext`.
 #[derive(Debug, Clone, PartialEq)]
 enum OpenFolderAction {
-    /// Launch the folder in this IDE (R2 default, R3 dropdown pick).
+    /// Launch the folder in this IDE (primary default or dropdown pick).
     LaunchEditor(Editor),
     /// Reveal the folder in Finder / Explorer / the OS file manager, with no
-    /// IDE (R3, and the KTD5 fallback when no default IDE is set/installed).
+    /// IDE (dropdown pick, and the fallback when no default IDE is set/installed).
     Reveal,
 }
 
 impl OpenFolderAction {
-    /// The telemetry `target` for R8: the IDE's display name, or the literal
+    /// The telemetry `target`: the IDE's display name, or the literal
     /// `"finder"` for a reveal. Never contains the folder path, so the payload
     /// stays UGC-free.
     fn telemetry_target(&self) -> String {
@@ -29503,7 +29497,7 @@ impl OpenFolderAction {
 /// Decides what the *default* open action (`OpenCurrentFolderInDefaultIde`, R2)
 /// does given the resolved default folder IDE: launch that IDE when one is
 /// set/installed, otherwise fall back to revealing the folder in Finder
-/// (KTD5). Pure so the fallback branch is testable without an `AppContext`.
+///. Pure so the fallback branch is testable without an `AppContext`.
 fn default_open_folder_action(default_editor: Option<Editor>) -> OpenFolderAction {
     match default_editor {
         Some(editor) => OpenFolderAction::LaunchEditor(editor),
@@ -29511,9 +29505,9 @@ fn default_open_folder_action(default_editor: Option<Editor>) -> OpenFolderActio
     }
 }
 
-/// OS-aware label for revealing a folder in the system file manager (unit U6,
-/// KTD5). Mirrors the label the code view's context menu uses
-/// (`app/src/code/view.rs`). Pure so the platform branch is unit-testable.
+/// OS-aware label for revealing a folder in the system file manager. Mirrors
+/// the label the code view's context menu uses (`app/src/code/view.rs`). Pure
+/// so the platform branch is unit-testable.
 fn os_reveal_label() -> &'static str {
     if cfg!(target_os = "macos") {
         "Reveal in Finder"
@@ -29524,8 +29518,8 @@ fn os_reveal_label() -> &'static str {
     }
 }
 
-/// Pure tooltip decision for the open-folder toolbar button (unit U6, KTD5):
-/// - remote/disabled tab -> explains why the button is unavailable (R5).
+/// Pure tooltip decision for the open-folder toolbar button:
+/// - remote/disabled tab -> explains why the button is unavailable.
 /// - default IDE set -> names the IDE the primary click opens.
 /// - no default IDE set/installed -> the primary reveals in Finder, so the
 ///   tooltip reads the OS reveal label.
@@ -29539,11 +29533,11 @@ fn open_folder_button_tooltip(default_editor: Option<Editor>, is_remote: bool) -
     }
 }
 
-/// Pure builder for the open-folder dropdown's items (unit U6, R3): one row per
+/// Pure builder for the open-folder dropdown's items: one row per
 /// installed IDE (each opens the folder in that IDE), a visual separator, then
 /// the OS-aware Reveal item. With zero installed IDEs the menu is just the
-/// Reveal item -- no IDE rows and no separator (KTD5: the primary already
-/// carries the Finder fallback).
+/// Reveal item -- no IDE rows and no separator, since the primary already
+/// carries the Finder fallback.
 fn open_folder_menu_items(installed_editors: &[Editor]) -> Vec<MenuItem<WorkspaceAction>> {
     let mut items: Vec<MenuItem<WorkspaceAction>> = installed_editors
         .iter()

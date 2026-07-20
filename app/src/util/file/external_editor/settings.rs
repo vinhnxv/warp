@@ -216,12 +216,7 @@ pub fn resolve_default_folder_editor(ctx: &mut warpui::AppContext) -> Option<sup
         };
     }
 
-    let installed_editors: Vec<super::Editor> = super::SUPPORTED_EDITORS
-        .iter()
-        .copied()
-        .filter(|editor| editor.is_installed(ctx))
-        .collect();
-    seed_default_folder_editor(open_file_editor, &installed_editors)
+    seed_default_folder_editor(open_file_editor, &super::installed_editors(ctx))
 }
 
 #[cfg(test)]
