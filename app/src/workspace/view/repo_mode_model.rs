@@ -6,11 +6,21 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::NaiveDateTime;
+use instant::Instant;
 use pathfinder_geometry::vector::{vec2f, Vector2F};
-use repo_mode::{canonicalize_repo_path, display_name_for_path, is_dead_path, RepoEntryKind};
+use repo_mode::{
+    canonicalize_repo_path, classify_entry_kind, display_name_for_path, is_dead_path, RepoEntryKind,
+};
 use warpui::{AppContext, SingletonEntity, UpdateView, ViewContext};
+
+/// TTL for the cached repo-kind / liveness filesystem probes so
+/// `repo_mode_entries` does not stat every registered path on each render
+/// (mirrors the vertical-tabs branch cache). A stalled network/removable
+/// mount would otherwise block the UI thread on every frame.
+const REPO_FS_CACHE_TTL: Duration = Duration::from_secs(5);
 
 use super::Workspace;
 use crate::context_chips::display_chip::GitLineChanges;
@@ -51,28 +61,53 @@ impl Workspace {
         if !Self::repo_mode_enabled() {
             return Vec::new();
         }
-        let mut entries: Vec<RepoModeListEntry> =
+        // Read the registry rows first (no filesystem work under the model
+        // read-lock), then classify kind/liveness through the TTL cache below.
+        let projects: Vec<(PathBuf, Option<NaiveDateTime>, NaiveDateTime)> =
             ProjectManagementModel::handle(ctx).read(ctx, |projects, _| {
                 projects
                     .all_projects()
                     .map(|project| {
-                        let path = PathBuf::from(&project.path);
-                        let kind = if path.join(".git").exists() {
-                            RepoEntryKind::Repo
-                        } else {
-                            RepoEntryKind::Folder
-                        };
-                        RepoModeListEntry {
-                            display_name: display_name_for_path(&path),
-                            is_dead: is_dead_path(&path),
-                            path,
-                            kind,
-                            last_opened_ts: project.last_opened_ts,
-                            added_ts: project.added_ts,
-                        }
+                        (
+                            PathBuf::from(&project.path),
+                            project.last_opened_ts,
+                            project.added_ts,
+                        )
                     })
                     .collect()
             });
+        let now = Instant::now();
+        let mut fs_cache = self.repo_mode_fs_cache.borrow_mut();
+        let mut entries: Vec<RepoModeListEntry> = projects
+            .into_iter()
+            .map(|(path, last_opened_ts, added_ts)| {
+                let key = path.to_string_lossy().into_owned();
+                // `.git`/exists() stats hit the disk; reuse the last probe
+                // within the TTL rather than re-statting on every render.
+                let (kind, is_dead) = match fs_cache.get(&key) {
+                    Some((probed_at, kind, dead))
+                        if now.duration_since(*probed_at) < REPO_FS_CACHE_TTL =>
+                    {
+                        (*kind, *dead)
+                    }
+                    _ => {
+                        let kind = classify_entry_kind(&path);
+                        let dead = is_dead_path(&path);
+                        fs_cache.insert(key, (now, kind, dead));
+                        (kind, dead)
+                    }
+                };
+                RepoModeListEntry {
+                    display_name: display_name_for_path(&path),
+                    is_dead,
+                    path,
+                    kind,
+                    last_opened_ts,
+                    added_ts,
+                }
+            })
+            .collect();
+        drop(fs_cache);
         entries.sort_by(|a, b| {
             b.last_opened_ts
                 .cmp(&a.last_opened_ts)
@@ -116,8 +151,15 @@ impl Workspace {
                 let Some(path) = paths.into_iter().next() else {
                     return;
                 };
-                let Ok(canonical) = canonicalize_repo_path(Path::new(&path)) else {
-                    return;
+                let canonical = match canonicalize_repo_path(Path::new(&path)) {
+                    Ok(canonical) => canonical,
+                    Err(err) => {
+                        log::warn!(
+                            "repo_mode: failed to canonicalize picked folder {:?}; not adding: {err}",
+                            path
+                        );
+                        return;
+                    }
                 };
                 ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
                     projects.upsert_project(canonical.clone(), ctx);
@@ -136,7 +178,13 @@ impl Workspace {
         if !Self::repo_mode_enabled() {
             return;
         }
-        let path_buf = canonicalize_repo_path(path).unwrap_or_else(|_| path.to_path_buf());
+        let path_buf = canonicalize_repo_path(path).unwrap_or_else(|err| {
+            log::warn!(
+                "repo_mode: failed to canonicalize {:?} on remove: {err}",
+                path
+            );
+            path.to_path_buf()
+        });
         let path_str = path_buf.to_string_lossy().into_owned();
 
         let group_ids: Vec<TabGroupId> = self
@@ -152,6 +200,14 @@ impl Workspace {
         if self.selected_repo_root.as_deref() == Some(path_str.as_str()) {
             self.selected_repo_root = None;
         }
+
+        // Drop the removed path from the pinned launch order so a later re-add
+        // in the same session appends at the end (R3) instead of resurfacing at
+        // its stale slot.
+        if let Some(order) = self.repo_mode_launch_order.borrow_mut().as_mut() {
+            order.retain(|k| k != &path_str);
+        }
+        self.repo_mode_fs_cache.borrow_mut().remove(&path_str);
 
         ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
             projects.remove_project(path_buf, ctx);
@@ -194,9 +250,17 @@ impl Workspace {
             return;
         }
         self.selected_repo_root = None;
+        // Force an explicit directory so the new tab does not inherit the prior
+        // session's cwd (which could classify it under a repo). If home is
+        // unavailable, fall back to the temp dir rather than None — None would
+        // re-enable the inherit path this is meant to avoid.
+        let initial_directory = dirs::home_dir().or_else(|| {
+            log::warn!("repo_mode: no home directory; loose tab falling back to temp dir");
+            Some(std::env::temp_dir())
+        });
         self.add_tab_with_pane_layout(
             PanesLayout::SingleTerminal(Box::new(NewTerminalOptions {
-                initial_directory: dirs::home_dir(),
+                initial_directory,
                 hide_homepage: true,
                 ..Default::default()
             })),
@@ -211,7 +275,13 @@ impl Workspace {
         if !Self::repo_mode_enabled() {
             return;
         }
-        let path_buf = canonicalize_repo_path(path).unwrap_or_else(|_| path.to_path_buf());
+        let path_buf = canonicalize_repo_path(path).unwrap_or_else(|err| {
+            log::warn!(
+                "repo_mode: failed to canonicalize {:?} on select: {err}",
+                path
+            );
+            path.to_path_buf()
+        });
         self.selected_repo_root = Some(path_buf.to_string_lossy().into_owned());
 
         // R3: record recency for the next launch. The section order is pinned
@@ -244,15 +314,39 @@ impl Workspace {
         path: &Path,
         ctx: &mut ViewContext<Self>,
     ) {
-        let mut group = TabGroup::new();
-        group.repo_root = Some(path.to_string_lossy().into_owned());
-        group.name = Some(display_name_for_path(path));
-        let group_id = group.id;
-        self.tab_groups.insert(group_id, group);
+        let path_str = path.to_string_lossy().into_owned();
+        // Reuse any group already bound to this repo root instead of minting a
+        // duplicate. The live-cwd partition can report zero members for a repo
+        // whose only tab has cd'd away, but its bound group still exists and
+        // must not be cloned (that would break the one-group-per-entry
+        // invariant and make new-tab routing pick a group nondeterministically).
+        let group_id = match self
+            .tab_groups
+            .values()
+            .find(|g| g.repo_root.as_deref() == Some(path_str.as_str()))
+            .map(|g| g.id)
+        {
+            Some(existing) => existing,
+            None => {
+                let mut group = TabGroup::new();
+                group.repo_root = Some(path_str);
+                group.name = Some(display_name_for_path(path));
+                let id = group.id;
+                self.tab_groups.insert(id, group);
+                id
+            }
+        };
 
+        // Guard against a dead/removed root: spawning a shell at a missing dir
+        // is shell-dependent breakage. Fall back to home when the root is gone.
+        let initial_directory = if path.is_dir() {
+            Some(path.to_path_buf())
+        } else {
+            dirs::home_dir()
+        };
         self.add_tab_with_pane_layout(
             PanesLayout::SingleTerminal(Box::new(NewTerminalOptions {
-                initial_directory: Some(path.to_path_buf()),
+                initial_directory,
                 hide_homepage: true,
                 ..Default::default()
             })),
@@ -428,13 +522,18 @@ impl Workspace {
         for (index, tab) in self.tabs.iter().enumerate() {
             let pane_group = tab.pane_group.as_ref(app);
             let terminal_views = pane_group.terminal_views(app);
+            // Use the canonicalized pwd: entry_paths are dunce-canonicalized,
+            // so comparing against the raw shell cwd (`pwd_if_local`) would miss
+            // matches whenever they differ (macOS /tmp -> /private/tmp, a repo
+            // under a symlinked dir, case-insensitive FS), misclassifying the
+            // tab as loose and hiding it from the filtered strip.
             let cwd = pane_group
                 .active_session_view(app)
-                .and_then(|tv| tv.as_ref(app).pwd_if_local(app))
+                .and_then(|tv| tv.as_ref(app).canonical_session_pwd_if_local(app))
                 .or_else(|| {
                     terminal_views
                         .iter()
-                        .find_map(|tv| tv.as_ref(app).pwd_if_local(app))
+                        .find_map(|tv| tv.as_ref(app).canonical_session_pwd_if_local(app))
                 })
                 .map(PathBuf::from);
             let owner = match cwd {
@@ -483,6 +582,12 @@ impl Workspace {
             .into_iter()
             .map(|e| e.path)
             .collect();
+        // If the selected root is no longer registered (e.g. removed in another
+        // window), behave as "All" instead of stranding this window with an
+        // empty strip and no in-tree way back.
+        if !entry_paths.iter().any(|p| p == &selected) {
+            return None;
+        }
         let (mut by_entry, _) = self.repo_mode_tab_partition(&entry_paths, app);
         Some(by_entry.remove(&selected).unwrap_or_default())
     }

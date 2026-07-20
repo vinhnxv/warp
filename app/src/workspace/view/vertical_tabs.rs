@@ -2101,7 +2101,6 @@ pub(super) fn render_groups(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn render_tab_group(
     state: &VerticalTabsPanelState,
     workspace: &Workspace,

@@ -79,6 +79,10 @@ The user builds Warp from this source tree and upgrades by pulling upstream mast
   | `app/Cargo.toml`, root `Cargo.toml` | Feature + dep lines |
   | `crates/warp_features/src/lib.rs`, `app/src/features.rs` | Flag variant + cfg mapping |
   | `app/src/projects.rs` | `remove_project` (or equivalent) if absent |
+  | `app/src/workspace/tab_group.rs` | `repo_root` field on the runtime `TabGroup` (distinct from the `TabGroupSnapshot` field) |
+  | `app/src/workspace/view/startup_directory.rs` | Flag-gated repo-root branch in `get_new_tab_startup_directory` (R6/KTD8) |
+  | `app/src/workspace/view/vertical_tabs/telemetry.rs` | `VerticalTabsChipEntrypoint::RepoSidebar` variant |
+  | `app/src/launch_configs/launch_config_tests.rs` | Mechanical `WindowSnapshot`/`TabGroupSnapshot` field ripple in test fixtures |
 
 ### Key Flows
 

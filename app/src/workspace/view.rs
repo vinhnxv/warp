@@ -1158,6 +1158,11 @@ pub struct Workspace {
     /// Repositories-section order captured on first render after launch (R3:
     /// order settles at launch; entries added later append at the end).
     repo_mode_launch_order: RefCell<Option<Vec<String>>>,
+    /// Cached (kind, is_dead) filesystem probes per repo root, refreshed at most
+    /// every `REPO_FS_CACHE_TTL`, so `repo_mode_entries` does not stat every
+    /// registered path on each render.
+    repo_mode_fs_cache:
+        RefCell<HashMap<String, (instant::Instant, repo_mode::RepoEntryKind, bool)>>,
     /// Anchor for the repo-mode entry context menu / picker menu (reuses
     /// `tab_right_click_menu`), or None when closed.
     show_repo_mode_menu: Option<TabContextMenuAnchor>,
@@ -3467,6 +3472,7 @@ impl Workspace {
             vertical_tabs_panel_open: false,
             selected_repo_root: None,
             repo_mode_launch_order: RefCell::new(None),
+            repo_mode_fs_cache: RefCell::new(HashMap::new()),
             show_repo_mode_menu: None,
             vertical_tabs_panel: Default::default(),
             left_panel_view,
@@ -11933,7 +11939,10 @@ impl Workspace {
                     .iter()
                     .position(|t| t.pane_group.id() == removed_pane_group_id)
                 else {
-                    debug_assert!(false, "Tab to remove vanished while opening its replacement");
+                    debug_assert!(
+                        false,
+                        "Tab to remove vanished while opening its replacement"
+                    );
                     return;
                 };
                 index = new_index;

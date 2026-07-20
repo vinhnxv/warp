@@ -53,10 +53,15 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) -> Option<PathBuf> {
         // R6/KTD8: under an active repo-mode selection, new tabs start at the
-        // entry root rather than inheriting the prior session cwd.
+        // entry root rather than inheriting the prior session cwd. Skip a dead
+        // root (deleted since selection) so the shell is not launched at a
+        // missing directory; fall through to the stock resolution instead.
         if Self::repo_mode_enabled() {
             if let Some(root) = self.selected_repo_root.as_deref() {
-                return Some(PathBuf::from(root));
+                let root = PathBuf::from(root);
+                if root.is_dir() {
+                    return Some(root);
+                }
             }
         }
 

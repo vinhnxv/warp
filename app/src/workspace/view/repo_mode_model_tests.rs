@@ -79,13 +79,21 @@ fn test_selection_filters_visible_tabs_to_group() {
             // The other repo's tabs are still present (background, not closed).
             assert_eq!(workspace.tab_count(), 4);
 
-            // Selected entry with no matching tabs: empty set, never
-            // unrelated tabs (R10).
-            workspace.selected_repo_root = Some("/repo/missing".to_string());
+            // A *registered* entry with no matching tabs yields an empty set,
+            // never unrelated tabs (R10). Drop b1 from group_b so /repo/b owns
+            // no tabs, then select it.
+            workspace.tabs[3].group_id = None;
+            workspace.selected_repo_root = Some("/repo/b".to_string());
             assert_eq!(
                 workspace.repo_mode_visible_tab_indices(ctx),
                 Some(Vec::new())
             );
+
+            // A selection no longer in the registry (e.g. the entry was removed
+            // in another window) recovers to "All" (None sentinel = no filter)
+            // rather than stranding this window with an empty strip.
+            workspace.selected_repo_root = Some("/repo/missing".to_string());
+            assert_eq!(workspace.repo_mode_visible_tab_indices(ctx), None);
         });
     });
 }
