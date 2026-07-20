@@ -43,6 +43,7 @@ use crate::terminal::available_shells::AvailableShell;
 use crate::terminal::view::inline_banner::ZeroStatePromptSuggestionType;
 use crate::themes::theme::AnsiColorIdentifier;
 use crate::themes::theme_chooser::ThemeChooserMode;
+use crate::util::file::external_editor::Editor;
 use crate::workflows::{WorkflowSelectionSource, WorkflowSource, WorkflowType};
 use crate::workspace::tab_group::TabGroupId;
 use crate::workspace::PaneViewLocator;
@@ -513,6 +514,18 @@ pub enum WorkspaceAction {
     OpenFilePath {
         path: PathBuf,
     },
+    /// Open the active tab's resolved folder in the user's default folder IDE
+    /// (R2). Falls back to revealing the folder in Finder when no default IDE
+    /// is set or installed. Never rewrites the default-folder-IDE setting,
+    /// which is managed from Settings (U3).
+    OpenCurrentFolderInDefaultIde,
+    /// Open the active tab's resolved folder in a specific IDE chosen from the
+    /// toolbar dropdown (R3). This is a one-off launch and does not change the
+    /// default-folder-IDE setting.
+    OpenCurrentFolderIn(Editor),
+    /// Reveal the active tab's resolved folder in Finder / Explorer / the OS
+    /// file manager (R3).
+    RevealCurrentFolder,
     TerminateApp,
     CloseWindow,
     /// Help the user call the Warp executable with the [`crate::args::DEBUG_DUMP_FLAG`].
@@ -1166,6 +1179,9 @@ impl WorkspaceAction {
             | AttemptLoginGatedAIUpgrade
             | UndoTrash(_)
             | OpenFilePath { .. }
+            | OpenCurrentFolderInDefaultIde
+            | OpenCurrentFolderIn(_)
+            | RevealCurrentFolder
             | ViewObjectInWarpDrive(_)
             | OpenObjectSharingSettings { .. }
             | TerminateApp

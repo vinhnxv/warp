@@ -354,10 +354,7 @@ fn test_resolve_open_folder_target_returns_deepest_repo_root_for_cwd_in_known_re
 
     // cwd under only the outer repo -> the outer root.
     assert_eq!(
-        resolve_open_folder_target_from(
-            Some(PathBuf::from("/work/outer/docs")),
-            deepest_root_for,
-        ),
+        resolve_open_folder_target_from(Some(PathBuf::from("/work/outer/docs")), deepest_root_for,),
         Some(PathBuf::from("/work/outer")),
     );
 }
@@ -387,6 +384,70 @@ fn test_resolve_open_folder_target_returns_none_when_no_local_cwd() {
         !lookup_called,
         "repo lookup must not run when there is no local cwd"
     );
+}
+
+// --- Unit U5: open-folder action decision + telemetry payload (R2/R3/R8) ---
+//
+// The full handlers (`Workspace::open_current_folder` and the `handle_action`
+// arms) are ctx-only: they need a real `Workspace` + `AppContext` to resolve
+// the target folder, launch the editor / reveal in Finder, and dispatch
+// telemetry. What is unit-testable without that harness is the *decision* the
+// handlers hand off to those effects — which editor vs. reveal, and the exact
+// telemetry `target` / `from_dropdown` payload. Those are factored into the
+// pure `default_open_folder_action` + `OpenFolderAction::telemetry_target`
+// helpers, tested here. The resolve->early-return-on-`None` ordering (remote /
+// missing cwd => no launch, no telemetry) lives entirely in the ctx-bound
+// `open_current_folder` and is covered by the U4 resolver tests above plus
+// manual smoke.
+
+#[test]
+fn test_default_open_action_launches_default_ide_when_set() {
+    // R2: default-open with an IDE default -> launch that IDE, telemetry target
+    // is the IDE's display name. `from_dropdown` is stamped `false` by the
+    // primary-click handler (ctx-only).
+    let action = default_open_folder_action(Some(Editor::VSCode));
+    assert_eq!(action, OpenFolderAction::LaunchEditor(Editor::VSCode));
+    assert_eq!(action.telemetry_target(), format!("{}", Editor::VSCode));
+}
+
+#[test]
+fn test_default_open_action_reveals_when_no_default_ide() {
+    // Edge: default setting unset + no IDE installed -> the default action
+    // reveals in Finder (target "finder"), never launches an editor.
+    let action = default_open_folder_action(None);
+    assert_eq!(action, OpenFolderAction::Reveal);
+    assert_eq!(action.telemetry_target(), "finder");
+}
+
+#[test]
+fn test_launch_editor_telemetry_target_is_editor_display_name() {
+    // R3: opening one-off in a specific IDE records that IDE's display name.
+    for editor in [Editor::VSCode, Editor::Cursor, Editor::Zed] {
+        let target = OpenFolderAction::LaunchEditor(editor).telemetry_target();
+        assert_eq!(target, format!("{editor}"));
+    }
+}
+
+#[test]
+fn test_reveal_telemetry_target_is_finder() {
+    // R3: reveal records the fixed "finder" target regardless of platform.
+    assert_eq!(OpenFolderAction::Reveal.telemetry_target(), "finder");
+}
+
+#[test]
+fn test_open_folder_telemetry_target_never_contains_a_path() {
+    // R8: the telemetry payload must stay UGC-free -- `target` is only ever an
+    // editor name or "finder", never a filesystem path.
+    let targets = [
+        OpenFolderAction::LaunchEditor(Editor::VSCode).telemetry_target(),
+        OpenFolderAction::Reveal.telemetry_target(),
+    ];
+    for target in targets {
+        assert!(
+            !target.contains('/') && !target.contains('\\'),
+            "telemetry target must not embed a path, got {target:?}",
+        );
+    }
 }
 
 #[test]

@@ -456,7 +456,10 @@ use crate::util::bindings::{
 };
 #[cfg(feature = "local_fs")]
 use crate::util::file::external_editor::settings::OpenConversationPreference;
-#[cfg(feature = "local_fs")]
+// `resolve_default_folder_editor` and `Editor` are used unconditionally by the
+// "open folder in IDE" handlers (unit U5), so they are imported without the
+// `local_fs` gate that the file-open paths above rely on.
+use crate::util::file::external_editor::settings::resolve_default_folder_editor;
 use crate::util::file::external_editor::Editor;
 #[cfg(feature = "local_fs")]
 use crate::util::file::external_editor::EditorSettings;
@@ -5356,6 +5359,45 @@ impl Workspace {
                 .get_root_for_path(&LocalOrRemotePath::Local(path.to_path_buf()))
                 .and_then(|root| PathBuf::try_from(root).ok())
         })
+    }
+
+    /// Shared flow for the three "open current folder" actions (unit U5, KTD3):
+    /// resolve the target folder, then on a hit launch the IDE (or reveal in
+    /// Finder) and emit telemetry. Early-returns with no launch and no telemetry
+    /// when the folder can't be resolved (remote/SSH or missing cwd, R5).
+    ///
+    /// This never writes the default-folder-IDE setting — a dropdown pick opens
+    /// one-off; the default is managed from Settings (U3).
+    fn open_current_folder(
+        &self,
+        action: OpenFolderAction,
+        from_dropdown: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(folder) = self.resolve_open_folder_target(ctx) else {
+            return;
+        };
+
+        // Snapshot the telemetry target before consuming `action` in the launch.
+        let target = action.telemetry_target();
+        match action {
+            OpenFolderAction::LaunchEditor(editor) => {
+                crate::util::file::open_file_path_with_editor(None, folder, Some(editor), ctx);
+            }
+            OpenFolderAction::Reveal => {
+                ctx.open_file_path_in_explorer(&folder);
+            }
+        }
+
+        // R8: record which app the folder opened in and whether it came from the
+        // primary click (`false`) or the dropdown (`true`).
+        send_telemetry_from_ctx!(
+            TelemetryEvent::OpenedFolderInIde {
+                target,
+                from_dropdown,
+            },
+            ctx
+        );
     }
 
     /// Attempts to get selected text from the focused pane.
@@ -24976,6 +25018,20 @@ impl TypedActionView for Workspace {
             OpenFilePath { path } => {
                 ctx.open_file_path(path);
             }
+            OpenCurrentFolderInDefaultIde => {
+                // R2: primary click. Read the default folder IDE (U3); when none
+                // is set/installed, fall back to revealing in Finder (KTD5).
+                let action = default_open_folder_action(resolve_default_folder_editor(ctx));
+                self.open_current_folder(action, false, ctx);
+            }
+            OpenCurrentFolderIn(editor) => {
+                // R3: one-off open in a specific IDE picked from the dropdown.
+                self.open_current_folder(OpenFolderAction::LaunchEditor(*editor), true, ctx);
+            }
+            RevealCurrentFolder => {
+                // R3: reveal the resolved folder in Finder / Explorer.
+                self.open_current_folder(OpenFolderAction::Reveal, true, ctx);
+            }
             NewTabInAgentMode {
                 entrypoint,
                 zero_state_prompt_suggestion_type,
@@ -29268,6 +29324,43 @@ fn resolve_open_folder_target_from(
 ) -> Option<PathBuf> {
     let cwd = cwd?;
     Some(repo_root_for_cwd(&cwd).unwrap_or(cwd))
+}
+
+/// The concrete side effect an "open current folder" action resolves to once
+/// the target folder is known and (for the default action) the default IDE has
+/// been looked up. Factored out of the ctx-bound handler so the launch-vs-reveal
+/// branch and the telemetry payload it produces are unit-testable without an
+/// `AppContext` (unit U5, R2/R3/R8).
+#[derive(Debug, Clone, PartialEq)]
+enum OpenFolderAction {
+    /// Launch the folder in this IDE (R2 default, R3 dropdown pick).
+    LaunchEditor(Editor),
+    /// Reveal the folder in Finder / Explorer / the OS file manager, with no
+    /// IDE (R3, and the KTD5 fallback when no default IDE is set/installed).
+    Reveal,
+}
+
+impl OpenFolderAction {
+    /// The telemetry `target` for R8: the IDE's display name, or the literal
+    /// `"finder"` for a reveal. Never contains the folder path, so the payload
+    /// stays UGC-free.
+    fn telemetry_target(&self) -> String {
+        match self {
+            OpenFolderAction::LaunchEditor(editor) => format!("{editor}"),
+            OpenFolderAction::Reveal => "finder".to_string(),
+        }
+    }
+}
+
+/// Decides what the *default* open action (`OpenCurrentFolderInDefaultIde`, R2)
+/// does given the resolved default folder IDE: launch that IDE when one is
+/// set/installed, otherwise fall back to revealing the folder in Finder
+/// (KTD5). Pure so the fallback branch is testable without an `AppContext`.
+fn default_open_folder_action(default_editor: Option<Editor>) -> OpenFolderAction {
+    match default_editor {
+        Some(editor) => OpenFolderAction::LaunchEditor(editor),
+        None => OpenFolderAction::Reveal,
+    }
 }
 
 /// Total width/height of the collage area in the group header.

@@ -1375,6 +1375,15 @@ pub enum TelemetryEvent {
         action: String,
         value: String,
     },
+    /// Emitted when the user opens the active tab's folder from the toolbar
+    /// "open folder in IDE" control (R8). `target` is the IDE's display name, or
+    /// `"finder"` for a reveal-in-Finder; `from_dropdown` distinguishes the
+    /// primary click (`false`) from a dropdown selection (`true`). The payload
+    /// deliberately excludes the folder path so it stays UGC-free.
+    OpenedFolderInIde {
+        target: String,
+        from_dropdown: bool,
+    },
     WorkflowExecuted(WorkflowTelemetryMetadata),
     WorkflowSelected(WorkflowTelemetryMetadata),
     OpenWorkflowSearch,
@@ -3063,6 +3072,10 @@ impl TelemetryEvent {
             TelemetryEvent::FeaturesPageAction { action, value } => {
                 Some(json!({"action": action, "value": value}))
             }
+            TelemetryEvent::OpenedFolderInIde {
+                target,
+                from_dropdown,
+            } => Some(json!({"target": target, "from_dropdown": from_dropdown})),
             TelemetryEvent::WorkflowExecuted(metadata) => Some(json!(metadata)),
             TelemetryEvent::WorkflowSelected(metadata) => Some(json!(metadata)),
             TelemetryEvent::CompleteWelcomeTipFeature {
@@ -4750,6 +4763,7 @@ impl TelemetryEvent {
             | TelemetryEvent::KeybindingResetToDefault { .. }
             | TelemetryEvent::KeybindingRemoved { .. }
             | TelemetryEvent::FeaturesPageAction { .. }
+            | TelemetryEvent::OpenedFolderInIde { .. }
             | TelemetryEvent::WorkflowExecuted(_)
             | TelemetryEvent::WorkflowSelected(_)
             | TelemetryEvent::OpenWorkflowSearch
@@ -5292,6 +5306,7 @@ impl TelemetryEventDesc for TelemetryEventDiscriminants {
             Self::KeybindingResetToDefault => EnablementState::Always,
             Self::KeybindingRemoved => EnablementState::Always,
             Self::FeaturesPageAction => EnablementState::Always,
+            Self::OpenedFolderInIde => EnablementState::Always,
             Self::WorkflowExecuted => EnablementState::Always,
             Self::WorkflowSelected => EnablementState::Always,
             Self::OpenWorkflowSearch => EnablementState::Always,
@@ -5779,6 +5794,7 @@ impl TelemetryEventDesc for TelemetryEventDiscriminants {
             Self::WorkflowExecuted => "Workflow Executed",
             Self::WorkflowSelected => "Workflow Selected",
             Self::FeaturesPageAction => "Features Page Action",
+            Self::OpenedFolderInIde => "Opened Folder In IDE",
             Self::OpenQuakeModeWindow => "Open Quake Mode Window",
             Self::OpenWelcomeTips => "Open Welcome Tips",
             Self::CompleteWelcomeTipFeature => "Complete Welcome Tip",
@@ -6337,6 +6353,7 @@ impl TelemetryEventDesc for TelemetryEventDiscriminants {
             Self::KeybindingResetToDefault => "Reset a custom keybinding to its default",
             Self::KeybindingRemoved => "Removed / cleared a keybinding",
             Self::FeaturesPageAction => "Changed settings in Features Page",
+            Self::OpenedFolderInIde => "Opened the active tab's folder in an IDE or Finder",
             Self::WorkflowExecuted => "Executed workflow",
             Self::WorkflowSelected => "Selected workflow and populated into the Input Editor",
             Self::OpenWorkflowSearch => "Opened workflows search in command search pane",
