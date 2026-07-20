@@ -450,6 +450,122 @@ fn test_open_folder_telemetry_target_never_contains_a_path() {
     }
 }
 
+// --- Unit U6: open-folder toolbar button pure helpers (R1/R3/R5, KTD5) ---
+//
+// The split-button construction, its flag-gated injection into the tab bar, the
+// dropdown positioning, and the disabled/tooltip refresh are all ctx-bound
+// (they need a real `Workspace` + `AppContext` + `ViewContext`), so they are
+// covered by the build plus manual smoke. What is unit-testable without that
+// harness is the pure decision layer the ctx-bound render path hands off to:
+// the OS reveal label, the tooltip label given (default IDE, remote), and the
+// menu-item list built from the installed-editor set.
+
+#[test]
+fn test_os_reveal_label_matches_platform() {
+    let expected = if cfg!(target_os = "macos") {
+        "Reveal in Finder"
+    } else if cfg!(target_os = "windows") {
+        "Reveal in Explorer"
+    } else {
+        "Reveal in file manager"
+    };
+    assert_eq!(os_reveal_label(), expected);
+}
+
+#[test]
+fn test_tooltip_names_default_ide_when_set() {
+    // Default IDE set + local tab -> tooltip names the IDE the primary opens.
+    assert_eq!(
+        open_folder_button_tooltip(Some(Editor::VSCode), false),
+        format!("Open folder in {}", Editor::VSCode),
+    );
+}
+
+#[test]
+fn test_tooltip_is_os_reveal_label_when_no_default_ide() {
+    // No default IDE -> primary reveals in Finder, tooltip reads the OS label.
+    assert_eq!(
+        open_folder_button_tooltip(None, false),
+        os_reveal_label().to_string(),
+    );
+}
+
+#[test]
+fn test_tooltip_is_remote_message_when_disabled() {
+    // Remote/disabled tab (resolver `None`) -> tooltip explains unavailability,
+    // regardless of whether a default editor happens to be set.
+    assert_eq!(
+        open_folder_button_tooltip(None, true),
+        "Not available for remote sessions",
+    );
+    assert_eq!(
+        open_folder_button_tooltip(Some(Editor::VSCode), true),
+        "Not available for remote sessions",
+    );
+}
+
+#[test]
+fn test_menu_items_with_zero_installed_ides_is_reveal_only() {
+    // KTD5: with no installed IDEs the menu shows ONLY the Reveal item -- no IDE
+    // rows, no separator, no hint row.
+    let items = open_folder_menu_items(&[]);
+    assert_eq!(items.len(), 1, "expected exactly the Reveal item");
+    match &items[0] {
+        MenuItem::Item(fields) => {
+            assert_eq!(fields.label(), os_reveal_label());
+            assert!(matches!(
+                fields.on_select_action(),
+                Some(WorkspaceAction::RevealCurrentFolder)
+            ));
+        }
+        other => panic!("expected the Reveal item, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_menu_items_lists_installed_ides_then_divider_then_reveal() {
+    // R3: one row per installed IDE (opening that specific editor), then a
+    // visual separator, then the Reveal entry.
+    let installed = [Editor::VSCode, Editor::Cursor];
+    let items = open_folder_menu_items(&installed);
+
+    // N IDE rows + 1 separator + 1 Reveal.
+    assert_eq!(items.len(), installed.len() + 2);
+
+    for (item, editor) in items.iter().zip(installed.iter()) {
+        match item {
+            MenuItem::Item(fields) => {
+                assert_eq!(fields.label(), format!("{editor}").as_str());
+                match fields.on_select_action() {
+                    Some(WorkspaceAction::OpenCurrentFolderIn(action_editor)) => {
+                        assert_eq!(action_editor, editor);
+                    }
+                    other => panic!("expected OpenCurrentFolderIn, got {other:?}"),
+                }
+            }
+            other => panic!("expected an IDE item, got {other:?}"),
+        }
+    }
+
+    // The separator divides the IDE rows from the Reveal entry.
+    assert!(
+        items[installed.len()].is_separator(),
+        "installed IDEs must be separated from the Reveal entry by a divider",
+    );
+
+    // The trailing item reveals the folder in Finder.
+    match items.last().expect("menu is non-empty") {
+        MenuItem::Item(fields) => {
+            assert_eq!(fields.label(), os_reveal_label());
+            assert!(matches!(
+                fields.on_select_action(),
+                Some(WorkspaceAction::RevealCurrentFolder)
+            ));
+        }
+        other => panic!("expected the Reveal item, got {other:?}"),
+    }
+}
+
 #[test]
 fn test_theme_chooser_does_not_suppress_tab_bar_traffic_light_padding() {
     App::test((), |mut app| async move {

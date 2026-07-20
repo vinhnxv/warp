@@ -526,6 +526,10 @@ pub enum WorkspaceAction {
     /// Reveal the active tab's resolved folder in Finder / Explorer / the OS
     /// file manager (R3).
     RevealCurrentFolder,
+    /// Toggle the toolbar dropdown listing the installed IDEs + Reveal in
+    /// Finder (R3). Opening it (re)builds the menu from the currently installed
+    /// IDEs.
+    ToggleOpenFolderMenu,
     TerminateApp,
     CloseWindow,
     /// Help the user call the Warp executable with the [`crate::args::DEBUG_DUMP_FLAG`].
@@ -1182,6 +1186,7 @@ impl WorkspaceAction {
             | OpenCurrentFolderInDefaultIde
             | OpenCurrentFolderIn(_)
             | RevealCurrentFolder
+            | ToggleOpenFolderMenu
             | ViewObjectInWarpDrive(_)
             | OpenObjectSharingSettings { .. }
             | TerminateApp
