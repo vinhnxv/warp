@@ -5333,6 +5333,31 @@ impl Workspace {
             .expect("Active tab index entry should exist")
     }
 
+    /// Resolves the folder the "open folder in IDE" action should open for the
+    /// active tab (unit U4, R4/R5). This is the shared seam consumed by the
+    /// open handlers and the toolbar button's enable/disable state.
+    ///
+    /// Returns `None` when the active session is remote/SSH or its cwd no longer
+    /// exists locally; otherwise returns the deepest-ancestor repo root that
+    /// owns the cwd, or the cwd itself when no known repo owns it.
+    pub fn resolve_open_folder_target(&self, ctx: &AppContext) -> Option<PathBuf> {
+        // `canonical_session_pwd_if_local` already returns `None` for remote/SSH
+        // sessions (R5) and for a cwd that no longer exists locally, so no extra
+        // existence check is needed here.
+        let cwd = self
+            .active_tab_pane_group()
+            .as_ref(ctx)
+            .active_session_view(ctx)
+            .and_then(|tv| tv.as_ref(ctx).canonical_session_pwd_if_local(ctx))
+            .map(PathBuf::from);
+
+        resolve_open_folder_target_from(cwd, |path| {
+            DetectedRepositories::as_ref(ctx)
+                .get_root_for_path(&LocalOrRemotePath::Local(path.to_path_buf()))
+                .and_then(|root| PathBuf::try_from(root).ok())
+        })
+    }
+
     /// Attempts to get selected text from the focused pane.
     /// Returns None if there is no selection, multiple selections, or an empty selection.
     /// Supports code, notebook, AI document, and terminal panes.
@@ -29219,6 +29244,30 @@ impl Workspace {
 
 fn should_reserve_traffic_light_space_in_tab_bar(side: TrafficLightSide) -> bool {
     side == TrafficLightSide::Right
+}
+
+/// Pure decision for the "open folder in IDE" target (unit U4, R4/R5).
+///
+/// Given the active tab's already-resolved local working directory and a
+/// repo-root lookup, returns the folder the action should open:
+/// - `None` when there is no local cwd. `cwd` is `None` for remote/SSH sessions
+///   and for a cwd that no longer exists locally, because the caller sources it
+///   from [`TerminalView::canonical_session_pwd_if_local`], which already
+///   applies both guards (R5). No filesystem check is repeated here.
+/// - the deepest-ancestor repo root that owns the cwd, when one exists (R4).
+/// - the cwd itself when no known repo owns it (R4).
+///
+/// The repo-root lookup is injected as a closure so this decision can be unit
+/// tested without an `AppContext`. The ctx-bound adapter
+/// [`Workspace::resolve_open_folder_target`] wires it to
+/// [`DetectedRepositories::get_root_for_path`], which performs the actual
+/// deepest-ancestor resolution.
+fn resolve_open_folder_target_from(
+    cwd: Option<PathBuf>,
+    repo_root_for_cwd: impl FnOnce(&Path) -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    let cwd = cwd?;
+    Some(repo_root_for_cwd(&cwd).unwrap_or(cwd))
 }
 
 /// Total width/height of the collage area in the group header.

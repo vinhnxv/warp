@@ -328,6 +328,68 @@ fn test_tab_bar_traffic_light_space_regression_for_resource_center_overlap() {
 }
 
 #[test]
+fn test_resolve_open_folder_target_returns_deepest_repo_root_for_cwd_in_known_repo() {
+    // R4: when the active tab's cwd is inside a known repo, the target is the
+    // deepest-ancestor repo root. The real lookup (`get_root_for_path`) already
+    // returns the deepest ancestor; here the injected closure mimics that by
+    // walking ancestors over a set of registered roots.
+    let repo_roots = [
+        PathBuf::from("/work/outer"),
+        PathBuf::from("/work/outer/nested"),
+    ];
+    let deepest_root_for = |path: &Path| -> Option<PathBuf> {
+        path.ancestors()
+            .find(|ancestor| repo_roots.iter().any(|root| root == ancestor))
+            .map(Path::to_path_buf)
+    };
+
+    // cwd nested under BOTH repos -> the deepest (nested) root wins.
+    assert_eq!(
+        resolve_open_folder_target_from(
+            Some(PathBuf::from("/work/outer/nested/src")),
+            deepest_root_for,
+        ),
+        Some(PathBuf::from("/work/outer/nested")),
+    );
+
+    // cwd under only the outer repo -> the outer root.
+    assert_eq!(
+        resolve_open_folder_target_from(
+            Some(PathBuf::from("/work/outer/docs")),
+            deepest_root_for,
+        ),
+        Some(PathBuf::from("/work/outer")),
+    );
+}
+
+#[test]
+fn test_resolve_open_folder_target_returns_cwd_when_no_known_repo() {
+    // R4: a cwd owned by no known repo -> open the cwd itself.
+    let cwd = PathBuf::from("/tmp/loose-dir");
+    assert_eq!(
+        resolve_open_folder_target_from(Some(cwd.clone()), |_| None),
+        Some(cwd),
+    );
+}
+
+#[test]
+fn test_resolve_open_folder_target_returns_none_when_no_local_cwd() {
+    // R5: remote/SSH sessions AND deleted/non-existent cwds both surface as
+    // `None` from `canonical_session_pwd_if_local`, so the target is `None` and
+    // the repo lookup is never consulted.
+    let mut lookup_called = false;
+    let target = resolve_open_folder_target_from(None, |_| {
+        lookup_called = true;
+        Some(PathBuf::from("/should/not/be/used"))
+    });
+    assert_eq!(target, None);
+    assert!(
+        !lookup_called,
+        "repo lookup must not run when there is no local cwd"
+    );
+}
+
+#[test]
 fn test_theme_chooser_does_not_suppress_tab_bar_traffic_light_padding() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
