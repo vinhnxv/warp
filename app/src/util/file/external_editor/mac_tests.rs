@@ -31,7 +31,12 @@ fn dir_launch_uses_bundle_not_url_scheme_for_url_editors() {
     let dir = tmp.path();
     let expected_arg = dir.to_string_lossy().to_string();
 
-    for editor in [Editor::VSCode, Editor::VSCodeInsiders, Editor::Cursor, Editor::Windsurf] {
+    for editor in [
+        Editor::VSCode,
+        Editor::VSCodeInsiders,
+        Editor::Cursor,
+        Editor::Windsurf,
+    ] {
         let (method, args) = editor.command_executable_and_arguments(None, dir);
         assert!(
             matches!(method, OpenFileInEditorMethod::FromApplicationBundleInfo),
