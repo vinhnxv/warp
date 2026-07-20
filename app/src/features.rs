@@ -447,6 +447,8 @@ fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::GroupedTabs,
         #[cfg(feature = "repo_mode")]
         FeatureFlag::RepoMode,
+        #[cfg(feature = "open_folder_in_ide")]
+        FeatureFlag::OpenFolderInIde,
         #[cfg(feature = "pinned_tabs")]
         FeatureFlag::PinnedTabs,
         #[cfg(feature = "warp_control_cli")]

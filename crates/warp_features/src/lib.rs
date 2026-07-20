@@ -869,6 +869,10 @@ pub enum FeatureFlag {
     /// and per-repo tab filtering.
     RepoMode,
 
+    /// Gates the "Open Folder in IDE" toolbar feature, which lets users open
+    /// the current working directory in an external IDE.
+    OpenFolderInIde,
+
     /// Gates the Pinned Tabs feature, which lets users pin individual tabs
     /// and whole tab groups so they stay at the front of the tab list and
     /// are protected from reordering.
