@@ -327,6 +327,7 @@ fn test_tab_bar_traffic_light_space_regression_for_resource_center_overlap() {
     }
 }
 
+#[cfg(feature = "local_fs")]
 #[test]
 fn test_resolve_open_folder_target_returns_deepest_repo_root_for_cwd_in_known_repo() {
     // R4: when the active tab's cwd is inside a known repo, the target is the
@@ -359,6 +360,7 @@ fn test_resolve_open_folder_target_returns_deepest_repo_root_for_cwd_in_known_re
     );
 }
 
+#[cfg(feature = "local_fs")]
 #[test]
 fn test_resolve_open_folder_target_returns_cwd_when_no_known_repo() {
     // R4: a cwd owned by no known repo -> open the cwd itself.
@@ -369,6 +371,7 @@ fn test_resolve_open_folder_target_returns_cwd_when_no_known_repo() {
     );
 }
 
+#[cfg(feature = "local_fs")]
 #[test]
 fn test_resolve_open_folder_target_returns_none_when_no_local_cwd() {
     // R5: remote/SSH sessions AND deleted/non-existent cwds both surface as
@@ -400,6 +403,7 @@ fn test_resolve_open_folder_target_returns_none_when_no_local_cwd() {
 // `open_current_folder` and is covered by the U4 resolver tests above plus
 // manual smoke.
 
+#[cfg(feature = "local_fs")]
 #[test]
 fn test_default_open_action_launches_default_ide_when_set() {
     // R2: default-open with an IDE default -> launch that IDE, telemetry target
@@ -410,6 +414,7 @@ fn test_default_open_action_launches_default_ide_when_set() {
     assert_eq!(action.telemetry_target(), format!("{}", Editor::VSCode));
 }
 
+#[cfg(feature = "local_fs")]
 #[test]
 fn test_default_open_action_reveals_when_no_default_ide() {
     // Edge: default setting unset + no IDE installed -> the default action
@@ -419,6 +424,7 @@ fn test_default_open_action_reveals_when_no_default_ide() {
     assert_eq!(action.telemetry_target(), "finder");
 }
 
+#[cfg(feature = "local_fs")]
 #[test]
 fn test_launch_editor_telemetry_target_is_editor_display_name() {
     // R3: opening one-off in a specific IDE records that IDE's display name.
@@ -428,12 +434,14 @@ fn test_launch_editor_telemetry_target_is_editor_display_name() {
     }
 }
 
+#[cfg(feature = "local_fs")]
 #[test]
 fn test_reveal_telemetry_target_is_finder() {
     // R3: reveal records the fixed "finder" target regardless of platform.
     assert_eq!(OpenFolderAction::Reveal.telemetry_target(), "finder");
 }
 
+#[cfg(feature = "local_fs")]
 #[test]
 fn test_open_folder_telemetry_target_never_contains_a_path() {
     // R8: the telemetry payload must stay UGC-free -- `target` is only ever an
@@ -460,6 +468,7 @@ fn test_open_folder_telemetry_target_never_contains_a_path() {
 // the OS reveal label, the tooltip label given (default IDE, remote), and the
 // menu-item list built from the installed-editor set.
 
+#[cfg(feature = "local_fs")]
 #[test]
 fn test_os_reveal_label_matches_platform() {
     let expected = if cfg!(target_os = "macos") {
@@ -472,6 +481,7 @@ fn test_os_reveal_label_matches_platform() {
     assert_eq!(os_reveal_label(), expected);
 }
 
+#[cfg(feature = "local_fs")]
 #[test]
 fn test_tooltip_names_default_ide_when_set() {
     // Default IDE set + local tab -> tooltip names the IDE the primary opens.
@@ -481,6 +491,7 @@ fn test_tooltip_names_default_ide_when_set() {
     );
 }
 
+#[cfg(feature = "local_fs")]
 #[test]
 fn test_tooltip_is_os_reveal_label_when_no_default_ide() {
     // No default IDE -> primary reveals in Finder, tooltip reads the OS label.
@@ -490,6 +501,7 @@ fn test_tooltip_is_os_reveal_label_when_no_default_ide() {
     );
 }
 
+#[cfg(feature = "local_fs")]
 #[test]
 fn test_tooltip_is_remote_message_when_disabled() {
     // Remote/disabled tab (resolver `None`) -> tooltip explains unavailability,
@@ -504,6 +516,7 @@ fn test_tooltip_is_remote_message_when_disabled() {
     );
 }
 
+#[cfg(feature = "local_fs")]
 #[test]
 fn test_menu_items_with_zero_installed_ides_is_reveal_only() {
     // KTD5: with no installed IDEs the menu shows ONLY the Reveal item -- no IDE
@@ -522,6 +535,7 @@ fn test_menu_items_with_zero_installed_ides_is_reveal_only() {
     }
 }
 
+#[cfg(feature = "local_fs")]
 #[test]
 fn test_menu_items_lists_installed_ides_then_divider_then_reveal() {
     // R3: one row per installed IDE (opening that specific editor), then a

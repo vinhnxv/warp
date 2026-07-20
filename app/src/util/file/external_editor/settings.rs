@@ -210,10 +210,15 @@ pub fn resolve_default_folder_editor(ctx: &mut warpui::AppContext) -> Option<sup
     let open_file_editor = *editor_settings.open_file_editor;
 
     if explicitly_set {
-        return match default_folder_editor {
-            EditorChoice::ExternalEditor(editor) => Some(editor),
-            _ => None,
-        };
+        match default_folder_editor {
+            EditorChoice::ExternalEditor(editor) if editor.is_installed(ctx) => {
+                return Some(editor)
+            }
+            // The configured IDE is no longer installed: fall through to the seed
+            // so the primary reveals in Finder instead of launching a missing app.
+            EditorChoice::ExternalEditor(_) => {}
+            _ => return None,
+        }
     }
 
     seed_default_folder_editor(open_file_editor, &super::installed_editors(ctx))

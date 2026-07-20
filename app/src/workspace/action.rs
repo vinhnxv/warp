@@ -43,6 +43,7 @@ use crate::terminal::available_shells::AvailableShell;
 use crate::terminal::view::inline_banner::ZeroStatePromptSuggestionType;
 use crate::themes::theme::AnsiColorIdentifier;
 use crate::themes::theme_chooser::ThemeChooserMode;
+#[cfg(feature = "local_fs")]
 use crate::util::file::external_editor::Editor;
 use crate::workflows::{WorkflowSelectionSource, WorkflowSource, WorkflowType};
 use crate::workspace::tab_group::TabGroupId;
@@ -514,21 +515,25 @@ pub enum WorkspaceAction {
     OpenFilePath {
         path: PathBuf,
     },
-    /// Open the active tab's resolved folder in the user's default folder IDE
-    ///. Falls back to revealing the folder in Finder when no default IDE
+    /// Open the active tab's resolved folder in the user's default folder IDE.
+    /// Falls back to revealing the folder in Finder when no default IDE
     /// is set or installed. Never rewrites the default-folder-IDE setting,
     /// which is managed from Settings.
+    #[cfg(feature = "local_fs")]
     OpenCurrentFolderInDefaultIde,
     /// Open the active tab's resolved folder in a specific IDE chosen from the
     /// toolbar dropdown. This is a one-off launch and does not change the
     /// default-folder-IDE setting.
+    #[cfg(feature = "local_fs")]
     OpenCurrentFolderIn(Editor),
     /// Reveal the active tab's resolved folder in Finder / Explorer / the OS
     /// file manager.
+    #[cfg(feature = "local_fs")]
     RevealCurrentFolder,
     /// Toggle the toolbar dropdown listing the installed IDEs + Reveal in
     /// Finder. Opening it (re)builds the menu from the currently installed
     /// IDEs.
+    #[cfg(feature = "local_fs")]
     ToggleOpenFolderMenu,
     TerminateApp,
     CloseWindow,
@@ -1183,10 +1188,6 @@ impl WorkspaceAction {
             | AttemptLoginGatedAIUpgrade
             | UndoTrash(_)
             | OpenFilePath { .. }
-            | OpenCurrentFolderInDefaultIde
-            | OpenCurrentFolderIn(_)
-            | RevealCurrentFolder
-            | ToggleOpenFolderMenu
             | ViewObjectInWarpDrive(_)
             | OpenObjectSharingSettings { .. }
             | TerminateApp
@@ -1245,6 +1246,11 @@ impl WorkspaceAction {
             | ShowCloudModeV2EnvironmentCreationModal
             | OpenCreateAuthSecretModal { .. }
             | OpenNetworkLogPane => false,
+            #[cfg(feature = "local_fs")]
+            OpenCurrentFolderInDefaultIde
+            | OpenCurrentFolderIn(_)
+            | RevealCurrentFolder
+            | ToggleOpenFolderMenu => false,
             #[cfg(debug_assertions)]
             ShowHoaOnboardingFlow => false,
             #[cfg(target_family = "wasm")]

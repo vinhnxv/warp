@@ -5306,7 +5306,7 @@ impl TelemetryEventDesc for TelemetryEventDiscriminants {
             Self::KeybindingResetToDefault => EnablementState::Always,
             Self::KeybindingRemoved => EnablementState::Always,
             Self::FeaturesPageAction => EnablementState::Always,
-            Self::OpenedFolderInIde => EnablementState::Always,
+            Self::OpenedFolderInIde => EnablementState::Flag(FeatureFlag::OpenFolderInIde),
             Self::WorkflowExecuted => EnablementState::Always,
             Self::WorkflowSelected => EnablementState::Always,
             Self::OpenWorkflowSearch => EnablementState::Always,
