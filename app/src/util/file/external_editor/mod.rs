@@ -201,6 +201,45 @@ impl TryFrom<&str> for Editor {
     }
 }
 
+impl Editor {
+    /// Full-color logo asset for this editor, rendered un-tinted by the
+    /// open-folder toolbar button and its dropdown. `None` means no logo is
+    /// bundled and callers fall back to a generic tinted icon. All JetBrains
+    /// IDEs share the JetBrains mark.
+    pub fn logo_asset(&self) -> Option<&'static str> {
+        let path = match self {
+            Editor::VSCode | Editor::VSCodeInsiders => "bundled/svg/editor_logos/vscode.svg",
+            Editor::Cursor => "bundled/svg/editor_logos/cursor.svg",
+            Editor::Zed | Editor::ZedPreview => "bundled/svg/editor_logos/zed.svg",
+            Editor::PyCharm
+            | Editor::PyCharmCE
+            | Editor::IntelliJ
+            | Editor::IntelliJCE
+            | Editor::CLion
+            | Editor::CLionCE
+            | Editor::RustRoverPreview
+            | Editor::RustRover
+            | Editor::WebStorm
+            | Editor::PhpStorm
+            | Editor::RubyMine
+            | Editor::GoLand
+            | Editor::Rider
+            | Editor::DataSpell
+            | Editor::DataGrip => "bundled/svg/editor_logos/jetbrains.svg",
+            #[cfg(not(target_os = "macos"))]
+            Editor::Sublime => "bundled/svg/editor_logos/sublime.svg",
+            #[cfg(target_os = "macos")]
+            Editor::Sublime4 | Editor::Sublime3 | Editor::Sublime2 => {
+                "bundled/svg/editor_logos/sublime.svg"
+            }
+            Editor::Atom => "bundled/svg/editor_logos/atom.svg",
+            Editor::AndroidStudio => "bundled/svg/editor_logos/androidstudio.svg",
+            Editor::Windsurf => "bundled/svg/editor_logos/windsurf.svg",
+        };
+        Some(path)
+    }
+}
+
 /// Generate an editor command string using the provided editor (or $EDITOR as fallback)
 /// and handle line/column positioning for common command-line editors.
 /// This is primarily used for generating shell commands when opening files with $EDITOR.

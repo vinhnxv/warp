@@ -953,6 +953,14 @@ impl<A: Action + Clone> MenuItemFields<A> {
         self.icon
     }
 
+    pub fn image_icon(&self) -> Option<&'static str> {
+        self.image_icon
+    }
+
+    pub fn right_side_icon(&self) -> Option<icons::Icon> {
+        self.right_side_icon.as_ref().map(|config| config.icon)
+    }
+
     pub fn override_icon_color(&self) -> Option<Fill> {
         self.override_icon_color
     }

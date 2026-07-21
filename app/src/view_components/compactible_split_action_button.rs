@@ -118,6 +118,16 @@ impl CompactibleSplitActionButton {
     pub fn set_tooltip<T: View>(&mut self, tooltip: Option<String>, ctx: &mut ViewContext<T>) {
         self.primary_button.set_tooltip(tooltip, ctx);
     }
+
+    /// Sets a full-color image asset as the primary compact button's icon.
+    /// `None` falls back to the tinted icon the button was created with.
+    pub fn set_image_icon<T: View>(
+        &mut self,
+        path: Option<&'static str>,
+        ctx: &mut ViewContext<T>,
+    ) {
+        self.primary_button.set_compact_image_icon(path, ctx);
+    }
 }
 
 impl RenderCompactibleActionButton for CompactibleSplitActionButton {

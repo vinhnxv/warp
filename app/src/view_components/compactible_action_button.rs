@@ -124,6 +124,19 @@ impl CompactibleActionButton {
         });
     }
 
+    /// Sets a full-color image asset as the compact button's icon (the
+    /// expanded button shows a text label instead of an icon). `None` falls
+    /// back to the tinted icon the button was created with.
+    pub fn set_compact_image_icon<T: View>(
+        &mut self,
+        path: Option<&'static str>,
+        ctx: &mut ViewContext<T>,
+    ) {
+        self.compact_button.update(ctx, |button, ctx| {
+            button.set_image_icon(path, ctx);
+        });
+    }
+
     /// Sets the disabled state on both the compact and expanded buttons.
     pub fn set_disabled<T: View>(&mut self, disabled: bool, ctx: &mut ViewContext<T>) {
         self.compact_button.update(ctx, |button, ctx| {

@@ -459,6 +459,8 @@ use crate::util::file::external_editor::installed_editors;
 #[cfg(feature = "local_fs")]
 use crate::util::file::external_editor::settings::resolve_default_folder_editor;
 #[cfg(feature = "local_fs")]
+use crate::util::file::external_editor::settings::EditorChoice;
+#[cfg(feature = "local_fs")]
 use crate::util::file::external_editor::settings::OpenConversationPreference;
 #[cfg(feature = "local_fs")]
 use crate::util::file::external_editor::Editor;
@@ -1065,9 +1067,10 @@ pub struct Workspace {
     show_new_session_dropdown_menu: Option<NewSessionMenuAnchor>,
     /// Split button in the top-right toolbar that opens the active tab's folder
     /// in an IDE (or reveals it in Finder), gated by `FeatureFlag::OpenFolderInIde`.
-    /// Built once in the constructor; its disabled state and tooltip are
-    /// refreshed by [`Workspace::refresh_open_folder_button_state`]. Only
-    /// rendered when the flag is enabled.
+    /// Built once in the constructor; its disabled state, tooltip, and
+    /// default-IDE logo are refreshed by
+    /// [`Workspace::refresh_open_folder_button_state`]. Only rendered when the
+    /// flag is enabled.
     #[cfg(feature = "local_fs")]
     open_folder_button: CompactibleSplitActionButton,
     /// Dropdown for the open-folder split button, listing the installed IDEs and
@@ -2942,6 +2945,12 @@ impl Workspace {
             Some(OPEN_FOLDER_BUTTON_POSITION_ID.to_string()),
             ctx,
         );
+        // Keep the button's logo/tooltip in sync when the default folder IDE
+        // changes outside the dropdown (e.g. from the Settings page).
+        #[cfg(feature = "local_fs")]
+        ctx.subscribe_to_model(&EditorSettings::handle(ctx), |me, _, _, ctx| {
+            me.refresh_open_folder_button_state(ctx);
+        });
 
         // Subscribe to network changes
         ctx.subscribe_to_model(
@@ -5434,8 +5443,9 @@ impl Workspace {
     /// Finder) and emit telemetry. Early-returns with no launch and no telemetry
     /// when the folder can't be resolved (remote/SSH or missing cwd).
     ///
-    /// This never writes the default-folder-IDE setting — a dropdown pick opens
-    /// one-off; the default is managed from Settings.
+    /// This itself never writes the default-folder-IDE setting; the
+    /// `OpenCurrentFolderIn` action handler persists a dropdown pick as the
+    /// new default before delegating here.
     #[cfg(feature = "local_fs")]
     fn open_current_folder(
         &self,
@@ -21451,6 +21461,18 @@ impl Workspace {
             );
         }
 
+        // Open-folder split button, immediately left of Settings (or of the
+        // avatar when `AvatarInTabBar` replaces the Settings button).
+        // Flag-gated: nothing is added to the toolbar when off.
+        #[cfg(feature = "local_fs")]
+        if FeatureFlag::OpenFolderInIde.is_enabled() {
+            target.add_child(
+                Container::new(self.render_open_folder_button())
+                    .with_margin_left(TAB_BAR_PADDING_LEFT)
+                    .finish(),
+            );
+        }
+
         if FeatureFlag::AvatarInTabBar.is_enabled() {
             target.add_child(
                 Container::new(self.render_avatar_button(appearance, ctx))
@@ -21462,17 +21484,6 @@ impl Workspace {
             if resource_center_closed && ContextFlag::WarpEssentials.is_enabled() {
                 target.add_child(
                     Container::new(self.render_resource_center_button(appearance, ctx))
-                        .with_margin_left(TAB_BAR_PADDING_LEFT)
-                        .finish(),
-                );
-            }
-
-            // Open-folder split button, immediately left of Settings.
-            // Flag-gated: nothing is added to the toolbar when off.
-            #[cfg(feature = "local_fs")]
-            if FeatureFlag::OpenFolderInIde.is_enabled() {
-                target.add_child(
-                    Container::new(self.render_open_folder_button())
                         .with_margin_left(TAB_BAR_PADDING_LEFT)
                         .finish(),
                 );
@@ -21949,13 +21960,14 @@ impl Workspace {
             return;
         }
         let is_remote = self.resolve_open_folder_target(ctx).is_none();
-        let default_editor = if is_remote {
-            None
-        } else {
-            resolve_default_folder_editor(ctx)
-        };
-        let tooltip = open_folder_button_tooltip(default_editor, is_remote);
+        let default_editor = resolve_default_folder_editor(ctx);
+        let tooltip =
+            open_folder_button_tooltip(if is_remote { None } else { default_editor }, is_remote);
 
+        // Show the default IDE's full-color logo on the primary button; fall
+        // back to the generic tinted code icon when no default IDE is set.
+        self.open_folder_button
+            .set_image_icon(default_editor.and_then(|editor| editor.logo_asset()), ctx);
         self.open_folder_button.set_disabled(is_remote, ctx);
         self.open_folder_button.set_tooltip(Some(tooltip), ctx);
     }
@@ -21967,7 +21979,8 @@ impl Workspace {
     fn toggle_open_folder_menu(&mut self, ctx: &mut ViewContext<Self>) {
         self.show_open_folder_menu = !self.show_open_folder_menu;
         if self.show_open_folder_menu {
-            let items = open_folder_menu_items(&installed_editors(ctx));
+            let items =
+                open_folder_menu_items(&installed_editors(ctx), resolve_default_folder_editor(ctx));
             self.open_folder_menu.update(ctx, |menu, ctx| {
                 menu.set_items(items, ctx);
             });
@@ -25167,8 +25180,16 @@ impl TypedActionView for Workspace {
             }
             #[cfg(feature = "local_fs")]
             OpenCurrentFolderIn(editor) => {
-                // One-off open in a specific IDE picked from the dropdown.
-                self.open_current_folder(OpenFolderAction::LaunchEditor(*editor), true, ctx);
+                // Dropdown pick: open in that IDE and make it the new default,
+                // so the primary button (and its logo) follows the last pick.
+                let editor = *editor;
+                EditorSettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(settings
+                        .default_folder_editor
+                        .set_value(EditorChoice::ExternalEditor(editor), ctx));
+                });
+                self.open_current_folder(OpenFolderAction::LaunchEditor(editor), true, ctx);
+                self.refresh_open_folder_button_state(ctx);
             }
             #[cfg(feature = "local_fs")]
             RevealCurrentFolder => {
@@ -29563,18 +29584,29 @@ fn open_folder_button_tooltip(default_editor: Option<Editor>, is_remote: bool) -
 }
 
 /// Pure builder for the open-folder dropdown's items: one row per
-/// installed IDE (each opens the folder in that IDE), a visual separator, then
-/// the OS-aware Reveal item. With zero installed IDEs the menu is just the
-/// Reveal item -- no IDE rows and no separator, since the primary already
-/// carries the Finder fallback.
+/// installed IDE (each opens the folder in that IDE and makes it the new
+/// default), a visual separator, then the OS-aware Reveal item. Rows show the
+/// IDE's full-color logo, and the current default IDE is marked with a
+/// trailing check. With zero installed IDEs the menu is just the Reveal item
+/// -- no IDE rows and no separator, since the primary already carries the
+/// Finder fallback.
 #[cfg(feature = "local_fs")]
-fn open_folder_menu_items(installed_editors: &[Editor]) -> Vec<MenuItem<WorkspaceAction>> {
+fn open_folder_menu_items(
+    installed_editors: &[Editor],
+    default_editor: Option<Editor>,
+) -> Vec<MenuItem<WorkspaceAction>> {
     let mut items: Vec<MenuItem<WorkspaceAction>> = installed_editors
         .iter()
         .map(|editor| {
-            MenuItemFields::new(format!("{editor}"))
-                .with_on_select_action(WorkspaceAction::OpenCurrentFolderIn(*editor))
-                .into_item()
+            let mut fields = MenuItemFields::new(format!("{editor}"))
+                .with_on_select_action(WorkspaceAction::OpenCurrentFolderIn(*editor));
+            if let Some(logo) = editor.logo_asset() {
+                fields = fields.with_image_icon(logo);
+            }
+            if default_editor == Some(*editor) {
+                fields = fields.with_right_side_icon(icons::Icon::Check);
+            }
+            fields.into_item()
         })
         .collect();
 

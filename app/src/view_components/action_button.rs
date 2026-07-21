@@ -8,10 +8,11 @@ use warp_core::ui::color::contrast::MinimumAllowedContrast;
 use warp_core::ui::color::{coloru_with_opacity, ContrastingColor};
 use warp_core::ui::theme::color::internal_colors;
 use warp_core::ui::theme::{AnsiColorIdentifier, Fill};
+use warpui::assets::asset_cache::AssetSource;
 use warpui::elements::{
-    Border, ChildAnchor, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Flex,
-    Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning, Padding,
-    ParentAnchor, ParentElement as _, ParentOffsetBounds, Radius, Stack, Text,
+    Border, CacheOption, ChildAnchor, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
+    Flex, Hoverable, Image, MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning,
+    Padding, ParentAnchor, ParentElement as _, ParentOffsetBounds, Radius, Stack, Text,
     DEFAULT_UI_LINE_HEIGHT_RATIO,
 };
 use warpui::fonts::{Properties, Weight};
@@ -45,6 +46,10 @@ pub struct ActionButton {
     disabled: bool,
     /// An icon to show to the left of the label.
     icon: Option<Icon>,
+    /// A full-color image asset shown in place of `icon` when set. Rendered
+    /// via [`Image::new`] preserving its original colors (e.g. editor logos),
+    /// unlike `icon` which is tinted to the button's text color.
+    image_icon: Option<&'static str>,
     /// Optional override for icon color derived from the current theme's ANSI palette.
     icon_ansi_color: Option<AnsiColorIdentifier>,
     /// The text of this button.
@@ -220,6 +225,7 @@ impl ActionButton {
             focused: false,
             disabled: false,
             icon: None,
+            image_icon: None,
             icon_ansi_color: None,
             label: label.into(),
             tooltip: None,
@@ -423,6 +429,13 @@ impl ActionButton {
 
     pub fn set_icon(&mut self, icon: Option<Icon>, ctx: &mut ViewContext<Self>) {
         self.icon = icon;
+        ctx.notify();
+    }
+
+    /// Sets a full-color image asset rendered in place of the tinted icon.
+    /// Passing `None` falls back to the icon set via `with_icon`/`set_icon`.
+    pub fn set_image_icon(&mut self, path: Option<&'static str>, ctx: &mut ViewContext<Self>) {
+        self.image_icon = path;
         ctx.notify();
     }
 
@@ -750,7 +763,18 @@ impl View for ActionButton {
                 }
             };
 
-            if let Some(icon) = self.icon {
+            if let Some(path) = self.image_icon {
+                let icon_size = self.size.icon_size(appearance, app);
+                row.add_child(
+                    ConstrainedBox::new(
+                        Image::new(AssetSource::Bundled { path }, CacheOption::BySize).finish(),
+                    )
+                    .with_width(icon_size)
+                    .with_height(icon_size)
+                    .finish(),
+                );
+                has_preceding_element = true;
+            } else if let Some(icon) = self.icon {
                 let icon_size = self.size.icon_size(appearance, app);
                 let icon_fill = self
                     .icon_ansi_color

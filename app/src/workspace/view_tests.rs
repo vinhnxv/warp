@@ -521,7 +521,7 @@ fn test_tooltip_is_remote_message_when_disabled() {
 fn test_menu_items_with_zero_installed_ides_is_reveal_only() {
     // KTD5: with no installed IDEs the menu shows ONLY the Reveal item -- no IDE
     // rows, no separator, no hint row.
-    let items = open_folder_menu_items(&[]);
+    let items = open_folder_menu_items(&[], None);
     assert_eq!(items.len(), 1, "expected exactly the Reveal item");
     match &items[0] {
         MenuItem::Item(fields) => {
@@ -541,7 +541,7 @@ fn test_menu_items_lists_installed_ides_then_divider_then_reveal() {
     // R3: one row per installed IDE (opening that specific editor), then a
     // visual separator, then the Reveal entry.
     let installed = [Editor::VSCode, Editor::Cursor];
-    let items = open_folder_menu_items(&installed);
+    let items = open_folder_menu_items(&installed, Some(Editor::VSCode));
 
     // N IDE rows + 1 separator + 1 Reveal.
     assert_eq!(items.len(), installed.len() + 2);
@@ -556,6 +556,11 @@ fn test_menu_items_lists_installed_ides_then_divider_then_reveal() {
                     }
                     other => panic!("expected OpenCurrentFolderIn, got {other:?}"),
                 }
+                // Every IDE row carries that IDE's full-color logo.
+                assert_eq!(fields.image_icon(), editor.logo_asset());
+                // Only the current default IDE row is check-marked.
+                let expected_check = (*editor == Editor::VSCode).then_some(icons::Icon::Check);
+                assert_eq!(fields.right_side_icon(), expected_check);
             }
             other => panic!("expected an IDE item, got {other:?}"),
         }
