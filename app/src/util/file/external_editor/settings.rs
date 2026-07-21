@@ -172,8 +172,8 @@ impl OpenConversationPreference {
 /// Computes the value to seed `default_folder_editor` with the first time it is
 /// read while unset.
 ///
-/// - If the user's existing `open_file_editor` is already an external editor,
-///   reuse that editor.
+/// - If the user's existing `open_file_editor` is already an external editor
+///   *and it is installed*, reuse that editor.
 /// - Otherwise fall back to the first installed editor.
 /// - If no editor is installed, return `None` so the setting stays unset (the
 ///   primary toolbar button then falls back to revealing the folder in the
@@ -186,7 +186,9 @@ fn seed_default_folder_editor(
     installed_editors: &[super::Editor],
 ) -> Option<super::Editor> {
     if let EditorChoice::ExternalEditor(editor) = open_file_editor {
-        return Some(editor);
+        if installed_editors.contains(&editor) {
+            return Some(editor);
+        }
     }
     installed_editors.first().copied()
 }
@@ -217,7 +219,9 @@ pub fn resolve_default_folder_editor(ctx: &mut warpui::AppContext) -> Option<sup
             // The configured IDE is no longer installed: fall through to the seed
             // so the primary reveals in Finder instead of launching a missing app.
             EditorChoice::ExternalEditor(_) => {}
-            _ => return None,
+            EditorChoice::Warp | EditorChoice::EnvEditor | EditorChoice::SystemDefault => {
+                return None
+            }
         }
     }
 

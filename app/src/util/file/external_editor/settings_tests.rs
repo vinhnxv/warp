@@ -3,13 +3,34 @@ use settings::Setting as _;
 use super::*;
 use crate::util::file::external_editor::Editor;
 
-/// Unset + the user's file editor is already an IDE: the folder default seeds to
-/// that same IDE, regardless of what else is installed.
+/// Unset + the user's file editor is already an installed IDE: the folder
+/// default seeds to that same IDE.
 #[test]
-fn seed_uses_file_editor_when_it_is_an_external_editor() {
+fn seed_uses_file_editor_when_it_is_an_installed_external_editor() {
+    let seed = seed_default_folder_editor(
+        EditorChoice::ExternalEditor(Editor::VSCode),
+        &[Editor::Zed, Editor::VSCode],
+    );
+    assert_eq!(seed, Some(Editor::VSCode));
+}
+
+/// Unset + the file editor is an IDE that is NOT installed: the seed must not
+/// hand back an unlaunchable editor (the button would show its logo/tooltip and
+/// telemetry would record it while the launch silently falls back). Falls back
+/// to the first installed IDE instead.
+#[test]
+fn seed_skips_uninstalled_file_editor() {
     let seed =
         seed_default_folder_editor(EditorChoice::ExternalEditor(Editor::VSCode), &[Editor::Zed]);
-    assert_eq!(seed, Some(Editor::VSCode));
+    assert_eq!(seed, Some(Editor::Zed));
+}
+
+/// Unset + the file editor is an uninstalled IDE and nothing else is installed:
+/// stays unset (None) so the primary reveals in the file manager.
+#[test]
+fn seed_is_none_when_file_editor_uninstalled_and_nothing_installed() {
+    let seed = seed_default_folder_editor(EditorChoice::ExternalEditor(Editor::VSCode), &[]);
+    assert_eq!(seed, None);
 }
 
 /// Unset + the file editor is a non-IDE choice (Warp / System / $EDITOR): the

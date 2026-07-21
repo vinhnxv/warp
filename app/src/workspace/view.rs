@@ -476,11 +476,14 @@ use crate::util::traffic_lights::{traffic_light_data, TrafficLightMouseStates, T
 use crate::util::truncation::truncate_from_end;
 #[cfg(target_family = "wasm")]
 use crate::view_components::action_button::ActionButton;
+#[cfg(feature = "local_fs")]
 use crate::view_components::action_button::ButtonSize;
 use crate::view_components::callout_bubble::{
     render_callout_bubble, CalloutArrowDirection, CalloutArrowPosition, CalloutBubbleConfig,
 };
+#[cfg(feature = "local_fs")]
 use crate::view_components::compactible_action_button::RenderCompactibleActionButton;
+#[cfg(feature = "local_fs")]
 use crate::view_components::compactible_split_action_button::CompactibleSplitActionButton;
 use crate::view_components::{
     AgentToast, AgentToastStack, DismissibleToast, DismissibleToastStack, ToastLink,
@@ -21973,8 +21976,10 @@ impl Workspace {
     }
 
     /// Toggles the open-folder dropdown. When opening, (re)builds
-    /// the menu from the currently installed IDEs so newly-installed editors
-    /// appear without restarting.
+    /// the menu from the currently installed IDEs. On macOS the installed set
+    /// is probed live, so newly-installed editors appear without restarting;
+    /// on Windows/Linux it is cached for the process lifetime
+    /// (`INSTALLED_EDITOR_METADATA`), so a restart is needed there.
     #[cfg(feature = "local_fs")]
     fn toggle_open_folder_menu(&mut self, ctx: &mut ViewContext<Self>) {
         self.show_open_folder_menu = !self.show_open_folder_menu;
