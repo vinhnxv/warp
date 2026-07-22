@@ -201,6 +201,19 @@ fn seed_default_folder_editor(
 /// [`seed_default_folder_editor`]) is applied against the currently installed
 /// editors. Returns `None` when no external editor is configured or installed.
 pub fn resolve_default_folder_editor(ctx: &mut warpui::AppContext) -> Option<super::Editor> {
+    let installed_editors = super::installed_editors(ctx);
+    resolve_default_folder_editor_with_installed(ctx, &installed_editors)
+}
+
+/// Like [`resolve_default_folder_editor`], but resolves against a
+/// caller-supplied installed-editor list instead of probing each editor's
+/// installation itself. Hot paths (tab switch, toolbar refresh, menu open)
+/// pass a cached scan here, because on macOS every `is_installed` probe is an
+/// uncached LaunchServices lookup.
+pub fn resolve_default_folder_editor_with_installed(
+    ctx: &mut warpui::AppContext,
+    installed_editors: &[super::Editor],
+) -> Option<super::Editor> {
     use settings::Setting as _;
     use warpui::SingletonEntity as _;
 
@@ -213,7 +226,7 @@ pub fn resolve_default_folder_editor(ctx: &mut warpui::AppContext) -> Option<sup
 
     if explicitly_set {
         match default_folder_editor {
-            EditorChoice::ExternalEditor(editor) if editor.is_installed(ctx) => {
+            EditorChoice::ExternalEditor(editor) if installed_editors.contains(&editor) => {
                 return Some(editor)
             }
             // The configured IDE is no longer installed: fall through to the seed
@@ -225,7 +238,7 @@ pub fn resolve_default_folder_editor(ctx: &mut warpui::AppContext) -> Option<sup
         }
     }
 
-    seed_default_folder_editor(open_file_editor, &super::installed_editors(ctx))
+    seed_default_folder_editor(open_file_editor, installed_editors)
 }
 
 #[cfg(test)]

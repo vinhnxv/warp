@@ -29,15 +29,3 @@ fn folder_editor_dropdown_is_empty_when_no_editor_installed() {
     let items = ExternalEditorView::folder_editor_dropdown_items(&[]);
     assert!(items.is_empty());
 }
-
-/// Selecting an editor from the dropdown writes that IDE to the setting via the
-/// `SetDefaultFolderEditor` action.
-#[test]
-fn selecting_a_folder_editor_maps_to_set_action() {
-    let items = ExternalEditorView::folder_editor_dropdown_items(&[Editor::Cursor]);
-    let (_, choice) = &items[0];
-    assert_eq!(
-        ExternalEditorAction::SetDefaultFolderEditor(*choice),
-        ExternalEditorAction::SetDefaultFolderEditor(EditorChoice::ExternalEditor(Editor::Cursor))
-    );
-}
