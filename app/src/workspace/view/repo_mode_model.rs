@@ -239,21 +239,23 @@ impl Workspace {
         }
     }
 
-    /// Opens a plain terminal detached from every repo entry: clearing the
-    /// selection first means the new tab neither joins a repo group (R6) nor
-    /// starts at an entry root. The tab starts at the user's home directory
+    /// Opens a plain terminal detached from every repo entry (R6): the
+    /// selection is cleared before the tab is created and any group inherited
+    /// from the active tab is dropped after, so the tab lands in "Other tabs"
+    /// no matter which repo row was selected or focused when the user pressed
+    /// "+ New". The tab starts at the user's home directory
     /// explicitly — the stock new-tab flow can inherit the previous session's
-    /// cwd, which would classify the tab under that repo instead of the
-    /// "Other tabs" section.
+    /// cwd, and a "loose" terminal silently starting inside some repo's
+    /// working tree would be surprising even though only group binding (not
+    /// cwd) decides the sidebar section.
     pub(super) fn new_repo_mode_loose_tab(&mut self, ctx: &mut ViewContext<Self>) {
         if !Self::repo_mode_enabled() {
             return;
         }
         self.selected_repo_root = None;
-        // Force an explicit directory so the new tab does not inherit the prior
-        // session's cwd (which could classify it under a repo). If home is
-        // unavailable, fall back to the temp dir rather than None — None would
-        // re-enable the inherit path this is meant to avoid.
+        // Force an explicit directory so the new tab does not inherit the
+        // prior session's cwd. If home is unavailable, fall back to the temp
+        // dir rather than None — None would re-enable the inherit path.
         let initial_directory = dirs::home_dir().or_else(|| {
             log::warn!("repo_mode: no home directory; loose tab falling back to temp dir");
             Some(std::env::temp_dir())
@@ -268,6 +270,12 @@ impl Workspace {
             None,
             ctx,
         );
+        // Clearing the selection only suppresses the R6 "join the selected
+        // entry's group" branch; the stock new-tab path still inherits the
+        // *active* tab's group, so opening this from a repo tab would file the
+        // loose terminal under that repo. Detach it and move it past the
+        // group's members (keeping group ranges contiguous).
+        self.remove_tab_from_group(self.active_tab_index, ctx);
         ctx.notify();
     }
 
@@ -290,8 +298,9 @@ impl Workspace {
             projects.upsert_project(path_buf.clone(), ctx);
         });
 
-        // Focus the MRU tab that lives in this repo (by live cwd partition);
-        // with no such tab, open a fresh one at the entry root.
+        // Focus the MRU tab shown under this repo (bound tabs only, per the
+        // display partition); with no such tab, open a fresh one at the entry
+        // root — never absorb a loose tab that merely sits in this directory.
         let entry_paths: Vec<PathBuf> = self
             .repo_mode_entries(ctx)
             .into_iter()
@@ -504,14 +513,16 @@ impl Workspace {
         badges
     }
 
-    /// Live partition of tabs across registry entries for display: a tab
-    /// belongs to the entry whose path is the deepest ancestor of its focused
-    /// terminal's local cwd, so a terminal that cd's between repos follows
-    /// reality rather than the group it was opened under. While a terminal
-    /// tab's cwd is unknown (sessions still bootstrapping after restore), the
-    /// bound group's repo root is used as a fallback. Tabs with no terminal at
-    /// all (Settings, notebooks, ...) never have a cwd and always land loose,
-    /// as do tabs matching no entry. Group membership itself is not mutated.
+    /// Partition of tabs across registry entries for display. Only tabs bound
+    /// to a repo group participate: a bound tab belongs to the entry whose
+    /// path is the deepest ancestor of its focused terminal's local cwd, so a
+    /// terminal that cd's between repos follows reality; while its cwd is
+    /// unknown (sessions still bootstrapping, or a tab with no terminal at
+    /// all) or outside every entry, the bound group's repo root keeps it under
+    /// its own repo. Tabs with no repo-bound group always stay loose — even
+    /// when their cwd sits inside a registered entry — so registering a new
+    /// repository never absorbs pre-existing "Other tabs". Group membership
+    /// itself is not mutated.
     pub(super) fn repo_mode_tab_partition(
         &self,
         entry_paths: &[PathBuf],
@@ -520,39 +531,33 @@ impl Workspace {
         let mut by_entry: HashMap<PathBuf, Vec<usize>> = HashMap::new();
         let mut loose = Vec::new();
         for (index, tab) in self.tabs.iter().enumerate() {
+            let bound_root = tab
+                .group_id
+                .and_then(|gid| self.tab_groups.get(&gid))
+                .and_then(|g| g.repo_root.as_deref())
+                .map(PathBuf::from);
+            // Loose tabs never depend on the cwd, so skip the probe entirely.
+            let Some(bound_root) = bound_root else {
+                loose.push(index);
+                continue;
+            };
             let pane_group = tab.pane_group.as_ref(app);
-            let terminal_views = pane_group.terminal_views(app);
             // Use the canonicalized pwd: entry_paths are dunce-canonicalized,
             // so comparing against the raw shell cwd (`pwd_if_local`) would miss
             // matches whenever they differ (macOS /tmp -> /private/tmp, a repo
-            // under a symlinked dir, case-insensitive FS), misclassifying the
-            // tab as loose and hiding it from the filtered strip.
+            // under a symlinked dir, case-insensitive FS), misplacing the tab
+            // under the fallback root.
             let cwd = pane_group
                 .active_session_view(app)
                 .and_then(|tv| tv.as_ref(app).canonical_session_pwd_if_local(app))
                 .or_else(|| {
-                    terminal_views
+                    pane_group
+                        .terminal_views(app)
                         .iter()
                         .find_map(|tv| tv.as_ref(app).canonical_session_pwd_if_local(app))
                 })
                 .map(PathBuf::from);
-            let owner = match cwd {
-                Some(cwd) => entry_paths
-                    .iter()
-                    .filter(|p| cwd.starts_with(p))
-                    .max_by_key(|p| p.as_os_str().len())
-                    .cloned(),
-                // No terminal — the tab can never report a cwd, so the group
-                // fallback (meant for booting sessions) does not apply.
-                None if terminal_views.is_empty() => None,
-                None => tab
-                    .group_id
-                    .and_then(|gid| self.tab_groups.get(&gid))
-                    .and_then(|g| g.repo_root.as_deref())
-                    .map(PathBuf::from)
-                    .filter(|root| entry_paths.iter().any(|p| p == root)),
-            };
-            match owner {
+            match repo_mode_bound_tab_owner(&bound_root, cwd.as_deref(), entry_paths) {
                 Some(path) => by_entry.entry(path).or_default().push(index),
                 None => loose.push(index),
             }
@@ -570,8 +575,8 @@ impl Workspace {
     }
 
     /// Tabs visible under the current repo-mode selection (all tabs when no
-    /// selection / flag off), by the live cwd partition. A selected entry with
-    /// no matching tabs yields an empty list — never unrelated tabs (R10).
+    /// selection / flag off), by the repo display partition. A selected entry
+    /// with no matching tabs yields an empty list — never unrelated tabs (R10).
     pub(super) fn repo_mode_visible_tab_indices(&self, app: &AppContext) -> Option<Vec<usize>> {
         if !Self::repo_mode_enabled() {
             return None;
@@ -591,6 +596,31 @@ impl Workspace {
         let (mut by_entry, _) = self.repo_mode_tab_partition(&entry_paths, app);
         Some(by_entry.remove(&selected).unwrap_or_default())
     }
+}
+
+/// Owning entry for a repo-bound tab: the deepest entry ancestor of `cwd` when
+/// one matches, otherwise the bound root itself while it is still registered.
+/// `None` means the tab lands loose (bound root removed from the registry and
+/// cwd matching no entry). Loose tabs never reach this function — they stay
+/// under "Other tabs" unconditionally.
+fn repo_mode_bound_tab_owner(
+    bound_root: &Path,
+    cwd: Option<&Path>,
+    entry_paths: &[PathBuf],
+) -> Option<PathBuf> {
+    cwd.and_then(|cwd| {
+        entry_paths
+            .iter()
+            .filter(|p| cwd.starts_with(p))
+            .max_by_key(|p| p.as_os_str().len())
+            .cloned()
+    })
+    .or_else(|| {
+        entry_paths
+            .iter()
+            .find(|p| p.as_path() == bound_root)
+            .cloned()
+    })
 }
 
 #[cfg(test)]

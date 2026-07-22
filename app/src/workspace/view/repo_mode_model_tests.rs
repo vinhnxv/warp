@@ -139,6 +139,44 @@ fn test_select_entry_creates_group_and_new_tabs_join_it() {
     });
 }
 
+/// Covers R6: "+ New" in the "Other tabs" section opens a tab bound to no
+/// repo group, even when a repo tab is active — the stock new-tab path would
+/// otherwise inherit the active tab's group and file it under that repo.
+#[test]
+fn test_loose_tab_never_joins_the_active_repo_group() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dunce::canonicalize(dir.path()).expect("canonicalize");
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            // Active tab is the repo's tab, so the inherit path is live.
+            workspace.select_repo_mode_entry(&root, ctx);
+            let group_id = workspace.selected_repo_mode_group_id().expect("group");
+            assert_eq!(
+                workspace.tabs[workspace.active_tab_index].group_id,
+                Some(group_id)
+            );
+
+            workspace.new_repo_mode_loose_tab(ctx);
+
+            assert_eq!(workspace.selected_repo_root, None);
+            let new_index = workspace.active_tab_index;
+            assert_eq!(workspace.tabs[new_index].group_id, None);
+            // ... and it renders under "Other tabs", not under the repo row.
+            let entry_paths = vec![root.clone()];
+            let (by_entry, loose) = workspace.repo_mode_tab_partition(&entry_paths, ctx);
+            assert!(loose.contains(&new_index));
+            assert!(!by_entry
+                .get(&root)
+                .is_some_and(|members| members.contains(&new_index)));
+        });
+    });
+}
+
 /// Covers R11 / F5: closing the last tab of the selected entry falls back to
 /// "All" without auto-opening a fresh tab.
 #[test]
@@ -231,6 +269,48 @@ fn test_remove_entry_ungroups_tabs_and_keeps_them_open() {
             assert_eq!(workspace.selected_repo_root, None);
         });
     });
+}
+
+/// Sticky-loose display rule: the owner helper only ever sees repo-bound
+/// tabs — loose tabs stay under "Other tabs" unconditionally, which is what
+/// keeps a newly registered repository from absorbing a pre-existing loose
+/// tab whose cwd happens to live inside it. For bound tabs, cwd picks the
+/// deepest matching entry and the bound root anchors everything else.
+#[test]
+fn test_bound_tab_owner_rules() {
+    let entries = vec![
+        PathBuf::from("/repo/a"),
+        PathBuf::from("/repo/a/nested"),
+        PathBuf::from("/repo/b"),
+    ];
+    // cwd inside another entry: follow the cwd, deepest ancestor wins.
+    assert_eq!(
+        repo_mode_bound_tab_owner(
+            Path::new("/repo/b"),
+            Some(Path::new("/repo/a/nested/src")),
+            &entries,
+        ),
+        Some(PathBuf::from("/repo/a/nested"))
+    );
+    // cwd outside every entry: the tab stays under its bound root.
+    assert_eq!(
+        repo_mode_bound_tab_owner(
+            Path::new("/repo/b"),
+            Some(Path::new("/home/user")),
+            &entries
+        ),
+        Some(PathBuf::from("/repo/b"))
+    );
+    // Unknown cwd (booting session, or a tab with no terminal): bound root.
+    assert_eq!(
+        repo_mode_bound_tab_owner(Path::new("/repo/a"), None, &entries),
+        Some(PathBuf::from("/repo/a"))
+    );
+    // Bound root no longer registered and cwd matches nothing: loose.
+    assert_eq!(
+        repo_mode_bound_tab_owner(Path::new("/repo/gone"), None, &entries),
+        None
+    );
 }
 
 /// Covers R3: section order reflects recency at launch and does not reshuffle

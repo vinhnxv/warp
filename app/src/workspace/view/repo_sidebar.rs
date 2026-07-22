@@ -132,7 +132,8 @@ pub(super) fn render_repo_tree(
         .value();
     let show_pr_link = *TabSettings::as_ref(app).vertical_tabs_show_pr_link.value();
 
-    // Live cwd partition: which repo row each tab renders under.
+    // Display partition: which repo row each bound tab renders under; loose
+    // tabs always land in the "Other tabs" section.
     let entry_paths: Vec<PathBuf> = entries.iter().map(|e| e.path.clone()).collect();
     let (by_entry, loose) = workspace.repo_mode_tab_partition(&entry_paths, app);
 
