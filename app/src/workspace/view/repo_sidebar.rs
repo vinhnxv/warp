@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use instant::Instant;
 use pathfinder_color::ColorU;
-use pathfinder_geometry::vector::vec2f;
+use pathfinder_geometry::vector::{Vector2F, vec2f};
 use repo_mode::RepoEntryKind;
 use settings::Setting;
 use warp_core::ui::Icon as WarpIcon;
@@ -79,7 +79,8 @@ pub(super) fn render_repo_header(state: &RepoSidebarState, app: &AppContext) -> 
         .with_child(render_header_button(
             "+ Add",
             state.add_button.clone(),
-            WorkspaceAction::AddLocalRepositoryOrFolder,
+            // R1: one control, two destinations — the menu opens at the click.
+            |position| WorkspaceAction::ToggleRepoModeAddMenu { position },
             appearance,
         ))
         .finish();
@@ -107,7 +108,7 @@ fn render_other_tabs_header(
         .with_child(render_header_button(
             "+ New",
             mouse,
-            WorkspaceAction::NewRepoModeLooseTab,
+            |_| WorkspaceAction::NewRepoModeLooseTab,
             app_appearance,
         ))
         .finish();
@@ -257,10 +258,13 @@ fn render_divider(app_appearance: &Appearance) -> Box<dyn Element> {
 }
 
 /// Small accent text button used on section headers ("+ Add", "+ New").
+///
+/// `action` receives the click position so a button can open a menu anchored
+/// where the user clicked, not just fire a fixed action.
 fn render_header_button(
     label: &'static str,
     mouse: MouseStateHandle,
-    action: WorkspaceAction,
+    action: impl Fn(Vector2F) -> WorkspaceAction + 'static,
     app_appearance: &Appearance,
 ) -> Box<dyn Element> {
     let theme = app_appearance.theme();
@@ -281,8 +285,8 @@ fn render_header_button(
         .with_background(background)
         .finish()
     })
-    .on_click(move |ctx, _, _| {
-        ctx.dispatch_typed_action(action.clone());
+    .on_click(move |ctx, _, position| {
+        ctx.dispatch_typed_action(action(position));
     })
     .finish()
 }

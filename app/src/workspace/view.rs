@@ -15,6 +15,7 @@ pub(crate) mod onboarding;
 mod open_folder;
 pub(crate) mod openwarp_launch_modal;
 pub(crate) mod orchestration_launch_modal;
+pub(crate) mod remote_connection_modal;
 mod repo_mode_model;
 mod repo_sidebar;
 pub(crate) mod right_panel;
@@ -539,6 +540,9 @@ use crate::workspace::view::openwarp_launch_modal::{
 };
 use crate::workspace::view::orchestration_launch_modal::{
     OrchestrationLaunchModal, OrchestrationLaunchModalEvent,
+};
+use crate::workspace::view::remote_connection_modal::{
+    RemoteConnectionModal, RemoteConnectionModalEvent,
 };
 use crate::workspace::view::right_panel::{RightPanelEvent, RightPanelView};
 use crate::workspace::{ForkFromExchange, ForkedConversationDestination};
@@ -1117,6 +1121,8 @@ pub struct Workspace {
     pending_session_config_tab_config_chip_tutorial:
         Option<PendingSessionConfigTabConfigChipTutorial>,
     new_worktree_modal: ModalViewState<Modal<NewWorktreeModal>>,
+    /// Repo mode: the "Remote Repository or Folder…" connection form.
+    remote_connection_modal: ModalViewState<Modal<RemoteConnectionModal>>,
     close_session_confirmation_dialog: ViewHandle<CloseSessionConfirmationDialog>,
     rewind_confirmation_dialog: ViewHandle<RewindConfirmationDialog>,
     delete_conversation_confirmation_dialog: ViewHandle<DeleteConversationConfirmationDialog>,
@@ -2218,6 +2224,38 @@ impl Workspace {
         ModalViewState::new(modal)
     }
 
+    fn build_remote_connection_modal(
+        ctx: &mut ViewContext<Self>,
+    ) -> ModalViewState<Modal<RemoteConnectionModal>> {
+        let body = ctx.add_typed_action_view(RemoteConnectionModal::new);
+        ctx.subscribe_to_view(&body, |me, _, event, ctx| {
+            me.handle_remote_connection_modal_body_event(event, ctx);
+        });
+        let modal = ctx.add_typed_action_view(|ctx| {
+            // No built-in title: the body renders its own header, matching the
+            // new-worktree modal.
+            Modal::new(None, body, ctx)
+                .with_modal_style(UiComponentStyles {
+                    width: Some(460.),
+                    ..Default::default()
+                })
+                .with_body_style(UiComponentStyles {
+                    padding: Some(Coords {
+                        top: 0.,
+                        bottom: 0.,
+                        left: 0.,
+                        right: 0.,
+                    }),
+                    background: Some(ElementFill::None),
+                    ..Default::default()
+                })
+        });
+        ctx.subscribe_to_view(&modal, |me, _, event, ctx| {
+            me.handle_remote_connection_modal_event(event, ctx);
+        });
+        ModalViewState::new(modal)
+    }
+
     fn build_remove_tab_config_confirmation_dialog(
         ctx: &mut ViewContext<Self>,
     ) -> ViewHandle<RemoveTabConfigConfirmationDialog> {
@@ -3133,6 +3171,7 @@ impl Workspace {
 
         let tab_config_params_modal = Self::build_tab_config_params_modal(ctx);
         let new_worktree_modal = Self::build_new_worktree_modal(ctx);
+        let remote_connection_modal = Self::build_remote_connection_modal(ctx);
 
         let session_config_modal = Self::build_session_config_modal(ctx);
 
@@ -3538,6 +3577,7 @@ impl Workspace {
             show_session_config_tab_config_chip: false,
             pending_session_config_tab_config_chip_tutorial: None,
             new_worktree_modal,
+            remote_connection_modal,
             close_session_confirmation_dialog,
             rewind_confirmation_dialog,
             delete_conversation_confirmation_dialog,
@@ -10952,6 +10992,88 @@ impl Workspace {
                 ctx.dispatch_typed_action_deferred(WorkspaceAction::OpenNewWorktreeRepoPicker);
             }
         }
+    }
+
+    fn handle_remote_connection_modal_event(
+        &mut self,
+        event: &ModalEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match event {
+            ModalEvent::Close => self.close_remote_connection_modal(ctx),
+        }
+    }
+
+    fn handle_remote_connection_modal_body_event(
+        &mut self,
+        event: &RemoteConnectionModalEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match event {
+            RemoteConnectionModalEvent::Close => self.close_remote_connection_modal(ctx),
+            RemoteConnectionModalEvent::Submit {
+                token,
+                server,
+                port,
+                user,
+                identity,
+                path,
+            } => {
+                self.add_remote_repo_mode_entry(
+                    *token,
+                    server.clone(),
+                    *port,
+                    user.clone(),
+                    identity.clone(),
+                    path.clone(),
+                    ctx,
+                );
+            }
+        }
+    }
+
+    /// Opens the remote connection form (R2). The probe runs on submit; the
+    /// form stays open until it resolves (R7).
+    pub(super) fn open_remote_connection_modal(&mut self, ctx: &mut ViewContext<Self>) {
+        if !Self::repo_mode_enabled() {
+            return;
+        }
+        self.remote_connection_modal.view.update(ctx, |modal, ctx| {
+            modal.body().update(ctx, |body, ctx| {
+                body.on_open(ctx);
+            });
+        });
+        self.remote_connection_modal.open();
+        ctx.notify();
+    }
+
+    /// Covers R7: the probe rejected the connection, so the form stays open and
+    /// names the reason instead of registering something unverified.
+    pub(super) fn fail_remote_connection_modal(
+        &mut self,
+        token: u64,
+        reason: repo_mode::RemoteProbeFailure,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.remote_connection_modal.view.update(ctx, |modal, ctx| {
+            modal.body().update(ctx, |body, ctx| {
+                // A stale token means the user cancelled or resubmitted while
+                // this probe was in flight; the result is dropped rather than
+                // reopening a form they walked away from.
+                body.on_probe_failed(token, reason.message().to_string(), ctx);
+            });
+        });
+        ctx.notify();
+    }
+
+    pub(super) fn close_remote_connection_modal(&mut self, ctx: &mut ViewContext<Self>) {
+        self.remote_connection_modal.close();
+        self.remote_connection_modal.view.update(ctx, |modal, ctx| {
+            modal.body().update(ctx, |body, ctx| {
+                body.on_close(ctx);
+            });
+        });
+        ctx.notify();
     }
 
     fn close_new_worktree_modal(&mut self, ctx: &mut ViewContext<Self>) {
@@ -24057,7 +24179,9 @@ impl TypedActionView for Workspace {
                     self.unpin_tab_group(group_id, ctx);
                 }
             }
+            ToggleRepoModeAddMenu { position } => self.toggle_repo_mode_add_menu(*position, ctx),
             AddLocalRepositoryOrFolder => self.open_folder_picker_for_repo_mode(ctx),
+            AddRemoteRepositoryOrFolder => self.open_remote_connection_modal(ctx),
             RemoveRepoModeEntry(path) => self.remove_repo_mode_entry(path, ctx),
             SelectRepoModeAll => self.select_repo_mode_all(ctx),
             SelectRepoModeEntry(path) => self.select_repo_mode_entry(path, ctx),
@@ -27324,6 +27448,10 @@ impl View for Workspace {
 
         if self.new_worktree_modal.is_open() {
             stack.add_child(self.new_worktree_modal.render());
+        }
+
+        if self.remote_connection_modal.is_open() {
+            stack.add_child(self.remote_connection_modal.render());
         }
 
         if self.workflow_modal.as_ref(app).is_open() {

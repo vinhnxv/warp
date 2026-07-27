@@ -1,5 +1,5 @@
 use chrono::{Duration, Utc};
-use repo_mode::{RemoteProbeState, format_remote_key};
+use repo_mode::{RemoteProbeOutcome, RemoteProbeState, format_remote_key};
 use warpui::App;
 
 use super::*;
@@ -401,6 +401,193 @@ fn registry_key_path_leaves_remote_keys_untouched() {
     let canonical = dunce::canonicalize(dir.path()).expect("canonicalize");
     let with_slash = PathBuf::from(format!("{}/", dir.path().display()));
     assert_eq!(registry_key_path(&with_slash, "select"), canonical);
+}
+
+/// Covers R1: the single "+ Add" control offers exactly the local and remote
+/// destinations.
+#[test]
+fn add_menu_offers_local_and_remote() {
+    let entries = repo_mode_add_menu_entries();
+    assert_eq!(entries[0].0, "Local Repository or Folder…");
+    assert!(matches!(
+        entries[0].1,
+        WorkspaceAction::AddLocalRepositoryOrFolder
+    ));
+    assert_eq!(entries[1].0, "Remote Repository or Folder…");
+    assert!(matches!(
+        entries[1].1,
+        WorkspaceAction::AddRemoteRepositoryOrFolder
+    ));
+}
+
+/// The remote action classifies like its local sibling: registering an entry is
+/// workspace state worth persisting.
+#[test]
+fn remote_add_action_is_classified_like_the_local_one() {
+    assert_eq!(
+        WorkspaceAction::AddRemoteRepositoryOrFolder.should_save_app_state_on_action(),
+        WorkspaceAction::AddLocalRepositoryOrFolder.should_save_app_state_on_action()
+    );
+}
+
+/// Covers R3/R8/R9: the row is registered pending under the typed path and
+/// resolves onto the path the *host* expanded, leaving no stale key behind.
+#[test]
+fn test_probe_success_resolves_the_row_onto_the_expanded_path() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let target = RemoteTarget {
+        server: "10.0.0.7".to_string(),
+        port: 22,
+        user: "vinh".to_string(),
+        identity: "/k".to_string(),
+        remote_path: "~/app".to_string(),
+    };
+    let pending_key = target.key();
+    let now = Utc::now().naive_utc();
+    let projects = vec![Project {
+        path: pending_key.clone(),
+        added_ts: now,
+        last_opened_ts: Some(now),
+    }];
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace
+                .repo_mode_remote_probes
+                .borrow_mut()
+                .insert(pending_key.clone(), RemoteProbeState::Pending);
+
+            workspace.apply_remote_probe_result(
+                &target,
+                &pending_key,
+                None,
+                Ok(RemoteProbeOutcome::Found {
+                    remote_path: "/home/vinh/app".to_string(),
+                    kind: RepoEntryKind::Repo,
+                    branch: Some("main".to_string()),
+                }),
+                ctx,
+            );
+
+            let resolved_key = RemoteTarget {
+                remote_path: "/home/vinh/app".to_string(),
+                ..target.clone()
+            }
+            .key();
+            assert_eq!(registered_paths(ctx), vec![resolved_key.clone()]);
+
+            let entries = workspace.repo_mode_entries(ctx);
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].kind, RepoEntryKind::Repo);
+            assert_eq!(
+                entries[0].remote.as_ref().expect("remote detail").probe,
+                RemoteProbeState::Resolved {
+                    kind: RepoEntryKind::Repo,
+                    branch: Some("main".to_string()),
+                }
+            );
+        });
+    });
+}
+
+/// Covers R6/R7/AE3: a failed add leaves nothing behind — no row, no cache
+/// entry — so the user is not left with a half-registered machine.
+#[test]
+fn test_probe_failure_at_add_time_registers_nothing() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let target = RemoteTarget {
+        server: "10.0.0.7".to_string(),
+        port: 22,
+        user: "vinh".to_string(),
+        identity: "/k".to_string(),
+        remote_path: "/srv/app".to_string(),
+    };
+    let key = target.key();
+    let now = Utc::now().naive_utc();
+    let projects = vec![Project {
+        path: key.clone(),
+        added_ts: now,
+        last_opened_ts: Some(now),
+    }];
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace
+                .repo_mode_remote_probes
+                .borrow_mut()
+                .insert(key.clone(), RemoteProbeState::Pending);
+
+            workspace.apply_remote_probe_result(
+                &target,
+                &key,
+                Some(1),
+                Err(repo_mode::RemoteProbeFailure::Unreachable),
+                ctx,
+            );
+
+            assert!(registered_paths(ctx).is_empty());
+            assert!(workspace.repo_mode_entries(ctx).is_empty());
+            assert!(
+                !workspace
+                    .repo_mode_remote_probes
+                    .borrow()
+                    .contains_key(&key)
+            );
+        });
+    });
+}
+
+/// A *reprobe* failure is not an add failure: the entry the user already has
+/// stays, marked unreachable, instead of disappearing over a network blip
+/// (R11).
+#[test]
+fn test_reprobe_failure_keeps_the_entry_and_marks_it_unreachable() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let target = RemoteTarget {
+        server: "10.0.0.7".to_string(),
+        port: 22,
+        user: "vinh".to_string(),
+        identity: "/k".to_string(),
+        remote_path: "/srv/app".to_string(),
+    };
+    let key = target.key();
+    let now = Utc::now().naive_utc();
+    let projects = vec![Project {
+        path: key.clone(),
+        added_ts: now,
+        last_opened_ts: Some(now),
+    }];
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.apply_remote_probe_result(
+                &target,
+                &key,
+                None,
+                Err(repo_mode::RemoteProbeFailure::NeedsFirstHandConnect),
+                ctx,
+            );
+
+            assert_eq!(registered_paths(ctx), vec![key.clone()]);
+            let entries = workspace.repo_mode_entries(ctx);
+            assert_eq!(
+                entries[0].remote.as_ref().expect("remote detail").probe,
+                RemoteProbeState::Failed {
+                    reason: repo_mode::RemoteProbeFailure::NeedsFirstHandConnect
+                }
+            );
+            assert!(!entries[0].is_dead);
+        });
+    });
 }
 
 /// Covers R5/KTD3: a remote key is stored exactly as formatted — canonicalizing

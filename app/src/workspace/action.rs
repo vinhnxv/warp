@@ -260,8 +260,15 @@ pub enum WorkspaceAction {
     PinActiveTabGroup,
     /// Unpins the active tab's group.
     UnpinActiveTabGroup,
+    /// Repo mode: open the "+ Add" menu offering a local or a remote entry.
+    ToggleRepoModeAddMenu {
+        position: Vector2F,
+    },
     /// Repo mode: open folder picker to register a local repository or folder.
     AddLocalRepositoryOrFolder,
+    /// Repo mode: open the connection form to register a directory on another
+    /// machine over SSH.
+    AddRemoteRepositoryOrFolder,
     /// Repo mode: remove a registry entry (does not close its tabs).
     RemoveRepoModeEntry(PathBuf),
     /// Repo mode: select "All" (stock tab set).
@@ -1013,7 +1020,9 @@ impl WorkspaceAction {
             | UnpinTabGroup(_)
             | PinActiveTabGroup
             | UnpinActiveTabGroup
+            | ToggleRepoModeAddMenu { .. }
             | AddLocalRepositoryOrFolder
+            | AddRemoteRepositoryOrFolder
             | RemoveRepoModeEntry(_)
             | SelectRepoModeAll
             | SelectRepoModeEntry(_)

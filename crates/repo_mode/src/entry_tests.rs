@@ -238,6 +238,152 @@ fn remote_probe_failures_have_distinct_messages() {
     assert_ne!(messages[0], messages[2]);
 }
 
+/// Covers R8/AE4: one round trip answers repo-or-folder, the branch, and the
+/// host-expanded path (R3).
+#[test]
+fn probe_output_parses_repo_folder_and_missing() {
+    assert_eq!(
+        parse_probe_output("path /home/v/app\nkind repo\nbranch main\n"),
+        Some(RemoteProbeOutcome::Found {
+            remote_path: "/home/v/app".to_string(),
+            kind: RepoEntryKind::Repo,
+            branch: Some("main".to_string()),
+        })
+    );
+    // A repository with no readable branch (detached, or no git binary) is
+    // still a repository.
+    assert_eq!(
+        parse_probe_output("path /srv/app\nkind repo\n"),
+        Some(RemoteProbeOutcome::Found {
+            remote_path: "/srv/app".to_string(),
+            kind: RepoEntryKind::Repo,
+            branch: None,
+        })
+    );
+    assert_eq!(
+        parse_probe_output("path /srv/data\nkind folder\n"),
+        Some(RemoteProbeOutcome::Found {
+            remote_path: "/srv/data".to_string(),
+            kind: RepoEntryKind::Folder,
+            branch: None,
+        })
+    );
+    assert_eq!(
+        parse_probe_output("missing\n"),
+        Some(RemoteProbeOutcome::Missing)
+    );
+    // A path with spaces survives the line protocol.
+    assert_eq!(
+        parse_probe_output("path /srv/my app\nkind folder\n"),
+        Some(RemoteProbeOutcome::Found {
+            remote_path: "/srv/my app".to_string(),
+            kind: RepoEntryKind::Folder,
+            branch: None,
+        })
+    );
+}
+
+/// Garbled or empty output is not silently read as "folder" — the entry has to
+/// stay unresolved rather than claim a kind nothing confirmed.
+#[test]
+fn probe_output_rejects_unusable_stdout() {
+    assert_eq!(parse_probe_output(""), None);
+    assert_eq!(parse_probe_output("bash: line 1: syntax error\n"), None);
+    assert_eq!(parse_probe_output("path /srv/app\n"), None, "no kind line");
+}
+
+/// Covers KTD6: `BatchMode=yes` turns an unknown host key or a locked key into
+/// a non-zero exit that the *interactive* tab would sail past, so it must not
+/// be reported as "unreachable".
+#[test]
+fn probe_failures_are_classified_by_what_the_user_must_do() {
+    for stderr in [
+        "Host key verification failed.",
+        "vinh@10.0.0.7: Permission denied (publickey).",
+        "Enter passphrase for key '/Users/v/.ssh/id_ed25519':",
+        "The authenticity of host '10.0.0.7' can't be established.",
+    ] {
+        assert_eq!(
+            classify_probe_failure(Some(255), stderr),
+            RemoteProbeFailure::NeedsFirstHandConnect,
+            "stderr: {stderr}"
+        );
+    }
+
+    for stderr in [
+        "ssh: connect to host 10.0.0.7 port 22: Connection refused",
+        "ssh: connect to host 10.0.0.7 port 22: Operation timed out",
+        "ssh: Could not resolve hostname nope: nodename nor servname provided",
+        "",
+    ] {
+        assert_eq!(
+            classify_probe_failure(Some(255), stderr),
+            RemoteProbeFailure::Unreachable,
+            "stderr: {stderr}"
+        );
+    }
+}
+
+/// Covers KTD6/KTD10: the probe is argv, never a shell string; `--` fences the
+/// destination so a `user`/`host` starting with `-` cannot become an option;
+/// and the script travels over stdin rather than as a quoted remote command.
+#[test]
+fn probe_args_fence_the_destination_and_append_no_script() {
+    let target = RemoteTarget {
+        server: "10.0.0.7".to_string(),
+        port: 2222,
+        user: "vinh".to_string(),
+        identity: "/Users/v/my keys/id".to_string(),
+        remote_path: "/srv/app".to_string(),
+    };
+    let args = remote_probe_args(&target, 8);
+
+    let fence = args.iter().position(|a| a == "--").expect("-- fence");
+    assert_eq!(args[fence + 1], "vinh@10.0.0.7");
+    assert!(args.contains(&"BatchMode=yes".to_string()));
+    assert!(args.contains(&"ConnectTimeout=8".to_string()));
+    assert_eq!(args[fence + 2], REMOTE_PROBE_SHELL_COMMAND);
+    assert_eq!(args.len(), fence + 3, "nothing follows the shell command");
+
+    // The identity is passed as its own argv entry: no quoting, no splitting.
+    let identity = args.iter().position(|a| a == "-i").expect("-i");
+    assert_eq!(args[identity + 1], "/Users/v/my keys/id");
+    assert!(args.contains(&"-p".to_string()));
+    assert!(args.contains(&"2222".to_string()));
+
+    // Never weaken host-key checking to make an add-time probe pass (KTD6/S2).
+    assert!(
+        !args.iter().any(|a| a.contains("StrictHostKeyChecking")),
+        "host-key policy must stay at its secure default: {args:?}"
+    );
+
+    // An identity-less target simply omits `-i`.
+    let no_identity = RemoteTarget {
+        identity: String::new(),
+        ..target
+    };
+    assert!(!remote_probe_args(&no_identity, 8).contains(&"-i".to_string()));
+}
+
+/// KTD10: the remote path reaches a shell inside the probe script, so it is
+/// shell-quoted rather than interpolated raw.
+#[test]
+fn probe_script_quotes_the_remote_path() {
+    let path = "/srv/my app; rm -rf /";
+    let script = remote_probe_script(path);
+    // The path only ever appears as the single-quoted assignment, so its
+    // metacharacters are data to the remote shell, never syntax.
+    assert_eq!(
+        script.lines().next(),
+        Some(format!("p={}", shell_quote(path)).as_str())
+    );
+    assert_eq!(script.matches(path).count(), 1);
+
+    // A path containing a single quote closes and reopens correctly.
+    let quoted = remote_probe_script("/srv/it's");
+    assert_eq!(quoted.lines().next(), Some(r#"p='/srv/it'\''s'"#));
+}
+
 /// KTD2: the local-filesystem rules must never run for a remote key.
 #[test]
 fn local_fs_rules_are_gated_to_local_keys() {

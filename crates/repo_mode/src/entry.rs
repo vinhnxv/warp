@@ -237,6 +237,143 @@ pub fn shell_quote(value: &str) -> String {
     quoted
 }
 
+/// Remote command the probe runs. `sh -s` reads the script from stdin, so the
+/// script never becomes an `ssh` argument (KTD6) and the host's login shell —
+/// which may be fish or csh — never has to parse it. `sh` rather than `bash`
+/// because the script is POSIX and `sh` is the one shell every target has.
+pub const REMOTE_PROBE_SHELL_COMMAND: &str = "sh -s";
+
+/// What the probe found at the remote path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RemoteProbeOutcome {
+    Found {
+        /// The path as the *host* expanded it (R3) — what the entry stores.
+        remote_path: String,
+        kind: RepoEntryKind,
+        branch: Option<String>,
+    },
+    /// The host answered, but nothing is at that path.
+    Missing,
+}
+
+/// `ssh` argv for the add-time probe.
+///
+/// Built as argv and never as a shell string, and the destination is fenced
+/// with `--` so a user or host beginning with `-` lands as a destination rather
+/// than an option such as `-oProxyCommand=…`, which `BatchMode` does not stop
+/// (KTD10). Host-key checking stays at its secure default: an unknown host is a
+/// surfaced failure the user clears by connecting once by hand, never a key
+/// this probe accepts on their behalf (KTD6).
+pub fn remote_probe_args(target: &RemoteTarget, connect_timeout_secs: u64) -> Vec<String> {
+    let mut args = vec![
+        "-o".to_string(),
+        // No password prompt: an unreachable or unauthenticated host has to
+        // fail rather than block on a prompt nothing can answer (R6).
+        "BatchMode=yes".to_string(),
+        "-o".to_string(),
+        format!("ConnectTimeout={connect_timeout_secs}"),
+        "-p".to_string(),
+        target.port.to_string(),
+    ];
+    if !target.identity.is_empty() {
+        args.push("-i".to_string());
+        args.push(target.identity.clone());
+    }
+    args.push("--".to_string());
+    args.push(target.user_host());
+    args.push(REMOTE_PROBE_SHELL_COMMAND.to_string());
+    args
+}
+
+/// The script piped to the host, answering R3 (expand `~` there) and R8
+/// (repository or folder, and the branch) in one round trip.
+///
+/// POSIX only — no bashisms — and `remote_path` is shell-quoted (KTD10)
+/// because it is user-entered text landing in a shell.
+pub fn remote_probe_script(remote_path: &str) -> String {
+    format!(
+        r#"p={path}
+case "$p" in
+  '~') p="$HOME" ;;
+  '~/'*) p="$HOME/${{p#\~/}}" ;;
+esac
+if [ ! -d "$p" ]; then
+  printf 'missing\n'
+  exit 0
+fi
+cd "$p" || {{ printf 'missing\n'; exit 0; }}
+printf 'path %s\n' "$PWD"
+if [ -e .git ]; then
+  printf 'kind repo\n'
+  b=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || b=''
+  if [ -n "$b" ]; then
+    printf 'branch %s\n' "$b"
+  fi
+else
+  printf 'kind folder\n'
+fi
+"#,
+        path = shell_quote(remote_path),
+    )
+}
+
+/// Parse the probe script's stdout. `None` when the output is empty or does not
+/// carry a kind: an unresolved entry is better than one claiming a kind nothing
+/// confirmed.
+pub fn parse_probe_output(stdout: &str) -> Option<RemoteProbeOutcome> {
+    let mut remote_path = None;
+    let mut kind = None;
+    let mut branch = None;
+    for line in stdout.lines() {
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line == "missing" {
+            return Some(RemoteProbeOutcome::Missing);
+        } else if let Some(value) = line.strip_prefix("path ") {
+            remote_path = Some(value.to_string());
+        } else if let Some(value) = line.strip_prefix("kind ") {
+            kind = match value {
+                "repo" => Some(RepoEntryKind::Repo),
+                "folder" => Some(RepoEntryKind::Folder),
+                _ => None,
+            };
+        } else if let Some(value) = line.strip_prefix("branch ") {
+            branch = Some(value.to_string());
+        }
+    }
+    Some(RemoteProbeOutcome::Found {
+        remote_path: remote_path?,
+        kind: kind?,
+        branch,
+    })
+}
+
+/// Map a failed probe to what the user can actually do about it (R7).
+///
+/// `BatchMode=yes` collapses every interactive prompt into a non-zero exit, so
+/// an unknown host key or a passphrase-protected key looks identical to a dead
+/// host at the exit-code level — even though the interactive tab (no
+/// `BatchMode`) would prompt and succeed. The stderr text is what separates
+/// them (KTD6).
+pub fn classify_probe_failure(_exit_code: Option<i32>, stderr: &str) -> RemoteProbeFailure {
+    const FIRST_HAND_MARKERS: [&str; 7] = [
+        "host key verification failed",
+        "authenticity of host",
+        "permission denied",
+        "enter passphrase",
+        "no matching host key",
+        "too many authentication failures",
+        "remote host identification has changed",
+    ];
+    let stderr = stderr.to_ascii_lowercase();
+    if FIRST_HAND_MARKERS
+        .iter()
+        .any(|marker| stderr.contains(marker))
+    {
+        return RemoteProbeFailure::NeedsFirstHandConnect;
+    }
+    RemoteProbeFailure::Unreachable
+}
+
 /// Canonicalize `path` for registry identity (dedup trailing slash / symlink
 /// variants). Errors for a remote key: it names a directory on another machine
 /// and must be stored verbatim (KTD3).

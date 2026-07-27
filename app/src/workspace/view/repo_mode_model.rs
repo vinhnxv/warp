@@ -12,17 +12,28 @@ use chrono::NaiveDateTime;
 use instant::Instant;
 use pathfinder_geometry::vector::{Vector2F, vec2f};
 use repo_mode::{
-    RemoteProbeState, RemoteTarget, RepoEntryKind, canonicalize_repo_path, classify_entry_kind,
-    display_name_for_path, display_name_for_registry_path, is_dead_path, is_remote_key,
-    is_remote_path, parse_remote_key,
+    RemoteProbeFailure, RemoteProbeOutcome, RemoteProbeState, RemoteTarget, RepoEntryKind,
+    canonicalize_repo_path, classify_entry_kind, classify_probe_failure, display_name_for_path,
+    display_name_for_registry_path, is_dead_path, is_remote_key, is_remote_path,
+    parse_probe_output, parse_remote_key, remote_probe_args, remote_probe_script,
 };
 use warpui::{AppContext, SingletonEntity, UpdateView, ViewContext};
+use warpui_core::r#async::FutureExt as _;
 
 /// TTL for the cached repo-kind / liveness filesystem probes so
 /// `repo_mode_entries` does not stat every registered path on each render
 /// (mirrors the vertical-tabs branch cache). A stalled network/removable
 /// mount would otherwise block the UI thread on every frame.
 const REPO_FS_CACHE_TTL: Duration = Duration::from_secs(5);
+
+/// Wall-clock bound on one SSH probe (R6). A host that accepts the connection
+/// and then never answers must not leave the form hanging, so the whole round
+/// trip is capped regardless of what `ConnectTimeout` does.
+const REMOTE_PROBE_TIMEOUT: Duration = Duration::from_secs(12);
+/// `ConnectTimeout` for the same probe: shorter than the wall-clock bound so a
+/// dead host fails at the connect stage with a usable stderr message rather
+/// than being killed by the outer timeout.
+const REMOTE_PROBE_CONNECT_TIMEOUT_SECS: u64 = 8;
 
 use super::Workspace;
 use crate::context_chips::display_chip::GitLineChanges;
@@ -160,6 +171,40 @@ impl Workspace {
         entries
     }
 
+    /// Opens the "+ Add" menu (R1). Built the same way as the row context menu
+    /// and the picker — `tab_right_click_menu` anchored at the click position —
+    /// so the affordance stays native to the sidebar.
+    pub(super) fn toggle_repo_mode_add_menu(
+        &mut self,
+        position: Vector2F,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if !Self::repo_mode_enabled() {
+            return;
+        }
+        if self.show_repo_mode_menu.is_some() {
+            self.show_repo_mode_menu = None;
+            ctx.notify();
+            return;
+        }
+        let items: Vec<_> = repo_mode_add_menu_entries()
+            .into_iter()
+            .map(|(label, action)| {
+                MenuItemFields::new(label)
+                    .with_on_select_action(action)
+                    .into_item()
+            })
+            .collect();
+        ctx.update_view(&self.tab_right_click_menu, |menu, view_ctx| {
+            menu.set_items(items, view_ctx);
+        });
+        self.show_tab_right_click_menu = None;
+        self.show_tab_group_right_click_menu = None;
+        self.show_repo_mode_menu = Some(TabContextMenuAnchor::Pointer(position));
+        ctx.focus(&self.tab_right_click_menu);
+        ctx.notify();
+    }
+
     pub(super) fn open_folder_picker_for_repo_mode(&mut self, ctx: &mut ViewContext<Self>) {
         if !Self::repo_mode_enabled() {
             return;
@@ -193,6 +238,155 @@ impl Workspace {
             },
             warpui::platform::FilePickerConfiguration::new().folders_only(),
         );
+    }
+
+    /// Covers R6/R7/R9: register the connection as a pending entry so its row
+    /// appears at once, then probe the host under a wall-clock bound. Success
+    /// resolves the row in place and closes the form; failure leaves nothing
+    /// registered and hands the form back with the reason.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn add_remote_repo_mode_entry(
+        &mut self,
+        token: u64,
+        server: String,
+        port: u16,
+        user: String,
+        identity: String,
+        path: String,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if !Self::repo_mode_enabled() {
+            return;
+        }
+        let target = RemoteTarget {
+            server,
+            port,
+            user,
+            identity,
+            remote_path: path,
+        };
+        let pending_key = target.key();
+        ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+            projects.upsert_project(PathBuf::from(&pending_key), ctx);
+        });
+        self.repo_mode_remote_probes
+            .borrow_mut()
+            .insert(pending_key.clone(), RemoteProbeState::Pending);
+        ctx.notify();
+        self.spawn_remote_probe(target, pending_key, Some(token), ctx);
+    }
+
+    /// R11: remote entries are not polled. Displayed state is refreshed by use
+    /// — selecting an entry reprobes it — so a stale row corrects itself the
+    /// next time the user touches it.
+    fn reprobe_remote_entry(&mut self, target: RemoteTarget, ctx: &mut ViewContext<Self>) {
+        let key = target.key();
+        self.spawn_remote_probe(target, key, None, ctx);
+    }
+
+    /// `token` is `Some` for an add-time probe, whose result drives the open
+    /// form, and `None` for a reprobe of an entry the user already has.
+    fn spawn_remote_probe(
+        &mut self,
+        target: RemoteTarget,
+        key: String,
+        token: Option<u64>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let args = remote_probe_args(&target, REMOTE_PROBE_CONNECT_TIMEOUT_SECS);
+        let script = remote_probe_script(&target.remote_path);
+        ctx.spawn(
+            async move { run_remote_probe(args, script, REMOTE_PROBE_TIMEOUT).await },
+            move |workspace, result, ctx| {
+                workspace.apply_remote_probe_result(&target, &key, token, result, ctx);
+            },
+        );
+    }
+
+    /// Land a probe result on the registry, the probe cache, and (for an
+    /// add-time probe) the form. Split out from the spawn so the resolution
+    /// rules are exercisable without a subprocess.
+    pub(super) fn apply_remote_probe_result(
+        &mut self,
+        target: &RemoteTarget,
+        probed_key: &str,
+        token: Option<u64>,
+        result: Result<RemoteProbeOutcome, RemoteProbeFailure>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let failure = match result {
+            Ok(RemoteProbeOutcome::Found {
+                remote_path,
+                kind,
+                branch,
+            }) => {
+                // R3: the entry stores the path as the *host* expanded it, so a
+                // `~` the user typed never survives into the key.
+                let resolved = RemoteTarget {
+                    remote_path,
+                    ..target.clone()
+                };
+                let resolved_key = resolved.key();
+                if resolved_key != probed_key {
+                    self.replace_registry_key(probed_key, &resolved_key, ctx);
+                }
+                self.repo_mode_remote_probes
+                    .borrow_mut()
+                    .insert(resolved_key, RemoteProbeState::Resolved { kind, branch });
+                if token.is_some() {
+                    self.close_remote_connection_modal(ctx);
+                }
+                ctx.notify();
+                return;
+            }
+            Ok(RemoteProbeOutcome::Missing) => RemoteProbeFailure::PathNotFound,
+            Err(failure) => failure,
+        };
+
+        match token {
+            // AE3: an add that fails registers nothing — the pending row goes
+            // away and the form comes back with the reason.
+            Some(token) => {
+                self.drop_pending_remote_entry(probed_key, ctx);
+                self.fail_remote_connection_modal(token, failure, ctx);
+            }
+            // A reprobe of an entry the user already has: mark it unreachable
+            // and leave it in place. Removing it behind their back would lose
+            // the entry over a temporary network blip.
+            None => {
+                self.repo_mode_remote_probes.borrow_mut().insert(
+                    probed_key.to_string(),
+                    RemoteProbeState::Failed { reason: failure },
+                );
+                ctx.notify();
+            }
+        }
+    }
+
+    /// Move a registry row to the key the probe resolved, without leaving the
+    /// pending key behind in the registry, the probe cache, or the pinned
+    /// launch order.
+    fn replace_registry_key(&mut self, old: &str, new: &str, ctx: &mut ViewContext<Self>) {
+        ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+            projects.remove_project(PathBuf::from(old), ctx);
+            projects.upsert_project(PathBuf::from(new), ctx);
+        });
+        self.forget_remote_key(old);
+    }
+
+    fn drop_pending_remote_entry(&mut self, key: &str, ctx: &mut ViewContext<Self>) {
+        ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+            projects.remove_project(PathBuf::from(key), ctx);
+        });
+        self.forget_remote_key(key);
+        ctx.notify();
+    }
+
+    fn forget_remote_key(&self, key: &str) {
+        self.repo_mode_remote_probes.borrow_mut().remove(key);
+        if let Some(order) = self.repo_mode_launch_order.borrow_mut().as_mut() {
+            order.retain(|pinned| pinned != key);
+        }
     }
 
     pub(super) fn remove_repo_mode_entry(&mut self, path: &Path, ctx: &mut ViewContext<Self>) {
@@ -301,6 +495,12 @@ impl Workspace {
         }
         let path_buf = registry_key_path(path, "select");
         self.selected_repo_root = Some(path_buf.to_string_lossy().into_owned());
+
+        // R11: selecting a remote entry is the moment its displayed state gets
+        // refreshed — there is no background poll to do it.
+        if let Some(target) = path_buf.to_str().and_then(parse_remote_key) {
+            self.reprobe_remote_entry(target, ctx);
+        }
 
         // R3: record recency for the next launch. The section order is pinned
         // by `repo_mode_launch_order`, so this bump cannot reshuffle it now.
@@ -610,6 +810,93 @@ impl Workspace {
         let (mut by_entry, _) = self.repo_mode_tab_partition(&entry_paths, app);
         Some(by_entry.remove(&selected).unwrap_or_default())
     }
+}
+
+/// One bounded SSH round trip: the probe script goes in over stdin and a
+/// classified answer comes back.
+///
+/// Every failure mode collapses into a [`RemoteProbeFailure`] the form can
+/// explain — including the wall-clock timeout, which is what stops a host that
+/// accepts the connection and then goes silent from hanging the add (R6).
+#[cfg(not(target_family = "wasm"))]
+async fn run_remote_probe(
+    args: Vec<String>,
+    script: String,
+    timeout: Duration,
+) -> Result<RemoteProbeOutcome, RemoteProbeFailure> {
+    use std::process::Stdio;
+
+    use futures::AsyncWriteExt as _;
+
+    let mut child = command::r#async::Command::new("ssh")
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|err| {
+            log::warn!("repo_mode: failed to spawn the ssh probe: {err}");
+            RemoteProbeFailure::Unreachable
+        })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Err(err) = stdin.write_all(script.as_bytes()).await {
+            log::warn!("repo_mode: failed to write the probe script to ssh: {err}");
+            return Err(RemoteProbeFailure::Unreachable);
+        }
+        // Closing stdin is what makes the remote shell run and exit.
+        drop(stdin);
+    }
+
+    let output = match child.output().with_timeout(timeout).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) => {
+            log::warn!("repo_mode: ssh probe failed: {err}");
+            return Err(RemoteProbeFailure::Unreachable);
+        }
+        Err(_) => {
+            log::info!("repo_mode: ssh probe timed out after {timeout:?}");
+            return Err(RemoteProbeFailure::Unreachable);
+        }
+    };
+
+    if !output.status.success() {
+        return Err(classify_probe_failure(
+            output.status.code(),
+            &String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    parse_probe_output(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
+        log::warn!("repo_mode: unreadable ssh probe output");
+        RemoteProbeFailure::Unreachable
+    })
+}
+
+/// Remote entries are a desktop affordance: the browser build has no local
+/// `ssh` to spawn, so a probe there can only report the host as unreachable.
+#[cfg(target_family = "wasm")]
+async fn run_remote_probe(
+    _args: Vec<String>,
+    _script: String,
+    _timeout: Duration,
+) -> Result<RemoteProbeOutcome, RemoteProbeFailure> {
+    Err(RemoteProbeFailure::Unreachable)
+}
+
+/// Label and action for each "+ Add" menu item (R1): the single add control
+/// becomes a choice between a local and a remote entry.
+fn repo_mode_add_menu_entries() -> [(&'static str, WorkspaceAction); 2] {
+    [
+        (
+            "Local Repository or Folder…",
+            WorkspaceAction::AddLocalRepositoryOrFolder,
+        ),
+        (
+            "Remote Repository or Folder…",
+            WorkspaceAction::AddRemoteRepositoryOrFolder,
+        ),
+    ]
 }
 
 /// Build the list row for a remote key. No filesystem and no network work
