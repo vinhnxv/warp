@@ -14,27 +14,28 @@
 use std::rc::Rc;
 
 use warp::tui_export::{
-    persist_host_selection, resolve_auth_secret_selection_for_harness,
-    resolve_default_environment_id, resolve_default_host_slug, should_show_auth_secret_picker,
     AIActionStatus, AIAgentAction, AIAgentActionId, AIAgentActionType, AuthSecretSelection,
     BlocklistAIActionEvent, BlocklistAIActionModel, Harness, HarnessAvailabilityEvent,
-    HarnessAvailabilityModel, LLMPreferences, LLMPreferencesEvent, OptionSnapshot,
-    OrchestrationConfig, OrchestrationConfigState, OrchestrationConfigStatus,
+    HarnessAvailabilityModel, LLMPreferences, LLMPreferencesEvent, ORCHESTRATION_WARP_WORKER_HOST,
+    OptionSnapshot, OrchestrationConfig, OrchestrationConfigState, OrchestrationConfigStatus,
     OrchestrationEditState, RunAgentsExecutionMode, RunAgentsExecutor, RunAgentsExecutorEvent,
-    RunAgentsRequest, RunAgentsSpawningSnapshot, ORCHESTRATION_WARP_WORKER_HOST,
+    RunAgentsRequest, RunAgentsSpawningSnapshot, persist_host_selection,
+    resolve_auth_secret_selection_for_harness, resolve_default_environment_id,
+    resolve_default_host_slug, should_show_auth_secret_picker,
 };
 use warpui::SingletonEntity;
 use warpui_core::elements::tui::TuiElement;
 use warpui_core::keymap::macros::*;
 use warpui_core::keymap::{self, FixedBinding};
 use warpui_core::{
-    AppContext, Entity, EntityId, ModelHandle, TuiView, TypedActionView, ViewContext, ViewHandle,
+    AppContext, Entity, EntityId, FocusContext, ModelHandle, TuiView, TypedActionView, ViewContext,
+    ViewHandle,
 };
 mod configuration;
 mod render;
 
 use configuration::{
-    build_request, ConfigPage, ModelOrchestrationBlockController, OrchestrationBlockController,
+    ConfigPage, ModelOrchestrationBlockController, OrchestrationBlockController, build_request,
 };
 
 use crate::keybindings::TUI_BINDING_GROUP;
@@ -367,10 +368,10 @@ impl TuiOrchestrationBlock {
         let state = &mut self.orchestration_edit_state.orchestration_config_state;
         if state.model_id.is_empty() {
             let harness = Harness::parse_orchestration_harness(&state.harness_type);
-            if matches!(harness, Some(Harness::Oz) | None) {
-                if let Some(base) = &self.fallback_base_model_id {
-                    state.model_id = base.clone();
-                }
+            if matches!(harness, Some(Harness::Oz) | None)
+                && let Some(base) = &self.fallback_base_model_id
+            {
+                state.model_id = base.clone();
             }
         }
         if let RunAgentsExecutionMode::Remote {
@@ -386,10 +387,8 @@ impl TuiOrchestrationBlock {
                     .unwrap_or_else(|| ORCHESTRATION_WARP_WORKER_HOST.to_string());
                 state.set_worker_host(default_host);
             }
-            if needs_env {
-                if let Some(default_env) = resolve_default_environment_id(ctx) {
-                    state.set_environment_id(default_env);
-                }
+            if needs_env && let Some(default_env) = resolve_default_environment_id(ctx) {
+                state.set_environment_id(default_env);
             }
         }
         if matches!(state.auth_secret_selection, AuthSecretSelection::Unset) {
@@ -419,7 +418,7 @@ impl TuiOrchestrationBlock {
         self.orchestration_edit_state = OrchestrationEditState::new(new_state);
         self.resolve_interactive_defaults(ctx);
         self.refresh_active_page(ctx);
-        ctx.emit(TuiOrchestrationBlockEvent::BlockingStateChanged);
+        ctx.emit(TuiOrchestrationBlockEvent::LayoutInvalidated);
         ctx.notify();
     }
 
@@ -478,11 +477,13 @@ impl TuiOrchestrationBlock {
             }),
             snapshot: self.snapshot_for_page(page, ctx),
             searchable: page.is_searchable(),
+            row_shortcuts: Default::default(),
         };
         self.selector.update(ctx, |selector, ctx| {
             selector.set_page(selector_page, ctx);
         });
-        ctx.emit(TuiOrchestrationBlockEvent::BlockingStateChanged);
+        ctx.focus(&self.selector);
+        ctx.emit(TuiOrchestrationBlockEvent::LayoutInvalidated);
         ctx.notify();
     }
 
@@ -491,7 +492,7 @@ impl TuiOrchestrationBlock {
         self.mode = CardMode::Acceptance;
         self.pending_page_navigation = None;
         ctx.focus_self();
-        ctx.emit(TuiOrchestrationBlockEvent::BlockingStateChanged);
+        ctx.emit(TuiOrchestrationBlockEvent::LayoutInvalidated);
         ctx.notify();
     }
 
@@ -608,7 +609,9 @@ impl TuiOrchestrationBlock {
                     self.finish_page_confirmation(ConfigPage::Host, ctx);
                 }
             }
-            TuiOptionSelectorEvent::CustomTextOpened => {}
+            TuiOptionSelectorEvent::CustomTextCleared
+            | TuiOptionSelectorEvent::CustomTextOpened
+            | TuiOptionSelectorEvent::CustomTextClosed => {}
             TuiOptionSelectorEvent::RetryRequested => {
                 self.pending_page_navigation = None;
                 self.ensure_auth_secrets_fetched(ctx);
@@ -621,6 +624,7 @@ impl TuiOrchestrationBlock {
             TuiOptionSelectorEvent::LayoutInvalidated => {
                 ctx.emit(TuiOrchestrationBlockEvent::LayoutInvalidated);
             }
+            TuiOptionSelectorEvent::RowsReordered { .. } => {}
         }
     }
 
@@ -649,7 +653,7 @@ impl TuiOrchestrationBlock {
             ctx,
         ) {
             self.accept_error = Some(reason);
-            ctx.emit(TuiOrchestrationBlockEvent::BlockingStateChanged);
+            ctx.emit(TuiOrchestrationBlockEvent::LayoutInvalidated);
             ctx.notify();
             return;
         }
@@ -729,6 +733,12 @@ impl TuiView for TuiOrchestrationBlock {
 
     fn child_view_ids(&self, _app: &AppContext) -> Vec<EntityId> {
         vec![self.selector.id()]
+    }
+
+    fn on_focus(&mut self, focus_ctx: &FocusContext, ctx: &mut ViewContext<Self>) {
+        if focus_ctx.is_self_focused() && matches!(self.mode, CardMode::Configuring { .. }) {
+            ctx.focus(&self.selector);
+        }
     }
 
     fn keymap_context(&self, _ctx: &AppContext) -> keymap::Context {

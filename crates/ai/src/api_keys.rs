@@ -11,8 +11,8 @@ use warpui_extras::secure_storage::{self, AppContextExt};
 
 pub use crate::aws_credentials::{AwsCredentials, AwsCredentialsState};
 pub use crate::geap_credentials::{
-    GeapCredentials, GeapCredentialsState, GeapFederation, GeapMintBinding,
-    LoadGeapCredentialsError, GEAP_REFRESH_LEAD_TIME,
+    GEAP_REFRESH_LEAD_TIME, GeapCredentials, GeapCredentialsState, GeapFederation, GeapMintBinding,
+    LoadGeapCredentialsError,
 };
 
 const SECURE_STORAGE_KEY: &str = "AiApiKeys";
@@ -49,6 +49,52 @@ pub struct CustomEndpoint {
     pub url: String,
     pub api_key: String,
     pub models: Vec<CustomEndpointModel>,
+    pub schema: CustomEndpointSchema,
+}
+
+/// The request/response protocol used by a custom inference endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomEndpointSchema {
+    /// OpenAI Chat Completions, retained as the legacy/default protocol.
+    #[default]
+    OpenaiChatCompletions,
+    /// OpenAI Responses.
+    OpenaiResponses,
+    /// Anthropic Messages.
+    AnthropicMessages,
+}
+
+impl CustomEndpointSchema {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::OpenaiChatCompletions => "OpenAI Chat Completions",
+            Self::OpenaiResponses => "OpenAI Responses",
+            Self::AnthropicMessages => "Anthropic Messages",
+        }
+    }
+
+    pub fn from_display_name(name: &str) -> Option<Self> {
+        match name {
+            "OpenAI Chat Completions" => Some(Self::OpenaiChatCompletions),
+            "OpenAI Responses" => Some(Self::OpenaiResponses),
+            "Anthropic Messages" => Some(Self::AnthropicMessages),
+            _ => None,
+        }
+    }
+    fn to_proto(self) -> api::request::settings::custom_model_providers::CustomEndpointSchema {
+        match self {
+            Self::OpenaiChatCompletions => {
+                api::request::settings::custom_model_providers::CustomEndpointSchema::OpenaiChatCompletions
+            }
+            Self::OpenaiResponses => {
+                api::request::settings::custom_model_providers::CustomEndpointSchema::OpenaiResponses
+            }
+            Self::AnthropicMessages => {
+                api::request::settings::custom_model_providers::CustomEndpointSchema::AnthropicMessages
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -209,6 +255,14 @@ pub struct ApiKeyManager {
     grok_secure_storage_write_version: u64,
 }
 
+pub struct CustomEndpointParams {
+    pub name: String,
+    pub url: String,
+    pub api_key: String,
+    pub models: Vec<(String, Option<String>, Option<String>)>,
+    pub schema: CustomEndpointSchema,
+}
+
 impl ApiKeyManager {
     pub fn new(ctx: &mut ModelContext<Self>) -> Self {
         let keys = Self::load_keys_from_secure_storage(ctx);
@@ -291,16 +345,21 @@ impl ApiKeyManager {
 
     pub fn add_custom_endpoint(
         &mut self,
-        name: String,
-        url: String,
-        api_key: String,
-        models: Vec<(String, Option<String>, Option<String>)>,
+        params: CustomEndpointParams,
         ctx: &mut ModelContext<Self>,
     ) {
+        let CustomEndpointParams {
+            name,
+            url,
+            api_key,
+            models,
+            schema,
+        } = params;
         self.keys.custom_endpoints.push(CustomEndpoint {
             name,
             url,
             api_key,
+            schema,
             models: models
                 .into_iter()
                 .map(|(name, alias, config_key)| CustomEndpointModel {
@@ -319,19 +378,24 @@ impl ApiKeyManager {
     pub fn save_custom_endpoint(
         &mut self,
         index: usize,
-        name: String,
-        url: String,
-        api_key: String,
-        models: Vec<(String, Option<String>, Option<String>)>,
+        params: CustomEndpointParams,
         ctx: &mut ModelContext<Self>,
     ) {
         if index >= self.keys.custom_endpoints.len() {
             return;
         }
+        let CustomEndpointParams {
+            name,
+            url,
+            api_key,
+            models,
+            schema,
+        } = params;
         self.keys.custom_endpoints[index] = CustomEndpoint {
             name,
             url,
             api_key,
+            schema,
             models: models
                 .into_iter()
                 .map(|(name, alias, config_key)| CustomEndpointModel {
@@ -431,6 +495,7 @@ impl ApiKeyManager {
                 |endpoint| api::request::settings::custom_model_providers::CustomModelProvider {
                     base_url: endpoint.url.clone(),
                     api_key: endpoint.api_key.clone(),
+                    schema: endpoint.schema.to_proto() as i32,
                     models: endpoint
                         .models
                         .iter()
@@ -559,8 +624,10 @@ impl ApiKeyManager {
             Ok(json) => json,
             Err(e) => {
                 if !matches!(e, secure_storage::Error::NotFound) {
-                    report_error!(anyhow::Error::new(e)
-                        .context("Failed to read API keys from secure storage"));
+                    report_error!(
+                        anyhow::Error::new(e)
+                            .context("Failed to read API keys from secure storage")
+                    );
                 }
                 return ApiKeys::default();
             }
@@ -609,8 +676,10 @@ impl ApiKeyManager {
             Ok(json) => json,
             Err(e) => {
                 if !matches!(e, secure_storage::Error::NotFound) {
-                    report_error!(anyhow::Error::new(e)
-                        .context("Failed to read Grok tokens from secure storage"));
+                    report_error!(
+                        anyhow::Error::new(e)
+                            .context("Failed to read Grok tokens from secure storage")
+                    );
                 }
                 return None;
             }
@@ -652,11 +721,13 @@ impl ApiKeyManager {
                     .write_value(GROK_SECURE_STORAGE_KEY, json),
                 None => ctx.secure_storage().remove_value(GROK_SECURE_STORAGE_KEY),
             };
-            if let Err(e) = result {
-                if !matches!(e, secure_storage::Error::NotFound) {
-                    report_error!(anyhow::Error::new(e)
-                        .context("Failed to persist Grok tokens to secure storage"));
-                }
+            if let Err(e) = result
+                && !matches!(e, secure_storage::Error::NotFound)
+            {
+                report_error!(
+                    anyhow::Error::new(e)
+                        .context("Failed to persist Grok tokens to secure storage")
+                );
             }
         });
     }

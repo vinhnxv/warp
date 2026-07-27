@@ -12,11 +12,14 @@ use warp::tui_export::{
 };
 use warpui::platform::WindowStyle;
 use warpui::{AddWindowOptions, App, ViewHandle};
-use warpui_core::TypedActionView as _;
+use warpui_core::elements::tui::TuiRect;
+use warpui_core::keymap::Keystroke;
+use warpui_core::presenter::tui::TuiPresenter;
+use warpui_core::{TuiView as _, TypedActionView as _, WindowInvalidation};
 
 use super::{
-    build_request, CardMode, ConfigPage, OrchestrationBlockController, TuiOrchestrationBlock,
-    TuiOrchestrationBlockAction, TuiOrchestrationBlockEvent,
+    CardMode, ConfigPage, OrchestrationBlockController, TuiOrchestrationBlock,
+    TuiOrchestrationBlockAction, TuiOrchestrationBlockEvent, build_request,
 };
 use crate::option_selector::{TuiOptionSelectorAction, TuiOptionSelectorEvent};
 use crate::test_fixtures::TestHostView;
@@ -35,6 +38,7 @@ fn request(harness: &str, execution_mode: RunAgentsExecutionMode) -> RunAgentsRe
             prompt: "research".to_string(),
             title: "Researcher".to_string(),
             agent_identity_uid: String::new(),
+            model_id: String::new(),
         }],
         plan_id: "plan-1".to_string(),
         harness_auth_secret_name: None,
@@ -61,6 +65,7 @@ fn remote(environment_id: &str, worker_host: &str) -> RunAgentsExecutionMode {
         environment_id: environment_id.to_string(),
         worker_host: worker_host.to_string(),
         computer_use_enabled: true,
+        runner_id: String::new(),
     }
 }
 
@@ -137,6 +142,7 @@ fn edit_state_is_overridden_by_an_approved_config() {
         execution_mode: OrchestrationExecutionMode::Remote {
             environment_id: "env-2".to_string(),
             worker_host: "warp".to_string(),
+            runner_id: String::new(),
         },
     };
     let state = TuiOrchestrationBlock::config_state_from_request(
@@ -204,6 +210,7 @@ fn build_request_carries_card_fields_and_edited_run_wide_state() {
             environment_id: "env-9".to_string(),
             worker_host: "self-hosted".to_string(),
             computer_use_enabled: true,
+            runner_id: String::new(),
         },
     );
     assert_eq!(built.harness_auth_secret_name.as_deref(), Some("codex-key"));
@@ -380,10 +387,12 @@ fn selector_layout_invalidations_are_forwarded() {
             block.handle_selector_event(&TuiOptionSelectorEvent::LayoutInvalidated, ctx);
         });
 
-        assert!(events
-            .borrow()
-            .iter()
-            .any(|event| matches!(event, TuiOrchestrationBlockEvent::LayoutInvalidated)));
+        assert!(
+            events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, TuiOrchestrationBlockEvent::LayoutInvalidated))
+        );
     });
 }
 
@@ -393,6 +402,7 @@ fn selector_actions_commit_edits_and_follow_the_dynamic_page_sequence() {
         let (block, _) = test_block(&mut app, &request("oz", remote("env-1", "warp")));
         act(&mut app, &block, TuiOrchestrationBlockAction::Configure);
         let selector = app.read(|ctx| block.as_ref(ctx).selector.clone());
+        assert!(app.read(|ctx| selector.is_focused(ctx)));
 
         selector.update(&mut app, |selector, ctx| {
             selector.handle_action(&TuiOptionSelectorAction::MoveDown, ctx);
@@ -404,11 +414,13 @@ fn selector_actions_commit_edits_and_follow_the_dynamic_page_sequence() {
         );
         app.read(|ctx| {
             let block = block.as_ref(ctx);
-            assert!(!block
-                .orchestration_edit_state
-                .orchestration_config_state
-                .execution_mode
-                .is_remote());
+            assert!(
+                !block
+                    .orchestration_edit_state
+                    .orchestration_config_state
+                    .execution_mode
+                    .is_remote()
+            );
             assert_eq!(
                 block.mode,
                 CardMode::Configuring {
@@ -427,17 +439,116 @@ fn selector_actions_commit_edits_and_follow_the_dynamic_page_sequence() {
         );
         app.read(|ctx| {
             let block = block.as_ref(ctx);
-            assert!(block
-                .orchestration_edit_state
-                .orchestration_config_state
-                .execution_mode
-                .is_remote());
+            assert!(
+                block
+                    .orchestration_edit_state
+                    .orchestration_config_state
+                    .execution_mode
+                    .is_remote()
+            );
             assert_eq!(
                 block.mode,
                 CardMode::Configuring {
                     page: ConfigPage::Harness
                 }
             );
+        });
+    });
+}
+#[test]
+fn focusing_a_configuring_card_delegates_to_the_selector() {
+    App::test((), |mut app| async move {
+        let (block, _) = test_block(&mut app, &request("oz", RunAgentsExecutionMode::Local));
+        act(&mut app, &block, TuiOrchestrationBlockAction::Configure);
+        let selector = app.read(|ctx| block.as_ref(ctx).selector.clone());
+        assert!(app.read(|ctx| selector.is_focused(ctx)));
+
+        block.update(&mut app, |_, ctx| ctx.focus_self());
+
+        assert!(app.read(|ctx| selector.is_focused(ctx)));
+    });
+}
+
+#[test]
+fn opening_configuration_only_invalidates_layout() {
+    App::test((), |mut app| async move {
+        let (block, _) = test_block(&mut app, &request("oz", RunAgentsExecutionMode::Local));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let captured_events = events.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&block, move |_, event, _| {
+                captured_events.borrow_mut().push(event.clone());
+            });
+        });
+
+        act(&mut app, &block, TuiOrchestrationBlockAction::Configure);
+
+        assert!(
+            events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, TuiOrchestrationBlockEvent::LayoutInvalidated))
+        );
+        assert!(
+            !events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, TuiOrchestrationBlockEvent::BlockingStateChanged))
+        );
+    });
+}
+
+#[test]
+fn model_selector_arrows_navigate_after_search_takes_focus() {
+    App::test((), |mut app| async move {
+        app.update(crate::option_selector::init);
+        let (block, _) = test_block(&mut app, &request("oz", RunAgentsExecutionMode::Local));
+        block.update(&mut app, |block, ctx| {
+            block.open_page(ConfigPage::Model, ctx);
+        });
+        let selector = app.read(|ctx| block.as_ref(ctx).selector.clone());
+        let mut presenter = TuiPresenter::new();
+        app.update(|ctx| {
+            let mut invalidation = WindowInvalidation::default();
+            invalidation.updated.insert(block.id());
+            invalidation.updated.insert(selector.id());
+            invalidation
+                .updated
+                .extend(selector.as_ref(ctx).child_view_ids(ctx));
+            presenter.invalidate(&invalidation, ctx, block.window_id(ctx));
+            presenter.present(ctx, &block, TuiRect::new(0, 0, 80, 20));
+        });
+
+        let window_id = app.read(|ctx| block.window_id(ctx));
+        let up_handled = app
+            .dispatch_keystroke(
+                window_id,
+                &[block.id(), selector.id()],
+                &Keystroke::parse("up").expect("valid keystroke"),
+                false,
+            )
+            .expect("keystroke dispatch succeeds");
+        assert!(up_handled);
+        let search_field = app.read(|ctx| {
+            selector
+                .as_ref(ctx)
+                .search_field_for_test()
+                .expect("model page has a search field")
+        });
+        assert!(app.read(|ctx| search_field.as_ref(ctx).is_focused()));
+
+        let down_handled = app
+            .dispatch_keystroke(
+                window_id,
+                &[block.id(), selector.id(), search_field.id()],
+                &Keystroke::parse("down").expect("valid keystroke"),
+                false,
+            )
+            .expect("keystroke dispatch succeeds");
+        assert!(down_handled);
+        app.read(|ctx| {
+            assert!(selector.is_focused(ctx));
+            assert_eq!(selector.as_ref(ctx).highlighted_index(), Some(0));
         });
     });
 }
@@ -448,21 +559,27 @@ fn blocked_accept_invalidates_card_layout() {
         let (block, controller) =
             test_block(&mut app, &request("oz", RunAgentsExecutionMode::Local));
         *controller.accept_error.borrow_mut() = Some("Choose a model.".to_string());
-        let invalidations = Rc::new(Cell::new(0));
-        let invalidations_for_subscription = invalidations.clone();
+        let layout_invalidations = Rc::new(Cell::new(0));
+        let blocking_state_changes = Rc::new(Cell::new(0));
+        let layout_invalidations_for_subscription = layout_invalidations.clone();
+        let blocking_state_changes_for_subscription = blocking_state_changes.clone();
         app.update(|ctx| {
             ctx.subscribe_to_view(&block, move |_, event, _| match event {
                 TuiOrchestrationBlockEvent::BlockingStateChanged => {
-                    invalidations_for_subscription.set(invalidations_for_subscription.get() + 1);
+                    blocking_state_changes_for_subscription
+                        .set(blocking_state_changes_for_subscription.get() + 1);
                 }
                 TuiOrchestrationBlockEvent::RejectRequested => {}
-                TuiOrchestrationBlockEvent::LayoutInvalidated => {}
+                TuiOrchestrationBlockEvent::LayoutInvalidated => {
+                    layout_invalidations_for_subscription
+                        .set(layout_invalidations_for_subscription.get() + 1);
+                }
             });
         });
 
         act(&mut app, &block, TuiOrchestrationBlockAction::Accept);
-
-        assert_eq!(invalidations.get(), 1);
+        assert_eq!(layout_invalidations.get(), 1);
+        assert_eq!(blocking_state_changes.get(), 0);
         assert_eq!(
             block.read(&app, |block, _| block.accept_error.clone()),
             Some("Choose a model.".to_string())

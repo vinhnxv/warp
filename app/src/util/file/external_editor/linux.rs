@@ -211,10 +211,10 @@ impl EditorMetadata {
                 // the future
                 //
                 // See https://github.com/rust-lang/rust/issues/92750
-                if let Ok(absolute) = file_path.canonicalize() {
-                    if let Ok(file_url) = url::Url::from_file_path(absolute) {
-                        args.push(file_url.as_str().to_string());
-                    }
+                if let Ok(absolute) = file_path.canonicalize()
+                    && let Ok(file_url) = url::Url::from_file_path(absolute)
+                {
+                    args.push(file_url.as_str().to_string());
                 }
             }
             // Localized application name.
