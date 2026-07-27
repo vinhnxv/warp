@@ -128,6 +128,18 @@ pub enum RemoteProbeFailure {
 }
 
 impl RemoteProbeFailure {
+    /// Short inline label for the sidebar row, where the full [`message`] would
+    /// not fit. The row's tooltip carries the message.
+    ///
+    /// [`message`]: RemoteProbeFailure::message
+    pub fn short_label(&self) -> &'static str {
+        match self {
+            Self::Unreachable => "Unreachable",
+            Self::NeedsFirstHandConnect => "Needs first connection",
+            Self::PathNotFound => "Path not found",
+        }
+    }
+
     /// Row tooltip / form banner text.
     pub fn message(&self) -> &'static str {
         match self {

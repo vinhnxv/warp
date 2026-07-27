@@ -14,7 +14,7 @@ use std::time::Duration;
 use instant::Instant;
 use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::{Vector2F, vec2f};
-use repo_mode::RepoEntryKind;
+use repo_mode::{RemoteProbeFailure, RemoteProbeState, RepoEntryKind};
 use settings::Setting;
 use warp_core::ui::Icon as WarpIcon;
 use warp_core::ui::theme::Fill as ThemeFill;
@@ -28,7 +28,7 @@ use warpui::ui_components::components::UiComponent;
 use warpui::{AppContext, SingletonEntity};
 
 use super::Workspace;
-use super::repo_mode_model::{RepoModeEntryBadges, RepoModeListEntry};
+use super::repo_mode_model::{RemoteListEntry, RepoModeEntryBadges, RepoModeListEntry};
 use super::vertical_tabs::telemetry::VerticalTabsChipEntrypoint;
 use super::vertical_tabs::{
     METADATA_ROW_HEIGHT, VerticalTabsPanelState, render_git_branch_text, render_groups,
@@ -161,13 +161,25 @@ pub(super) fn render_repo_tree(
             .or_default()
             .clone();
         let is_selected = selected == Some(key.as_str());
-        let branch = match entry.kind {
-            RepoEntryKind::Repo if !entry.is_dead => {
-                repo_branch(&sidebar.branch_cache, &entry.path)
-            }
-            _ => None,
+        let remote_state = entry
+            .remote
+            .as_ref()
+            .map(|remote| remote_row_state(remote, REMOTE_LABEL_BUDGET));
+        let branch = match &remote_state {
+            // R11: a remote branch comes from the last probe. Reading
+            // `.git/HEAD` here would answer about the local filesystem, which
+            // knows nothing about this entry.
+            Some(state) => state.branch.clone(),
+            None => match entry.kind {
+                RepoEntryKind::Repo if !entry.is_dead => {
+                    repo_branch(&sidebar.branch_cache, &entry.path)
+                }
+                _ => None,
+            },
         };
-        let mut badges = if entry.is_dead {
+        // Badges are read from terminals whose *local* repo path matches the
+        // entry, so a remote entry never has any.
+        let mut badges = if entry.is_dead || remote_state.is_some() {
             RepoModeEntryBadges::default()
         } else {
             workspace.repo_mode_entry_badges(&entry.path, app)
@@ -183,6 +195,7 @@ pub(super) fn render_repo_tree(
 
         column = column.with_child(render_entry_row(
             entry,
+            remote_state,
             branch,
             badges,
             mouse,
@@ -306,8 +319,10 @@ fn render_empty_state(app_appearance: &Appearance) -> Box<dyn Element> {
     .finish()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_entry_row(
     entry: RepoModeListEntry,
+    remote_state: Option<RemoteRowState>,
     branch: Option<String>,
     badges: RepoModeEntryBadges,
     mouse: MouseStateHandle,
@@ -318,7 +333,11 @@ fn render_entry_row(
     let theme = app_appearance.theme();
     let font = app_appearance.ui_font_family();
     let ui_builder = app_appearance.ui_builder().clone();
-    let primary_color = if entry.is_dead {
+    let unreachable = matches!(
+        remote_state.as_ref().map(|state| state.status),
+        Some(RemoteRowStatus::Unreachable(_))
+    );
+    let primary_color = if entry.is_dead || unreachable {
         theme.sub_text_color(theme.background())
     } else {
         theme.font_color(theme.background())
@@ -327,13 +346,35 @@ fn render_entry_row(
     let accent = theme.accent();
 
     let full_path = entry.path.to_string_lossy().into_owned();
-    let home_dir = std::env::var("HOME").ok();
-    let short_path =
-        warp_util::path::user_friendly_path(&full_path, home_dir.as_deref()).into_owned();
+    // R10: a remote row names its machine where a local row shows its path,
+    // and its hover text carries the untruncated value plus any probe reason.
+    let (secondary, hover_text) = match &remote_state {
+        Some(state) => (state.secondary.clone(), state.tooltip.clone()),
+        None => {
+            let home_dir = std::env::var("HOME").ok();
+            (
+                warp_util::path::user_friendly_path(&full_path, home_dir.as_deref()).into_owned(),
+                full_path.clone(),
+            )
+        }
+    };
 
-    let icon = match entry.kind {
-        RepoEntryKind::Repo => WarpIcon::GitBranch,
-        RepoEntryKind::Folder => WarpIcon::Folder,
+    // R10: the cloud icon is what distinguishes a remote row at a glance, and
+    // it goes offline when the last probe failed.
+    let icon = match remote_state.as_ref().map(|state| state.status) {
+        Some(RemoteRowStatus::Unreachable(_)) => WarpIcon::CloudOffline,
+        Some(_) => WarpIcon::Cloud,
+        None => match entry.kind {
+            RepoEntryKind::Repo => WarpIcon::GitBranch,
+            RepoEntryKind::Folder => WarpIcon::Folder,
+        },
+    };
+    // Short inline note for the states a branch cannot describe (R9/R11); the
+    // full reason lives in the tooltip.
+    let remote_note = match remote_state.as_ref().map(|state| state.status) {
+        Some(RemoteRowStatus::Pending) => Some("Connecting…"),
+        Some(RemoteRowStatus::Unreachable(reason)) => Some(reason.short_label()),
+        _ => None,
     };
 
     let is_dead = entry.is_dead;
@@ -367,7 +408,7 @@ fn render_entry_row(
                     .finish(),
             )
             .with_child(
-                Text::new(short_path.clone(), font, 10.)
+                Text::new(secondary.clone(), font, 10.)
                     .with_color(sub_color.into())
                     .finish(),
             )
@@ -448,10 +489,17 @@ fn render_entry_row(
                 has_badges = true;
             }
 
-            if branch.is_some() || has_badges {
-                let branch_element: Box<dyn Element> = match branch.clone() {
-                    Some(branch) => render_git_branch_text(&branch, sub_color, 10., app_appearance),
-                    None => Empty::new().finish(),
+            if branch.is_some() || remote_note.is_some() || has_badges {
+                // A remote row that has no branch to show still owes the user a
+                // word about why (R9/R11); a local row leaves the slot empty.
+                let branch_element: Box<dyn Element> = match (branch.clone(), remote_note) {
+                    (Some(branch), _) => {
+                        render_git_branch_text(&branch, sub_color, 10., app_appearance)
+                    }
+                    (None, Some(note)) => Text::new(note, font, 10.)
+                        .with_color(sub_color.into())
+                        .finish(),
+                    (None, None) => Empty::new().finish(),
                 };
                 let mut meta = Flex::row()
                     .with_main_axis_size(MainAxisSize::Max)
@@ -482,9 +530,10 @@ fn render_entry_row(
             .with_background(background)
             .finish();
 
-        // Full path in a hover tooltip; the row shows the shortened form.
-        if hover.is_hovered() && short_path != full_path {
-            let tooltip = ui_builder.tool_tip(full_path.clone()).build().finish();
+        // Hover carries whatever the row had to shorten or omit: the full local
+        // path, or the untruncated host plus the probe reason.
+        if hover.is_hovered() && hover_text != secondary {
+            let tooltip = ui_builder.tool_tip(hover_text.clone()).build().finish();
             let mut stack = Stack::new().with_child(row_container);
             stack.add_positioned_overlay_child(
                 tooltip,
@@ -517,6 +566,78 @@ fn render_entry_row(
         });
     })
     .finish()
+}
+
+/// Character budget for the `user@host` line before it is ellipsized. The
+/// sidebar is narrow, and a long host or user would otherwise push the row
+/// wider than the panel.
+const REMOTE_LABEL_BUDGET: usize = 28;
+
+/// What a remote row is doing, from its last probe alone (R11 — nothing
+/// rechecks in the background).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RemoteRowStatus {
+    /// Registered but never probed, or a probe is in flight (R9).
+    Pending,
+    Ready,
+    Unreachable(RemoteProbeFailure),
+}
+
+/// Everything a remote row renders that a local row does not.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RemoteRowState {
+    /// Secondary line under the name: `user@host`, ellipsized to fit (R10).
+    pub secondary: String,
+    /// Branch for the meta line, from the probe rather than `.git/HEAD` (R8).
+    pub branch: Option<String>,
+    pub status: RemoteRowStatus,
+    /// Hover text: the full `user@host`, plus the mapped reason when the last
+    /// probe failed, so a dimmed row is diagnosable without reopening the form.
+    pub tooltip: String,
+}
+
+pub(super) fn remote_row_state(remote: &RemoteListEntry, budget: usize) -> RemoteRowState {
+    let full = remote.target.user_host();
+    let (branch, status) = match &remote.probe {
+        RemoteProbeState::Pending => (None, RemoteRowStatus::Pending),
+        RemoteProbeState::Resolved { kind, branch } => {
+            let branch = match kind {
+                RepoEntryKind::Repo => branch.clone(),
+                RepoEntryKind::Folder => None,
+            };
+            (branch, RemoteRowStatus::Ready)
+        }
+        RemoteProbeState::Failed { reason } => (None, RemoteRowStatus::Unreachable(*reason)),
+    };
+    let tooltip = match status {
+        RemoteRowStatus::Pending => format!("{full} — connecting…"),
+        RemoteRowStatus::Ready => full.clone(),
+        RemoteRowStatus::Unreachable(reason) => format!("{full} — {}", reason.message()),
+    };
+    RemoteRowState {
+        secondary: truncate_label(&full, budget),
+        branch,
+        status,
+        tooltip,
+    }
+}
+
+/// Middle-ellipsize `label` to `budget` characters. Both ends stay readable
+/// because the user at the front and the host's tail at the back are what
+/// identify the machine. Returns the label unchanged when it already fits, or
+/// when the budget is too small to ellipsize into anything readable.
+pub(super) fn truncate_label(label: &str, budget: usize) -> String {
+    let chars: Vec<char> = label.chars().collect();
+    if chars.len() <= budget || budget < 4 {
+        return label.to_string();
+    }
+    let keep = budget - 1;
+    let head = keep.div_ceil(2);
+    let tail = keep - head;
+    let mut truncated: String = chars[..head].iter().collect();
+    truncated.push('…');
+    truncated.extend(chars[chars.len() - tail..].iter());
+    truncated
 }
 
 /// Current branch (or short detached SHA) for a repo root, via `.git/HEAD`.
@@ -560,3 +681,7 @@ fn read_git_head_branch(root: &Path) -> Option<String> {
         Some(head.chars().take(8).collect())
     }
 }
+
+#[cfg(test)]
+#[path = "repo_sidebar_tests.rs"]
+mod tests;
