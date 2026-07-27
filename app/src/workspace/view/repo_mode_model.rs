@@ -91,7 +91,7 @@ impl Workspace {
                         (*kind, *dead)
                     }
                     _ => {
-                        let kind = classify_entry_kind(&path);
+                        let kind = classify_entry_kind(&path).unwrap_or(RepoEntryKind::Folder);
                         let dead = is_dead_path(&path);
                         fs_cache.insert(key, (now, kind, dead));
                         (kind, dead)

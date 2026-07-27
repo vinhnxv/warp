@@ -6,6 +6,7 @@
 mod entry;
 
 pub use entry::{
-    RepoEntry, RepoEntryKind, canonicalize_repo_path, classify_entry_kind, display_name_for_path,
-    is_dead_path,
+    canonicalize_repo_path, classify_entry_kind, display_name_for_path,
+    display_name_for_registry_path, format_remote_key, is_dead_path, is_remote_key, is_remote_path,
+    parse_remote_key, shell_quote, RemoteTarget, RepoEntry, RepoEntryKind, DEFAULT_SSH_PORT,
 };
