@@ -868,3 +868,36 @@ fn test_tab_opened_outside_the_entry_path_stays_ungrouped() {
         });
     });
 }
+
+/// R7: the probe's `ssh` must be findable when Warp was launched outside a
+/// login shell. The interactive `PATH` wins, and the one inherited value that
+/// cannot resolve anything — an empty `PATH` — is replaced rather than passed
+/// through, which is what turned a healthy host into "Unreachable".
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn probe_path_env_prefers_the_shell_path_and_replaces_an_empty_one() {
+    use std::ffi::OsString;
+
+    assert_eq!(
+        probe_path_env(
+            Some("/opt/homebrew/bin".to_string()),
+            Some(OsString::from(""))
+        ),
+        Some("/opt/homebrew/bin".to_string()),
+        "the interactive PATH is what the user's ssh lives on"
+    );
+    // Nothing to improve on: inherit, so the child sees the process PATH.
+    assert_eq!(probe_path_env(None, Some(OsString::from("/usr/bin"))), None);
+    assert_eq!(probe_path_env(Some(String::new()), None), None);
+
+    let empty_path = probe_path_env(None, Some(OsString::from("")));
+    if cfg!(unix) {
+        assert_eq!(
+            empty_path.as_deref(),
+            Some("/usr/bin:/bin:/usr/sbin:/sbin"),
+            "an empty PATH resolves nothing, so it must not be inherited"
+        );
+    } else {
+        assert_eq!(empty_path, None);
+    }
+}

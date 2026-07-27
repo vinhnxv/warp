@@ -66,6 +66,7 @@ fn failed_row_is_unreachable_and_explains_why() {
         RemoteProbeFailure::Unreachable,
         RemoteProbeFailure::NeedsFirstHandConnect,
         RemoteProbeFailure::PathNotFound,
+        RemoteProbeFailure::SshUnavailable,
     ] {
         let state = remote_row_state(
             &remote(RemoteProbeState::Failed { reason }),

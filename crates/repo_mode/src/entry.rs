@@ -125,6 +125,13 @@ pub enum RemoteProbeFailure {
     NeedsFirstHandConnect,
     /// The host answered, but the remote path is not there.
     PathNotFound,
+    /// The `ssh` client could not be started on *this* machine, so nothing was
+    /// ever sent to the host. Kept apart from [`Unreachable`] because the two
+    /// point at opposite ends of the connection: the server is blameless here
+    /// and the fix is local (a `PATH` without `ssh`, or no client installed).
+    ///
+    /// [`Unreachable`]: RemoteProbeFailure::Unreachable
+    SshUnavailable,
 }
 
 impl RemoteProbeFailure {
@@ -137,6 +144,7 @@ impl RemoteProbeFailure {
             Self::Unreachable => "Unreachable",
             Self::NeedsFirstHandConnect => "Needs first connection",
             Self::PathNotFound => "Path not found",
+            Self::SshUnavailable => "No ssh client",
         }
     }
 
@@ -148,6 +156,9 @@ impl RemoteProbeFailure {
                 "Connect once by hand first — the host key is unknown or the key is locked."
             }
             Self::PathNotFound => "That path does not exist on the host.",
+            Self::SshUnavailable => {
+                "Warp could not start ssh on this machine — nothing was sent to the host."
+            }
         }
     }
 }

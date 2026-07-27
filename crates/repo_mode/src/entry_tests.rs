@@ -225,17 +225,26 @@ fn remote_probe_state_reports_kind_only_when_resolved() {
 /// `BatchMode` false negative is not reported as "unreachable".
 #[test]
 fn remote_probe_failures_have_distinct_messages() {
-    let messages = [
-        RemoteProbeFailure::Unreachable.message(),
-        RemoteProbeFailure::NeedsFirstHandConnect.message(),
-        RemoteProbeFailure::PathNotFound.message(),
+    let failures = [
+        RemoteProbeFailure::Unreachable,
+        RemoteProbeFailure::NeedsFirstHandConnect,
+        RemoteProbeFailure::PathNotFound,
+        RemoteProbeFailure::SshUnavailable,
     ];
-    for message in messages {
-        assert!(!message.is_empty());
+    for failure in failures {
+        assert!(!failure.message().is_empty());
+        assert!(!failure.short_label().is_empty());
     }
-    assert_ne!(messages[0], messages[1]);
-    assert_ne!(messages[1], messages[2]);
-    assert_ne!(messages[0], messages[2]);
+    for (index, failure) in failures.iter().enumerate() {
+        for other in &failures[index + 1..] {
+            assert_ne!(
+                failure.message(),
+                other.message(),
+                "{failure:?} and {other:?} tell the user the same thing"
+            );
+            assert_ne!(failure.short_label(), other.short_label());
+        }
+    }
 }
 
 /// Covers R8/AE4: one round trip answers repo-or-folder, the branch, and the

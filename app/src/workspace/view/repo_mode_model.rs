@@ -43,6 +43,8 @@ use crate::menu::MenuItemFields;
 use crate::pane_group::{NewTerminalOptions, PanesLayout};
 use crate::projects::ProjectManagementModel;
 use crate::terminal::TerminalView;
+#[cfg(feature = "local_tty")]
+use crate::terminal::local_shell::LocalShellState;
 use crate::terminal::model::session::{BootstrapSessionType, SessionsEvent};
 use crate::workspace::tab_group::{TabGroup, TabGroupId};
 use crate::workspace::{TabContextMenuAnchor, WorkspaceAction, WorkspaceRegistry};
@@ -298,8 +300,28 @@ impl Workspace {
     ) {
         let args = remote_probe_args(&target, REMOTE_PROBE_CONNECT_TIMEOUT_SECS);
         let script = remote_probe_script(&target.remote_path);
+        // The `ssh` the probe spawns is looked up on `PATH`, and a Warp launched
+        // from the macOS GUI inherits launchd's `PATH` rather than the user's —
+        // in the limit an empty one, where the lookup fails before any packet is
+        // sent. Borrow the interactive shell's `PATH`, the same way `git`/`gh`
+        // lookups already do.
+        #[cfg(feature = "local_tty")]
+        let path_future = if ctx.has_singleton_model::<LocalShellState>() {
+            LocalShellState::handle(ctx).update(ctx, |shell_state, ctx| {
+                shell_state.get_interactive_path_env_var(ctx)
+            })
+        } else {
+            // No local shell to borrow a `PATH` from (a headless test, or a
+            // build without one): fall back to the process environment.
+            Box::pin(futures::future::ready(None))
+        };
+        #[cfg(not(feature = "local_tty"))]
+        let path_future = futures::future::ready(None);
         ctx.spawn(
-            async move { run_remote_probe(args, script, REMOTE_PROBE_TIMEOUT).await },
+            async move {
+                let path_env = path_future.await;
+                run_remote_probe(args, script, REMOTE_PROBE_TIMEOUT, path_env).await
+            },
             move |workspace, result, ctx| {
                 workspace.apply_remote_probe_result(&target, &key, token, result, ctx);
             },
@@ -907,6 +929,39 @@ impl Workspace {
 /// One bounded SSH round trip: the probe script goes in over stdin and a
 /// classified answer comes back.
 ///
+/// Last-resort `PATH` for the probe's `ssh` lookup: the POSIX default, which is
+/// where every platform we ship on keeps its system `ssh`.
+#[cfg(not(target_family = "wasm"))]
+const FALLBACK_PROBE_PATH: Option<&str> = if cfg!(unix) {
+    Some("/usr/bin:/bin:/usr/sbin:/sbin")
+} else {
+    None
+};
+
+/// The `PATH` to hand the probe's `ssh`, or `None` to inherit the process one.
+///
+/// Prefers the interactive shell's `PATH` so an `ssh` installed only where the
+/// user's shell looks (Homebrew, `~/.local/bin`) is still found. Falls back to
+/// [`FALLBACK_PROBE_PATH`] for the one inherited value that cannot work: an
+/// *empty* `PATH` fails the lookup outright, where an absent one is already
+/// backstopped by the system default.
+///
+/// `process_path_env` is passed in rather than read here so the rule is
+/// exercisable without mutating the test process's environment.
+#[cfg(not(target_family = "wasm"))]
+pub(super) fn probe_path_env(
+    shell_path_env: Option<String>,
+    process_path_env: Option<std::ffi::OsString>,
+) -> Option<String> {
+    if let Some(path) = shell_path_env.filter(|path| !path.is_empty()) {
+        return Some(path);
+    }
+    if process_path_env.is_some_and(|path| path.is_empty()) {
+        return FALLBACK_PROBE_PATH.map(str::to_string);
+    }
+    None
+}
+
 /// Every failure mode collapses into a [`RemoteProbeFailure`] the form can
 /// explain — including the wall-clock timeout, which is what stops a host that
 /// accepts the connection and then goes silent from hanging the add (R6).
@@ -915,22 +970,28 @@ async fn run_remote_probe(
     args: Vec<String>,
     script: String,
     timeout: Duration,
+    path_env: Option<String>,
 ) -> Result<RemoteProbeOutcome, RemoteProbeFailure> {
     use std::process::Stdio;
 
     use futures::AsyncWriteExt as _;
 
-    let mut child = command::r#async::Command::new("ssh")
+    let mut command = command::r#async::Command::new("ssh");
+    command
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|err| {
-            log::warn!("repo_mode: failed to spawn the ssh probe: {err}");
-            RemoteProbeFailure::Unreachable
-        })?;
+        .kill_on_drop(true);
+    if let Some(path_env) = probe_path_env(path_env, std::env::var_os("PATH")) {
+        command.env("PATH", path_env);
+    }
+    let mut child = command.spawn().map_err(|err| {
+        // A spawn failure is a *local* one — no packet reached the host — so it
+        // must not be reported as an unreachable server (R7).
+        log::warn!("repo_mode: failed to spawn the ssh probe: {err}");
+        RemoteProbeFailure::SshUnavailable
+    })?;
 
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(script.as_bytes()).await {
@@ -966,14 +1027,16 @@ async fn run_remote_probe(
 }
 
 /// Remote entries are a desktop affordance: the browser build has no local
-/// `ssh` to spawn, so a probe there can only report the host as unreachable.
+/// `ssh` to spawn at all, which is exactly what
+/// [`RemoteProbeFailure::SshUnavailable`] says.
 #[cfg(target_family = "wasm")]
 async fn run_remote_probe(
     _args: Vec<String>,
     _script: String,
     _timeout: Duration,
+    _path_env: Option<String>,
 ) -> Result<RemoteProbeOutcome, RemoteProbeFailure> {
-    Err(RemoteProbeFailure::Unreachable)
+    Err(RemoteProbeFailure::SshUnavailable)
 }
 
 /// Label and action for each "+ Add" menu item (R1): the single add control
