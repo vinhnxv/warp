@@ -130,6 +130,17 @@ impl Workspace {
         let is_remote = self.resolve_open_folder_target(ctx).is_none();
         let installed = self.installed_editors_cached(false, ctx);
         let default_editor = resolve_default_folder_editor_with_installed(ctx, &installed);
+
+        // This runs on every session-state change, including the
+        // `TerminalViewStateChanged` events the active terminal emits as it
+        // produces output. Each setter below notifies unconditionally, so
+        // re-pushing an unchanged state would re-render the button (and rebuild
+        // its hovered tooltip) many times a second.
+        if self.open_folder_button_state == Some((is_remote, default_editor)) {
+            return;
+        }
+        self.open_folder_button_state = Some((is_remote, default_editor));
+
         let tooltip =
             open_folder_button_tooltip(if is_remote { None } else { default_editor }, is_remote);
 

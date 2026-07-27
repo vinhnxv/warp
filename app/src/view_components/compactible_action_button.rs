@@ -8,6 +8,7 @@ use warpui::elements::{
 use warpui::{Action, AppContext, Element, TypedActionView, View, ViewContext, ViewHandle};
 
 use crate::ai::blocklist::inline_action::inline_action_icons::icon_size;
+use crate::terminal::input::MenuPositioningProvider;
 use crate::ui_components::icons::Icon;
 use crate::view_components::action_button::{
     ActionButton, ActionButtonTheme, AdjoinedSide, ButtonSize, KeystrokeSource,
@@ -121,6 +122,18 @@ impl CompactibleActionButton {
         });
         self.expanded_button.update(ctx, |button, ctx| {
             button.set_adjoined_side(adjoined_side, ctx);
+        });
+    }
+
+    /// Sets how the compact button's tooltip is positioned. Only the compact
+    /// button carries a tooltip (the expanded one shows its label inline).
+    pub fn set_compact_tooltip_positioning_provider<T: View>(
+        &mut self,
+        provider: Arc<dyn MenuPositioningProvider>,
+        ctx: &mut ViewContext<T>,
+    ) {
+        self.compact_button.update(ctx, |button, ctx| {
+            button.set_tooltip_positioning_provider(provider, ctx);
         });
     }
 

@@ -1088,6 +1088,14 @@ pub struct Workspace {
     /// ([`Workspace::installed_editors_cached`]).
     #[cfg(feature = "local_fs")]
     installed_editors_cache: Option<Vec<Editor>>,
+    /// The `(is_remote, default_editor)` pair last pushed into
+    /// `open_folder_button`. `refresh_open_folder_button_state` runs on every
+    /// session-state change -- including `TerminalViewStateChanged`, which
+    /// fires as the active terminal produces output -- and each setter it calls
+    /// notifies unconditionally. Comparing against this snapshot keeps those
+    /// re-renders to the rare refreshes that actually change the button.
+    #[cfg(feature = "local_fs")]
+    open_folder_button_state: Option<(bool, Option<Editor>)>,
     changelog_model: ModelHandle<ChangelogModel>,
     palette: ViewHandle<CommandPalette>,
     ctrl_tab_palette: ViewHandle<CommandPalette>,
@@ -2941,17 +2949,27 @@ impl Workspace {
             }
         });
         #[cfg(feature = "local_fs")]
-        let open_folder_button = CompactibleSplitActionButton::new(
-            "Open folder".to_string(),
-            None,
-            ButtonSize::Small,
-            WorkspaceAction::OpenCurrentFolderInDefaultIde,
-            WorkspaceAction::ToggleOpenFolderMenu,
-            icons::Icon::Code2,
-            false,
-            Some(OPEN_FOLDER_BUTTON_POSITION_ID.to_string()),
-            ctx,
-        );
+        let open_folder_button = {
+            let mut button = CompactibleSplitActionButton::new(
+                "Open folder".to_string(),
+                None,
+                ButtonSize::Small,
+                WorkspaceAction::OpenCurrentFolderInDefaultIde,
+                WorkspaceAction::ToggleOpenFolderMenu,
+                icons::Icon::Code2,
+                false,
+                Some(OPEN_FOLDER_BUTTON_POSITION_ID.to_string()),
+                ctx,
+            );
+            // The button lives in the tab bar at the very top of the window.
+            // `ActionButton`'s default tooltip placement is above the button,
+            // which the window clamp then pushes back down on top of it: the
+            // tooltip covers the cursor, `Hoverable` reads the button as no
+            // longer hovered, drops the tooltip, re-hovers, and the tooltip
+            // flickers. Positioning it below keeps it clear of the cursor.
+            button.set_tooltip_positioning_provider(Arc::new(MenuPositioning::BelowInputBox), ctx);
+            button
+        };
         // Keep the button's logo/tooltip in sync when the default folder IDE
         // changes outside the dropdown (e.g. from the Settings page). Editor
         // settings changes are rare and user-initiated, so also rescan the
@@ -3493,6 +3511,8 @@ impl Workspace {
             show_open_folder_menu: false,
             #[cfg(feature = "local_fs")]
             installed_editors_cache: None,
+            #[cfg(feature = "local_fs")]
+            open_folder_button_state: None,
             changelog_model,
             welcome_tips_view_state,
             welcome_tips_view,

@@ -366,6 +366,20 @@ impl ActionButton {
         self
     }
 
+    /// Sets the tooltip positioning provider after construction. Buttons that
+    /// sit at the very top of the window need [`MenuPositioning::BelowInputBox`]:
+    /// the default positions the tooltip above the button, where the window
+    /// clamp pushes it back down over the button, covering the cursor and
+    /// making the hover state (and so the tooltip) flicker.
+    pub fn set_tooltip_positioning_provider(
+        &mut self,
+        provider: Arc<dyn MenuPositioningProvider>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.tooltip_positioning_provider = Some(provider);
+        ctx.notify();
+    }
+
     /// Configure tooltip alignment. If not specified, defaults to Right for historical reasons.
     pub fn with_tooltip_alignment(mut self, alignment: TooltipAlignment) -> Self {
         self.tooltip_alignment = alignment;

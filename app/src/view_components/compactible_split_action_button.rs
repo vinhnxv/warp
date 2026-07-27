@@ -3,6 +3,7 @@ use std::sync::Arc;
 use warpui::elements::{ChildView, Flex, ParentElement, SavePosition};
 use warpui::{Action, Element, TypedActionView, View, ViewContext, ViewHandle};
 
+use crate::terminal::input::MenuPositioningProvider;
 use crate::ui_components::icons::Icon;
 use crate::view_components::action_button::{
     ActionButton, AdjoinedSide, ButtonSize, KeystrokeSource, NakedTheme, PrimaryRightBiasedTheme,
@@ -117,6 +118,19 @@ impl CompactibleSplitActionButton {
     /// Sets the tooltip on the primary button.
     pub fn set_tooltip<T: View>(&mut self, tooltip: Option<String>, ctx: &mut ViewContext<T>) {
         self.primary_button.set_tooltip(tooltip, ctx);
+    }
+
+    /// Sets how the primary button's tooltip is positioned relative to the
+    /// button. Split buttons rendered in the top toolbar must pass
+    /// `MenuPositioning::BelowInputBox`, since the default (above) is clamped
+    /// back over the button and flickers.
+    pub fn set_tooltip_positioning_provider<T: View>(
+        &mut self,
+        provider: Arc<dyn MenuPositioningProvider>,
+        ctx: &mut ViewContext<T>,
+    ) {
+        self.primary_button
+            .set_compact_tooltip_positioning_provider(provider, ctx);
     }
 
     /// Sets a full-color image asset as the primary compact button's icon.
