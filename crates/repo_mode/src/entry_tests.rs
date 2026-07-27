@@ -198,6 +198,46 @@ fn registry_label_handles_local_and_remote_keys() {
     assert_eq!(display_name_for_registry_path(Path::new(&key)), "app");
 }
 
+/// R9/R11: an entry with no probe yet is pending, and only a resolved probe
+/// carries a kind — the local `.git` rules never answer for a remote entry.
+#[test]
+fn remote_probe_state_reports_kind_only_when_resolved() {
+    assert_eq!(RemoteProbeState::default(), RemoteProbeState::Pending);
+    assert_eq!(RemoteProbeState::Pending.kind(), None);
+    assert_eq!(
+        RemoteProbeState::Failed {
+            reason: RemoteProbeFailure::Unreachable
+        }
+        .kind(),
+        None
+    );
+    assert_eq!(
+        RemoteProbeState::Resolved {
+            kind: RepoEntryKind::Repo,
+            branch: Some("main".to_string()),
+        }
+        .kind(),
+        Some(RepoEntryKind::Repo)
+    );
+}
+
+/// R7/KTD6: each failure class names what the user must actually do, so a
+/// `BatchMode` false negative is not reported as "unreachable".
+#[test]
+fn remote_probe_failures_have_distinct_messages() {
+    let messages = [
+        RemoteProbeFailure::Unreachable.message(),
+        RemoteProbeFailure::NeedsFirstHandConnect.message(),
+        RemoteProbeFailure::PathNotFound.message(),
+    ];
+    for message in messages {
+        assert!(!message.is_empty());
+    }
+    assert_ne!(messages[0], messages[1]);
+    assert_ne!(messages[1], messages[2]);
+    assert_ne!(messages[0], messages[2]);
+}
+
 /// KTD2: the local-filesystem rules must never run for a remote key.
 #[test]
 fn local_fs_rules_are_gated_to_local_keys() {

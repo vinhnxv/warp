@@ -1,4 +1,5 @@
 use chrono::{Duration, Utc};
+use repo_mode::{RemoteProbeState, format_remote_key};
 use warpui::App;
 
 use super::*;
@@ -7,6 +8,14 @@ use crate::workspace::view::tests::{initialize_app, mock_workspace};
 
 fn register_projects_model(app: &mut App, projects: Vec<Project>) {
     app.add_singleton_model(|ctx| ProjectManagementModel::new(projects, None, ctx));
+}
+
+fn registered_paths(ctx: &AppContext) -> Vec<String> {
+    let mut paths: Vec<String> = ProjectManagementModel::handle(ctx).read(ctx, |projects, _| {
+        projects.all_projects().map(|p| p.path.clone()).collect()
+    });
+    paths.sort();
+    paths
 }
 
 /// Covers AE5 / R10: no selection means the stock tab set (no filtering).
@@ -313,6 +322,220 @@ fn test_bound_tab_owner_rules() {
         repo_mode_bound_tab_owner(Path::new("/repo/gone"), None, &entries),
         None
     );
+}
+
+/// Covers R9/R11: the row for a remote key is built from the ephemeral probe
+/// cache alone. With nothing cached the row is pending, and building it touches
+/// neither the filesystem nor the network.
+#[test]
+fn remote_row_is_pending_until_a_probe_resolves() {
+    let key = format_remote_key("10.0.0.7", 2222, "vinh", "/k", "/srv/app");
+    let now = Utc::now().naive_utc();
+    let mut probes = HashMap::new();
+
+    let pending = remote_list_entry(key.clone(), PathBuf::from(&key), Some(now), now, &probes);
+    let remote = pending.remote.as_ref().expect("remote detail");
+    assert_eq!(remote.probe, RemoteProbeState::Pending);
+    assert_eq!(remote.target.user_host(), "vinh@10.0.0.7");
+    assert_eq!(pending.display_name, "app");
+    // R11: an unreachable remote entry is never the local "dead path" state.
+    assert!(!pending.is_dead);
+
+    probes.insert(
+        key.clone(),
+        RemoteProbeState::Resolved {
+            kind: RepoEntryKind::Repo,
+            branch: Some("main".to_string()),
+        },
+    );
+    let resolved = remote_list_entry(key.clone(), PathBuf::from(&key), Some(now), now, &probes);
+    assert_eq!(resolved.kind, RepoEntryKind::Repo);
+    assert_eq!(
+        resolved.remote.expect("remote detail").probe,
+        RemoteProbeState::Resolved {
+            kind: RepoEntryKind::Repo,
+            branch: Some("main".to_string()),
+        }
+    );
+
+    probes.insert(
+        key.clone(),
+        RemoteProbeState::Failed {
+            reason: repo_mode::RemoteProbeFailure::Unreachable,
+        },
+    );
+    let failed = remote_list_entry(key.clone(), PathBuf::from(&key), Some(now), now, &probes);
+    assert!(!failed.is_dead);
+    assert_eq!(failed.kind, RepoEntryKind::Folder);
+}
+
+/// A registry row that carries the remote scheme but does not parse (a
+/// hand-edited or corrupted row) is surfaced as dead so the row offers
+/// "Remove", instead of rendering as a live local folder that can never open.
+#[test]
+fn unparseable_remote_row_is_dead() {
+    let now = Utc::now().naive_utc();
+    let key = "ssh://not-a-valid-key".to_string();
+    let entry = remote_list_entry(
+        key.clone(),
+        PathBuf::from(&key),
+        Some(now),
+        now,
+        &HashMap::new(),
+    );
+    assert!(entry.remote.is_none());
+    assert!(entry.is_dead);
+}
+
+/// Covers KTD3 at the model seam: remove/select derive their registry key
+/// without canonicalizing a remote key against the local filesystem.
+#[test]
+fn registry_key_path_leaves_remote_keys_untouched() {
+    let key = format_remote_key("h", 22, "u", "/k", "/srv/app");
+    assert_eq!(
+        registry_key_path(Path::new(&key), "select"),
+        PathBuf::from(&key)
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let canonical = dunce::canonicalize(dir.path()).expect("canonicalize");
+    let with_slash = PathBuf::from(format!("{}/", dir.path().display()));
+    assert_eq!(registry_key_path(&with_slash, "select"), canonical);
+}
+
+/// Covers R5/KTD3: a remote key is stored exactly as formatted — canonicalizing
+/// it would resolve a remote directory against the *local* filesystem — and a
+/// second upsert bumps recency instead of duplicating the row.
+#[test]
+fn test_remote_entry_stores_key_verbatim_and_lists_pending() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let key = format_remote_key("10.0.0.7", 2222, "vinh", "/Users/v/.ssh/id", "/srv/app");
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+                projects.upsert_project(PathBuf::from(&key), ctx);
+                projects.upsert_project(PathBuf::from(&key), ctx);
+            });
+            assert_eq!(registered_paths(ctx), vec![key.clone()]);
+
+            let entries = workspace.repo_mode_entries(ctx);
+            assert_eq!(entries.len(), 1);
+            let entry = &entries[0];
+            let remote = entry.remote.as_ref().expect("remote detail");
+            assert_eq!(remote.target.server, "10.0.0.7");
+            assert_eq!(remote.target.port, 2222);
+            assert_eq!(remote.target.remote_path, "/srv/app");
+            // R9/R11: nothing has probed yet, so the row is pending and no
+            // filesystem or network call was made to build the list.
+            assert_eq!(remote.probe, RemoteProbeState::Pending);
+            assert_eq!(entry.display_name, "app");
+            assert!(!entry.is_dead);
+        });
+    });
+}
+
+/// Covers AE1/AE2: the machine is part of the identity, so the same path on two
+/// hosts — and a local entry with a matching path — are three distinct rows.
+#[test]
+fn test_remote_and_local_entries_with_same_path_coexist() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let now = Utc::now().naive_utc();
+    let key_a = format_remote_key("10.0.0.1", 22, "vinh", "/k", "/srv/app");
+    let key_b = format_remote_key("10.0.0.2", 22, "vinh", "/k", "/srv/app");
+    let projects = vec![
+        Project {
+            path: "/srv/app".to_string(),
+            added_ts: now,
+            last_opened_ts: Some(now),
+        },
+        Project {
+            path: key_a.clone(),
+            added_ts: now,
+            last_opened_ts: Some(now),
+        },
+        Project {
+            path: key_b.clone(),
+            added_ts: now,
+            last_opened_ts: Some(now),
+        },
+    ];
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let entries = workspace.repo_mode_entries(ctx);
+            assert_eq!(entries.len(), 3);
+            let remote_hosts: Vec<String> = entries
+                .iter()
+                .filter_map(|e| e.remote.as_ref())
+                .map(|r| r.target.server.clone())
+                .collect();
+            assert_eq!(remote_hosts.len(), 2);
+            assert!(remote_hosts.contains(&"10.0.0.1".to_string()));
+            assert!(remote_hosts.contains(&"10.0.0.2".to_string()));
+            assert_eq!(entries.iter().filter(|e| e.remote.is_none()).count(), 1);
+        });
+    });
+}
+
+/// Covers R5: removal keys on the raw path, so a remote entry leaves the
+/// listing and the registry together.
+#[test]
+fn test_remove_remote_entry_drops_it_from_listing_and_registry() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let now = Utc::now().naive_utc();
+    let key = format_remote_key("10.0.0.7", 22, "vinh", "/k", "/srv/app");
+    let projects = vec![Project {
+        path: key.clone(),
+        added_ts: now,
+        last_opened_ts: Some(now),
+    }];
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            assert_eq!(workspace.repo_mode_entries(ctx).len(), 1);
+
+            workspace.remove_repo_mode_entry(Path::new(&key), ctx);
+
+            assert!(workspace.repo_mode_entries(ctx).is_empty());
+            assert!(registered_paths(ctx).is_empty());
+        });
+    });
+}
+
+/// A registry row that looks remote but does not parse (hand-edited or
+/// corrupted) is surfaced as dead so the user can remove it, rather than
+/// rendering as a live local folder that can never open.
+#[test]
+fn test_unparseable_remote_key_is_marked_dead() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let now = Utc::now().naive_utc();
+    let projects = vec![Project {
+        path: "ssh://not-a-valid-key".to_string(),
+        added_ts: now,
+        last_opened_ts: Some(now),
+    }];
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let entries = workspace.repo_mode_entries(ctx);
+            assert_eq!(entries.len(), 1);
+            assert!(entries[0].remote.is_none());
+            assert!(entries[0].is_dead);
+        });
+    });
 }
 
 /// Covers R3: section order reflects recency at launch and does not reshuffle

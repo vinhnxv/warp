@@ -80,6 +80,66 @@ impl RemoteTarget {
     }
 }
 
+/// What the last SSH probe said about a remote entry.
+///
+/// Runtime-only and never persisted (R11): a restart brings every remote entry
+/// back as [`RemoteProbeState::Pending`], and a stale entry is corrected by the
+/// next probe rather than by a background check.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum RemoteProbeState {
+    /// No probe has returned yet — the row renders pending (R9).
+    #[default]
+    Pending,
+    Resolved {
+        kind: RepoEntryKind,
+        /// Current branch when the target is a repository (R8).
+        branch: Option<String>,
+    },
+    Failed {
+        reason: RemoteProbeFailure,
+    },
+}
+
+impl RemoteProbeState {
+    /// Repo-or-folder, known only once a probe has resolved. The local `.git`
+    /// rules never answer for a remote entry (KTD2).
+    pub fn kind(&self) -> Option<RepoEntryKind> {
+        match self {
+            Self::Resolved { kind, .. } => Some(*kind),
+            Self::Pending | Self::Failed { .. } => None,
+        }
+    }
+}
+
+/// Why an add-time or reprobe SSH probe failed, mapped to what the user can do
+/// about it (R7). A generic "failed" would strand the user on the
+/// `BatchMode` false negatives, which the interactive tab would sail past.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemoteProbeFailure {
+    /// No answer within the wall-clock timeout, or the connection was refused
+    /// or reset (R6).
+    Unreachable,
+    /// The probe runs under `BatchMode=yes`, which turns an unknown host key or
+    /// a passphrase-protected key with no loaded agent into a non-zero exit —
+    /// even though the later interactive tab would prompt and succeed (KTD6).
+    NeedsFirstHandConnect,
+    /// The host answered, but the remote path is not there.
+    PathNotFound,
+}
+
+impl RemoteProbeFailure {
+    /// Row tooltip / form banner text.
+    pub fn message(&self) -> &'static str {
+        match self {
+            Self::Unreachable => "Host did not respond — check the server, port, and network.",
+            Self::NeedsFirstHandConnect => {
+                "Connect once by hand first — the host key is unknown or the key is locked."
+            }
+            Self::PathNotFound => "That path does not exist on the host.",
+        }
+    }
+}
+
 /// Encode a remote connection as a registry key:
 /// `ssh://<user>@<host>:<port><path>?i=<identity>`.
 ///

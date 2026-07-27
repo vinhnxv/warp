@@ -12,7 +12,9 @@ use chrono::NaiveDateTime;
 use instant::Instant;
 use pathfinder_geometry::vector::{Vector2F, vec2f};
 use repo_mode::{
-    RepoEntryKind, canonicalize_repo_path, classify_entry_kind, display_name_for_path, is_dead_path,
+    RemoteProbeState, RemoteTarget, RepoEntryKind, canonicalize_repo_path, classify_entry_kind,
+    display_name_for_path, display_name_for_registry_path, is_dead_path, is_remote_key,
+    is_remote_path, parse_remote_key,
 };
 use warpui::{AppContext, SingletonEntity, UpdateView, ViewContext};
 
@@ -36,10 +38,23 @@ use crate::workspace::{TabContextMenuAnchor, WorkspaceAction, WorkspaceRegistry}
 pub struct RepoModeListEntry {
     pub path: PathBuf,
     pub display_name: String,
+    /// For a remote entry this mirrors the last probe and stays `Folder` until
+    /// one resolves — read `remote` to tell "folder" from "not probed yet".
     pub kind: RepoEntryKind,
     pub is_dead: bool,
     pub last_opened_ts: Option<NaiveDateTime>,
     pub added_ts: NaiveDateTime,
+    /// Connection and probe state for a remote (SSH) entry; `None` for a local
+    /// one.
+    pub remote: Option<RemoteListEntry>,
+}
+
+/// The remote half of a [`RepoModeListEntry`]: what machine it points at, and
+/// what the last probe said about it.
+#[derive(Clone, Debug)]
+pub struct RemoteListEntry {
+    pub target: RemoteTarget,
+    pub probe: RemoteProbeState,
 }
 
 /// Git badge data for a repository row, sourced from the repo's terminals so
@@ -77,11 +92,15 @@ impl Workspace {
                     .collect()
             });
         let now = Instant::now();
+        let remote_probes = self.repo_mode_remote_probes.borrow();
         let mut fs_cache = self.repo_mode_fs_cache.borrow_mut();
         let mut entries: Vec<RepoModeListEntry> = projects
             .into_iter()
             .map(|(path, last_opened_ts, added_ts)| {
                 let key = path.to_string_lossy().into_owned();
+                if is_remote_key(&key) {
+                    return remote_list_entry(key, path, last_opened_ts, added_ts, &remote_probes);
+                }
                 // `.git`/exists() stats hit the disk; reuse the last probe
                 // within the TTL rather than re-statting on every render.
                 let (kind, is_dead) = match fs_cache.get(&key) {
@@ -104,10 +123,12 @@ impl Workspace {
                     kind,
                     last_opened_ts,
                     added_ts,
+                    remote: None,
                 }
             })
             .collect();
         drop(fs_cache);
+        drop(remote_probes);
         entries.sort_by(|a, b| {
             b.last_opened_ts
                 .cmp(&a.last_opened_ts)
@@ -178,13 +199,7 @@ impl Workspace {
         if !Self::repo_mode_enabled() {
             return;
         }
-        let path_buf = canonicalize_repo_path(path).unwrap_or_else(|err| {
-            log::warn!(
-                "repo_mode: failed to canonicalize {:?} on remove: {err}",
-                path
-            );
-            path.to_path_buf()
-        });
+        let path_buf = registry_key_path(path, "remove");
         let path_str = path_buf.to_string_lossy().into_owned();
 
         let group_ids: Vec<TabGroupId> = self
@@ -208,6 +223,7 @@ impl Workspace {
             order.retain(|k| k != &path_str);
         }
         self.repo_mode_fs_cache.borrow_mut().remove(&path_str);
+        self.repo_mode_remote_probes.borrow_mut().remove(&path_str);
 
         ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
             projects.remove_project(path_buf, ctx);
@@ -283,13 +299,7 @@ impl Workspace {
         if !Self::repo_mode_enabled() {
             return;
         }
-        let path_buf = canonicalize_repo_path(path).unwrap_or_else(|err| {
-            log::warn!(
-                "repo_mode: failed to canonicalize {:?} on select: {err}",
-                path
-            );
-            path.to_path_buf()
-        });
+        let path_buf = registry_key_path(path, "select");
         self.selected_repo_root = Some(path_buf.to_string_lossy().into_owned());
 
         // R3: record recency for the next launch. The section order is pinned
@@ -339,7 +349,7 @@ impl Workspace {
             None => {
                 let mut group = TabGroup::new();
                 group.repo_root = Some(path_str);
-                group.name = Some(display_name_for_path(path));
+                group.name = Some(display_name_for_registry_path(path));
                 let id = group.id;
                 self.tab_groups.insert(id, group);
                 id
@@ -600,6 +610,60 @@ impl Workspace {
         let (mut by_entry, _) = self.repo_mode_tab_partition(&entry_paths, app);
         Some(by_entry.remove(&selected).unwrap_or_default())
     }
+}
+
+/// Build the list row for a remote key. No filesystem and no network work
+/// happens here (R11): kind, branch, and reachability come from the ephemeral
+/// probe cache, which is empty until the entry is added or selected — so a
+/// restored entry renders pending until it is next used (F4).
+///
+/// A key that carries the remote scheme but does not parse (hand-edited or
+/// corrupted registry row) is surfaced as dead so the row offers "Remove",
+/// rather than rendering as a live local folder that can never open.
+fn remote_list_entry(
+    key: String,
+    path: PathBuf,
+    last_opened_ts: Option<NaiveDateTime>,
+    added_ts: NaiveDateTime,
+    probes: &HashMap<String, RemoteProbeState>,
+) -> RepoModeListEntry {
+    let Some(target) = parse_remote_key(&key) else {
+        log::warn!("repo_mode: unparseable remote registry key {key:?}");
+        return RepoModeListEntry {
+            display_name: key,
+            kind: RepoEntryKind::Folder,
+            is_dead: true,
+            path,
+            last_opened_ts,
+            added_ts,
+            remote: None,
+        };
+    };
+    let probe = probes.get(&key).cloned().unwrap_or_default();
+    RepoModeListEntry {
+        display_name: target.display_name(),
+        kind: probe.kind().unwrap_or(RepoEntryKind::Folder),
+        // Remote entries are never polled for liveness (R11); an unreachable
+        // host shows through the probe state, not the dead-entry affordance.
+        is_dead: false,
+        path,
+        last_opened_ts,
+        added_ts,
+        remote: Some(RemoteListEntry { target, probe }),
+    }
+}
+
+/// Registry key for `path`: canonicalized for a local entry, verbatim for a
+/// remote key (KTD3) — a remote key names a directory on another machine and
+/// has no local form to resolve.
+fn registry_key_path(path: &Path, operation: &str) -> PathBuf {
+    if is_remote_path(path) {
+        return path.to_path_buf();
+    }
+    canonicalize_repo_path(path).unwrap_or_else(|err| {
+        log::warn!("repo_mode: failed to canonicalize {path:?} on {operation}: {err}");
+        path.to_path_buf()
+    })
 }
 
 /// Owning entry for a repo-bound tab: the deepest entry ancestor of `cwd` when

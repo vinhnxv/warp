@@ -1202,6 +1202,10 @@ pub struct Workspace {
     /// registered path on each render.
     repo_mode_fs_cache:
         RefCell<HashMap<String, (instant::Instant, repo_mode::RepoEntryKind, bool)>>,
+    /// Last SSH probe result per remote entry key. Ephemeral by design (R11):
+    /// remote entries are never polled for liveness, so this starts empty on
+    /// every launch and a restored entry renders pending until it is used.
+    repo_mode_remote_probes: RefCell<HashMap<String, repo_mode::RemoteProbeState>>,
     /// Anchor for the repo-mode entry context menu / picker menu (reuses
     /// `tab_right_click_menu`), or None when closed.
     show_repo_mode_menu: Option<TabContextMenuAnchor>,
@@ -3578,6 +3582,7 @@ impl Workspace {
             selected_repo_root: None,
             repo_mode_launch_order: RefCell::new(None),
             repo_mode_fs_cache: RefCell::new(HashMap::new()),
+            repo_mode_remote_probes: RefCell::new(HashMap::new()),
             show_repo_mode_menu: None,
             vertical_tabs_panel: Default::default(),
             left_panel_view,
