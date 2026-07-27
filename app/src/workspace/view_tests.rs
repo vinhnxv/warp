@@ -3873,6 +3873,69 @@ fn test_tab_mru_order() {
 }
 
 #[test]
+fn test_restore_keeps_loose_tabs_out_of_the_selected_repo_group() {
+    // Regression: with a repo-mode selection persisted, restoring the window
+    // used to route every restored tab through the "new tabs join the selected
+    // entry's group" branch — so tabs under "Other tabs" reappeared inside the
+    // selected repository and the snapshot order was shuffled.
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let now = chrono::Utc::now().naive_utc();
+        app.add_singleton_model(|ctx| {
+            crate::projects::ProjectManagementModel::new(
+                vec![crate::persistence::model::Project {
+                    path: "/repo/a".to_string(),
+                    added_ts: now,
+                    last_opened_ts: Some(now),
+                }],
+                None,
+                ctx,
+            )
+        });
+
+        let workspace = mock_workspace(&mut app);
+        let snapshot = workspace.update(&mut app, |workspace, ctx| {
+            // Tabs: [repo, loose, repo] — the loose tab sits between two
+            // members of the bound group, which is what desyncs the indices.
+            workspace.add_terminal_tab(false, ctx);
+            workspace.add_terminal_tab(false, ctx);
+            assert_eq!(workspace.tab_count(), 3);
+
+            let mut group = TabGroup::new();
+            group.repo_root = Some("/repo/a".to_string());
+            let group_id = group.id;
+            workspace.tab_groups.insert(group_id, group);
+            workspace.tabs[0].group_id = Some(group_id);
+            workspace.tabs[1].group_id = None;
+            workspace.tabs[2].group_id = Some(group_id);
+            workspace.selected_repo_root = Some("/repo/a".to_string());
+
+            workspace.snapshot(ctx.window_id(), false, ctx)
+        });
+
+        let restored = restored_workspace(&mut app, snapshot);
+        restored.read(&app, |workspace, _| {
+            assert_eq!(workspace.selected_repo_root.as_deref(), Some("/repo/a"));
+            let group_id = workspace
+                .tab_groups
+                .values()
+                .find(|group| group.repo_root.as_deref() == Some("/repo/a"))
+                .map(|group| group.id)
+                .expect("bound group should restore");
+            let membership: Vec<_> = workspace.tabs.iter().map(|tab| tab.group_id).collect();
+            assert_eq!(
+                membership,
+                vec![Some(group_id), None, Some(group_id)],
+                "the middle tab must stay loose and keep its position"
+            );
+        });
+    });
+}
+
+#[test]
 fn test_create_new_tab_group_groups_active_tab() {
     let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
 

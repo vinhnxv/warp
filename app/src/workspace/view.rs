@@ -4075,7 +4075,13 @@ impl Workspace {
             } => {
                 let active_tab_index = window_snapshot.active_tab_index;
                 let restored_left_panel_open = window_snapshot.left_panel_open;
-                self.selected_repo_root = window_snapshot.selected_repo_root.clone();
+                // The repo-mode selection is applied only *after* every tab is
+                // restored. Setting it up front would make `add_tab_with_pane_layout`
+                // take the R6 "new tabs join the selected entry's group" branch for
+                // each restored tab, which both files loose tabs under that repo and
+                // inserts them inside the group's range — desyncing the snapshot
+                // order this loop indexes by.
+                let restored_repo_root = window_snapshot.selected_repo_root.clone();
 
                 // Restore groups first so per-tab `group_id` assignments
                 // below can validate membership against a populated map.
@@ -4103,45 +4109,45 @@ impl Workspace {
                         .collect();
                 }
 
-                window_snapshot
-                    .tabs
-                    .iter()
-                    .enumerate()
-                    .for_each(|(tab_index, saved_tab)| {
-                        let custom_title = saved_tab.custom_title.clone();
-                        self.add_tab_with_pane_layout(
-                            PanesLayout::Snapshot(Box::new(saved_tab.root.clone())),
-                            block_lists.clone(),
-                            custom_title,
-                            ctx,
-                        );
-                        self.tabs[tab_index].default_directory_color =
-                            saved_tab.default_directory_color;
-                        self.tabs[tab_index].selected_color = saved_tab.selected_color;
-                        // Only restore pinned state when the Pinned Tabs
-                        // feature is enabled.
-                        if FeatureFlag::PinnedTabs.is_enabled() {
-                            self.tabs[tab_index].pinned = saved_tab.pinned;
-                        }
-                        // Drop the group reference if the group itself didn't restore.
-                        self.tabs[tab_index].group_id = saved_tab
-                            .group_id
-                            .filter(|group_id| self.tab_groups.contains_key(group_id));
+                window_snapshot.tabs.iter().for_each(|saved_tab| {
+                    let custom_title = saved_tab.custom_title.clone();
+                    // Address the tab by where it actually landed, not by its
+                    // snapshot position: placement rules can insert it anywhere,
+                    // and writing this state to the wrong index silently rewrites
+                    // another tab's group/color/pinned state.
+                    let tab_index = self.add_tab_with_pane_layout(
+                        PanesLayout::Snapshot(Box::new(saved_tab.root.clone())),
+                        block_lists.clone(),
+                        custom_title,
+                        ctx,
+                    );
+                    self.tabs[tab_index].default_directory_color =
+                        saved_tab.default_directory_color;
+                    self.tabs[tab_index].selected_color = saved_tab.selected_color;
+                    // Only restore pinned state when the Pinned Tabs
+                    // feature is enabled.
+                    if FeatureFlag::PinnedTabs.is_enabled() {
+                        self.tabs[tab_index].pinned = saved_tab.pinned;
+                    }
+                    // Drop the group reference if the group itself didn't restore.
+                    self.tabs[tab_index].group_id = saved_tab
+                        .group_id
+                        .filter(|group_id| self.tab_groups.contains_key(group_id));
 
-                        let pane_group = self.tabs[tab_index].pane_group.clone();
+                    let pane_group = self.tabs[tab_index].pane_group.clone();
 
-                        if let Some(left_panel_snapshot) = &saved_tab.left_panel {
-                            self.restore_left_panel_for_tab(&pane_group, left_panel_snapshot, ctx);
-                        }
+                    if let Some(left_panel_snapshot) = &saved_tab.left_panel {
+                        self.restore_left_panel_for_tab(&pane_group, left_panel_snapshot, ctx);
+                    }
 
-                        if let Some(right_panel_snapshot) = &saved_tab.right_panel {
-                            self.restore_right_panel_for_tab(
-                                &pane_group,
-                                right_panel_snapshot,
-                                ctx,
-                            );
-                        }
-                    });
+                    if let Some(right_panel_snapshot) = &saved_tab.right_panel {
+                        self.restore_right_panel_for_tab(&pane_group, right_panel_snapshot, ctx);
+                    }
+                });
+
+                // Safe now that every restored tab is in place with its own
+                // group membership.
+                self.selected_repo_root = restored_repo_root;
 
                 if self.tab_count() == 0 {
                     if self.should_trigger_get_started_onboarding(ctx) {
@@ -12981,13 +12987,16 @@ impl Workspace {
         }
     }
 
+    /// Returns the index the new tab was inserted at — placement settings and
+    /// repo-mode grouping can put it anywhere, so callers that need to touch the
+    /// tab afterwards must use this rather than assume it landed at the end.
     pub fn add_tab_with_pane_layout(
         &mut self,
         panes_layout: PanesLayout,
         block_lists: Arc<HashMap<PaneUuid, Vec<SerializedBlockListItem>>>,
         custom_tab_title: Option<String>,
         ctx: &mut ViewContext<Self>,
-    ) {
+    ) -> usize {
         // Remember whether the left panel was open on the current active pane group
         // before creating a new active pane group.
         let left_panel_was_open = if self.tabs.is_empty() {
@@ -13078,6 +13087,8 @@ impl Workspace {
                 pg.set_left_panel_open(true, ctx);
             });
         }
+
+        insert_idx
     }
 
     pub fn add_tab_from_existing_pane(
