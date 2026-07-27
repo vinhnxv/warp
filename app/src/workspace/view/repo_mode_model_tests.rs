@@ -782,3 +782,89 @@ fn test_recency_order_settles_at_launch() {
         });
     });
 }
+
+/// Covers R14/KTD8: a remote entry gets the same group binding a local one
+/// does — one group keyed by the entry's registry key (here the remote key),
+/// with the opened tab as its member. That binding is what makes selecting the
+/// row filter the tab UI, so it must not depend on the key being a real path.
+#[test]
+fn test_remote_entry_opens_a_tab_bound_to_its_key() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let key = format_remote_key("10.0.0.7", 2222, "vinh", "", "/srv/app");
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+                projects.upsert_project(PathBuf::from(&key), ctx);
+            });
+            let initial_tabs = workspace.tab_count();
+
+            workspace.select_repo_mode_entry(Path::new(&key), ctx);
+
+            assert_eq!(workspace.tab_count(), initial_tabs + 1);
+            let group_id = workspace
+                .selected_repo_mode_group_id()
+                .expect("remote entry should bind a group");
+            let group = workspace.tab_groups.get(&group_id).expect("group");
+            // The group is keyed by the key as typed — no canonicalization, or
+            // it would no longer match the registry entry (KTD3).
+            assert_eq!(group.repo_root.as_deref(), Some(key.as_str()));
+            assert_eq!(group.name.as_deref(), Some("app"));
+            assert_eq!(
+                workspace.tabs[workspace.active_tab_index].group_id,
+                Some(group_id)
+            );
+
+            // Selecting again reuses the group rather than minting a second one
+            // bound to the same key.
+            workspace.select_repo_mode_entry(Path::new(&key), ctx);
+            assert_eq!(
+                workspace
+                    .tab_groups
+                    .values()
+                    .filter(|g| g.repo_root.as_deref() == Some(key.as_str()))
+                    .count(),
+                1
+            );
+        });
+    });
+}
+
+/// Covers R15/AE6: only the entry-open path assigns a `group_id`, so an `ssh`
+/// the user types by hand — in a tab that belongs to no entry — stays outside
+/// every group and lists under "Other tabs".
+#[test]
+fn test_tab_opened_outside_the_entry_path_stays_ungrouped() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let key = format_remote_key("10.0.0.7", 22, "vinh", "", "/srv/app");
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+                projects.upsert_project(PathBuf::from(&key), ctx);
+            });
+            // No entry selected: a plain new tab is nobody's member. Where that
+            // tab later ssh's to is irrelevant — grouping is decided here, not
+            // by the command the user runs.
+            workspace.select_repo_mode_all(ctx);
+            workspace.add_terminal_tab(false, ctx);
+
+            let index = workspace.active_tab_index;
+            assert_eq!(workspace.tabs[index].group_id, None);
+
+            let entry_paths = vec![PathBuf::from(&key)];
+            let (by_entry, loose) = workspace.repo_mode_tab_partition(&entry_paths, ctx);
+            assert!(loose.contains(&index));
+            assert!(
+                by_entry.values().all(|members| !members.contains(&index)),
+                "an ungrouped tab must not be filed under any entry"
+            );
+        });
+    });
+}

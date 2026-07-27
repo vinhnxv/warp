@@ -394,3 +394,55 @@ fn local_fs_rules_are_gated_to_local_keys() {
     // Never "dead": liveness for a remote entry comes from the probe (R11).
     assert!(!is_dead_path(remote));
 }
+
+/// Covers R13/KTD10: the tab's `ssh` line must survive Warp's own
+/// warpification gate, which requires exactly one positional argument. Every
+/// user-entered value therefore stays inside an option or behind the `--`
+/// fence, and the identity is quoted so a space in it cannot split into a
+/// second positional and silently un-warpify the session.
+#[test]
+fn ssh_command_keeps_a_single_positional_destination() {
+    let target = RemoteTarget {
+        server: "10.0.0.7".to_string(),
+        port: 2222,
+        user: "vinh".to_string(),
+        identity: "/Users/v/my keys/id".to_string(),
+        remote_path: "/srv/my app".to_string(),
+    };
+    let command = remote_ssh_command(&target);
+    assert_eq!(
+        command,
+        "ssh -i '/Users/v/my keys/id' -p 2222 -- vinh@10.0.0.7"
+    );
+
+    // The remote path never appears on the ssh line: appending it would be the
+    // second positional that costs warpification (KTD7).
+    assert!(!command.contains("/srv/my app"));
+    assert!(command.ends_with("vinh@10.0.0.7"));
+
+    let no_identity = RemoteTarget {
+        identity: String::new(),
+        port: DEFAULT_SSH_PORT,
+        ..target
+    };
+    assert_eq!(
+        remote_ssh_command(&no_identity),
+        "ssh -p 22 -- vinh@10.0.0.7"
+    );
+}
+
+/// Covers R12/KTD10: landing in the entry's path is its own command, and the
+/// path stays one argument however it is spelled.
+#[test]
+fn cd_command_quotes_the_remote_path() {
+    assert_eq!(remote_cd_command("/srv/app"), "cd '/srv/app'");
+    assert_eq!(remote_cd_command("/srv/my app"), "cd '/srv/my app'");
+    assert_eq!(
+        remote_cd_command("/srv/app; rm -rf /"),
+        "cd '/srv/app; rm -rf /'"
+    );
+    assert_eq!(remote_cd_command("/srv/it's"), r#"cd '/srv/it'\''s'"#);
+    // `~` is left to the remote shell to expand — the entry stores the path the
+    // host already resolved at probe time (R3), so this is only a fallback.
+    assert_eq!(remote_cd_command("~/app"), "cd '~/app'");
+}

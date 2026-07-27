@@ -15,9 +15,10 @@ use repo_mode::{
     RemoteProbeFailure, RemoteProbeOutcome, RemoteProbeState, RemoteTarget, RepoEntryKind,
     canonicalize_repo_path, classify_entry_kind, classify_probe_failure, display_name_for_path,
     display_name_for_registry_path, is_dead_path, is_remote_key, is_remote_path,
-    parse_probe_output, parse_remote_key, remote_probe_args, remote_probe_script,
+    parse_probe_output, parse_remote_key, remote_cd_command, remote_probe_args,
+    remote_probe_script, remote_ssh_command,
 };
-use warpui::{AppContext, SingletonEntity, UpdateView, ViewContext};
+use warpui::{AppContext, SingletonEntity, UpdateView, ViewContext, ViewHandle};
 use warpui_core::r#async::FutureExt as _;
 
 /// TTL for the cached repo-kind / liveness filesystem probes so
@@ -41,6 +42,8 @@ use crate::features::FeatureFlag;
 use crate::menu::MenuItemFields;
 use crate::pane_group::{NewTerminalOptions, PanesLayout};
 use crate::projects::ProjectManagementModel;
+use crate::terminal::TerminalView;
+use crate::terminal::model::session::{BootstrapSessionType, SessionsEvent};
 use crate::workspace::tab_group::{TabGroup, TabGroupId};
 use crate::workspace::{TabContextMenuAnchor, WorkspaceAction, WorkspaceRegistry};
 
@@ -519,7 +522,10 @@ impl Workspace {
         let (mut by_entry, _) = self.repo_mode_tab_partition(&entry_paths, ctx);
         let members = by_entry.remove(&path_buf).unwrap_or_default();
         if members.is_empty() {
-            self.create_repo_mode_group_with_tab(&path_buf, ctx);
+            match path_buf.to_str().and_then(parse_remote_key) {
+                Some(target) => self.open_remote_repo_mode_tab(&path_buf, &target, ctx),
+                None => self.create_repo_mode_group_with_tab(&path_buf, ctx),
+            }
         } else if !members.contains(&self.active_tab_index) {
             if let Some(index) = self.mru_first_among(&members) {
                 self.activate_tab(index, ctx);
@@ -576,6 +582,92 @@ impl Workspace {
         if let Some(tab) = self.tabs.get_mut(self.active_tab_index) {
             tab.group_id = Some(group_id);
         }
+    }
+
+    /// Open a tab for a remote entry: connect to the host, then land in the
+    /// entry's path (R12).
+    ///
+    /// Grouping is the local path exactly (KTD8/R14) — the group is bound by
+    /// `repo_root`, and the remote key is just another value for it, so the tab
+    /// filters like any local entry's. Only this path assigns a `group_id`, so
+    /// an `ssh` the user types by hand stays ungrouped with no extra code (R15).
+    ///
+    /// The `cd` is deliberately *not* appended to the `ssh` line: a second
+    /// positional argument would silently cost warpification (KTD7). It runs
+    /// instead when the remote shell reports itself bootstrapped — see
+    /// [`Self::land_in_remote_path_when_connected`].
+    fn open_remote_repo_mode_tab(
+        &mut self,
+        key: &Path,
+        target: &RemoteTarget,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.create_repo_mode_group_with_tab(key, ctx);
+
+        let Some(terminal) = self
+            .active_tab_pane_group()
+            .as_ref(ctx)
+            .active_session_view(ctx)
+        else {
+            log::warn!("repo_mode: remote tab opened without a terminal to connect from");
+            return;
+        };
+
+        self.land_in_remote_path_when_connected(&terminal, &target.remote_path, ctx);
+
+        // The tab's shell is still bootstrapping, so this queues and fires on
+        // `BootstrapPrecmdDone` — the same route saved launch-config commands
+        // take.
+        let ssh_command = remote_ssh_command(target);
+        terminal.update(ctx, |terminal, ctx| {
+            terminal.execute_command_or_set_pending(&ssh_command, ctx);
+        });
+    }
+
+    /// Run `cd <remote path>` once the remote shell is up, and only then.
+    ///
+    /// `SessionBootstrapped` with a [`BootstrapSessionType::WarpifiedRemote`]
+    /// session is the first moment the remote shell can be commanded — the tab's
+    /// own local shell bootstraps first and is filtered out here. Firing on the
+    /// local bootstrap instead is exactly the mistake KTD7 rejects: the `cd`
+    /// would land in the local shell before `ssh` had connected.
+    ///
+    /// Fires at most once. The subscription outlives that only in the sense that
+    /// it stays registered on the tab's `Sessions` model, which dies with the
+    /// tab — so a tab closed before its shell connects drops it silently.
+    fn land_in_remote_path_when_connected(
+        &mut self,
+        terminal: &ViewHandle<TerminalView>,
+        remote_path: &str,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let sessions = terminal.as_ref(ctx).sessions_model().clone();
+        let terminal = terminal.downgrade();
+        let cd_command = remote_cd_command(remote_path);
+        let mut landed = false;
+
+        ctx.subscribe_to_model(&sessions, move |_, _, event, ctx| {
+            if landed {
+                return;
+            }
+            let SessionsEvent::SessionBootstrapped(bootstrapped) = event else {
+                return;
+            };
+            if !matches!(
+                bootstrapped.session_type,
+                BootstrapSessionType::WarpifiedRemote
+            ) {
+                return;
+            }
+            let Some(terminal) = terminal.upgrade(ctx) else {
+                return;
+            };
+            landed = true;
+            let cd_command = cd_command.clone();
+            terminal.update(ctx, |terminal, ctx| {
+                terminal.execute_command_or_set_pending(&cd_command, ctx);
+            });
+        });
     }
 
     /// Most-recently-used index among `indices`, by `tab_mru_order` (front =

@@ -329,6 +329,35 @@ fi
     )
 }
 
+/// The interactive `ssh` line a remote entry's tab runs (R12/R13).
+///
+/// Shaped so Warp's own SSH wrapper still recognises it: `-i`/`-p` are getopts
+/// options and `--` fences a *single* positional destination, which is what the
+/// warpification gate in `bash_body.sh` requires. Two things it deliberately
+/// does not do: append the remote path as a command (a second positional would
+/// silently drop warpification — U7 lands in the path afterwards instead), and
+/// leave the identity unquoted (a space in it word-splits into that same second
+/// positional, KTD10).
+pub fn remote_ssh_command(target: &RemoteTarget) -> String {
+    let mut command = String::from("ssh");
+    if !target.identity.is_empty() {
+        command.push_str(" -i ");
+        command.push_str(&shell_quote(&target.identity));
+    }
+    command.push_str(&format!(" -p {} -- ", target.port));
+    command.push_str(&target.user_host());
+    command
+}
+
+/// The command that lands the connected tab in the entry's path (R12), run in
+/// the remote shell once it is ready — never appended to [`remote_ssh_command`].
+///
+/// The path is shell-quoted because it is user-entered text reaching a shell
+/// (KTD10); a remote path with a space stays one argument.
+pub fn remote_cd_command(remote_path: &str) -> String {
+    format!("cd {}", shell_quote(remote_path))
+}
+
 /// Parse the probe script's stdout. `None` when the output is empty or does not
 /// carry a kind: an unresolved entry is better than one claiming a kind nothing
 /// confirmed.
