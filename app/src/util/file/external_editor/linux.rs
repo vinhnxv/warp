@@ -667,8 +667,10 @@ impl Editor {
                 Some(metadata) => match metadata.build_default_command(folder_path) {
                     Ok(command) => Some(command),
                     Err(err) => {
-                        report_error!(anyhow::Error::new(err)
-                            .context("Failed to build editor folder open command"));
+                        report_error!(
+                            anyhow::Error::new(err)
+                                .context("Failed to build editor folder open command")
+                        );
                         None
                     }
                 },

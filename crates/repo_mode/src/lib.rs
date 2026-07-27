@@ -6,6 +6,6 @@
 mod entry;
 
 pub use entry::{
-    canonicalize_repo_path, classify_entry_kind, display_name_for_path, is_dead_path, RepoEntry,
-    RepoEntryKind,
+    RepoEntry, RepoEntryKind, canonicalize_repo_path, classify_entry_kind, display_name_for_path,
+    is_dead_path,
 };

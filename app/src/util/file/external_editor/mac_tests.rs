@@ -1,6 +1,6 @@
 use warp_util::path::LineAndColumnArg;
 
-use super::{is_warp_bundle, Editor, OpenFileInEditorMethod};
+use super::{Editor, OpenFileInEditorMethod, is_warp_bundle};
 
 #[test]
 fn is_warp_bundle_recognises_warp_channels() {

@@ -16,12 +16,11 @@ use crate::settings_view::settings_page::{
     AdditionalInfo, LocalOnlyIconState, ToggleState, render_body_item, render_dropdown_item,
 };
 use crate::util::file::external_editor::settings::{
-    resolve_default_folder_editor, DefaultFolderEditor, EditorChoice, EditorLayout,
-    OpenCodePanelsFileEditor, OpenFileEditor, OpenFileLayout, PreferMarkdownViewer,
-    PreferTabbedEditorView,
+    DefaultFolderEditor, EditorChoice, EditorLayout, OpenCodePanelsFileEditor, OpenFileEditor,
+    OpenFileLayout, PreferMarkdownViewer, PreferTabbedEditorView, resolve_default_folder_editor,
 };
 use crate::util::file::external_editor::{
-    installed_editors, Editor, EditorSettings, SUPPORTED_EDITORS,
+    Editor, EditorSettings, SUPPORTED_EDITORS, installed_editors,
 };
 use crate::view_components::{Dropdown, DropdownItem};
 

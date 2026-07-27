@@ -20,10 +20,10 @@ use crate::code::buffer_location::LocalOrRemotePath;
 use crate::menu::{MenuItem, MenuItemFields};
 use crate::ui_components::icons;
 use crate::util::file::external_editor::settings::resolve_default_folder_editor_with_installed;
-use crate::util::file::external_editor::{installed_editors, Editor};
+use crate::util::file::external_editor::{Editor, installed_editors};
 use crate::view_components::compactible_action_button::RenderCompactibleActionButton;
 use crate::workspace::WorkspaceAction;
-use crate::{send_telemetry_from_ctx, TelemetryEvent};
+use crate::{TelemetryEvent, send_telemetry_from_ctx};
 
 impl Workspace {
     /// Resolves the folder the "open folder in IDE" action should open for the

@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use chrono::NaiveDateTime;
 use instant::Instant;
-use pathfinder_geometry::vector::{vec2f, Vector2F};
+use pathfinder_geometry::vector::{Vector2F, vec2f};
 use repo_mode::{
-    canonicalize_repo_path, classify_entry_kind, display_name_for_path, is_dead_path, RepoEntryKind,
+    RepoEntryKind, canonicalize_repo_path, classify_entry_kind, display_name_for_path, is_dead_path,
 };
 use warpui::{AppContext, SingletonEntity, UpdateView, ViewContext};
 
@@ -414,9 +414,11 @@ impl Workspace {
             ctx.notify();
             return;
         }
-        let items = vec![MenuItemFields::new("Remove from Repositories")
-            .with_on_select_action(WorkspaceAction::RemoveRepoModeEntry(path.to_path_buf()))
-            .into_item()];
+        let items = vec![
+            MenuItemFields::new("Remove from Repositories")
+                .with_on_select_action(WorkspaceAction::RemoveRepoModeEntry(path.to_path_buf()))
+                .into_item(),
+        ];
         ctx.update_view(&self.tab_right_click_menu, |menu, view_ctx| {
             menu.set_items(items, view_ctx);
         });
@@ -438,9 +440,11 @@ impl Workspace {
             ctx.notify();
             return;
         }
-        let mut items = vec![MenuItemFields::new("All")
-            .with_on_select_action(WorkspaceAction::SelectRepoModeAll)
-            .into_item()];
+        let mut items = vec![
+            MenuItemFields::new("All")
+                .with_on_select_action(WorkspaceAction::SelectRepoModeAll)
+                .into_item(),
+        ];
         for entry in self.repo_mode_entries(ctx) {
             if entry.is_dead {
                 continue;

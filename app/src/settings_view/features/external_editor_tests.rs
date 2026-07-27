@@ -1,6 +1,6 @@
 use super::*;
-use crate::util::file::external_editor::settings::EditorChoice;
 use crate::util::file::external_editor::Editor;
+use crate::util::file::external_editor::settings::EditorChoice;
 
 /// The default-folder-editor dropdown lists exactly the installed editors, in
 /// order, each mapped to an `ExternalEditor` choice (the setting never holds

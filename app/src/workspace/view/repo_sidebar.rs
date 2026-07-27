@@ -16,9 +16,9 @@ use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::vec2f;
 use repo_mode::RepoEntryKind;
 use settings::Setting;
-use warp_core::ui::theme::color::internal_colors;
-use warp_core::ui::theme::Fill as ThemeFill;
 use warp_core::ui::Icon as WarpIcon;
+use warp_core::ui::theme::Fill as ThemeFill;
+use warp_core::ui::theme::color::internal_colors;
 use warpui::elements::{
     ChildAnchor, ConstrainedBox, Container, CrossAxisAlignment, Element, Empty, Expanded, Flex,
     Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning, Padding,
@@ -27,17 +27,17 @@ use warpui::elements::{
 use warpui::ui_components::components::UiComponent;
 use warpui::{AppContext, SingletonEntity};
 
+use super::Workspace;
 use super::repo_mode_model::{RepoModeEntryBadges, RepoModeListEntry};
 use super::vertical_tabs::telemetry::VerticalTabsChipEntrypoint;
 use super::vertical_tabs::{
-    render_git_branch_text, render_groups, render_passive_terminal_diff_stats_badge,
-    render_terminal_pull_request_badge, terminal_pull_request_badge_label, VerticalTabsPanelState,
-    METADATA_ROW_HEIGHT,
+    METADATA_ROW_HEIGHT, VerticalTabsPanelState, render_git_branch_text, render_groups,
+    render_passive_terminal_diff_stats_badge, render_terminal_pull_request_badge,
+    terminal_pull_request_badge_label,
 };
-use super::Workspace;
 use crate::appearance::Appearance;
-use crate::workspace::tab_settings::TabSettings;
 use crate::workspace::WorkspaceAction;
+use crate::workspace::tab_settings::TabSettings;
 
 const ROW_ICON_SIZE: f32 = 14.;
 const CHEVRON_SIZE: f32 = 10.;

@@ -170,9 +170,11 @@ fn test_loose_tab_never_joins_the_active_repo_group() {
             let entry_paths = vec![root.clone()];
             let (by_entry, loose) = workspace.repo_mode_tab_partition(&entry_paths, ctx);
             assert!(loose.contains(&new_index));
-            assert!(!by_entry
-                .get(&root)
-                .is_some_and(|members| members.contains(&new_index)));
+            assert!(
+                !by_entry
+                    .get(&root)
+                    .is_some_and(|members| members.contains(&new_index))
+            );
         });
     });
 }

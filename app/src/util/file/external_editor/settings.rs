@@ -227,13 +227,13 @@ pub fn resolve_default_folder_editor_with_installed(
     if explicitly_set {
         match default_folder_editor {
             EditorChoice::ExternalEditor(editor) if installed_editors.contains(&editor) => {
-                return Some(editor)
+                return Some(editor);
             }
             // The configured IDE is no longer installed: fall through to the seed
             // so the primary reveals in Finder instead of launching a missing app.
             EditorChoice::ExternalEditor(_) => {}
             EditorChoice::Warp | EditorChoice::EnvEditor | EditorChoice::SystemDefault => {
-                return None
+                return None;
             }
         }
     }
