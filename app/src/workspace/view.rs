@@ -12327,7 +12327,10 @@ impl Workspace {
     fn should_confirm_close_session(&self, ctx: &mut ViewContext<Self>) -> bool {
         // If we're closing the only remaining tab, we're actually going to close the window.
         // We don't need a user confirmation here because there's already another one on window close.
-        if self.tab_count() == 1 {
+        //
+        // Repo mode keeps the window alive on last-tab close (see `remove_tab`), so that
+        // window-close confirmation never runs and this shortcut would drop the prompt entirely.
+        if self.tab_count() == 1 && !Self::repo_mode_enabled() {
             return false;
         }
         // TODO: remove session sharing flag check when long-running commands are included
@@ -12449,8 +12452,11 @@ impl Workspace {
         add_to_undo_stack: bool,
         ctx: &mut ViewContext<Self>,
     ) {
-        let is_last_tab = self.tabs.len() == 1;
-        if !ContextFlag::CloseWindow.is_enabled() && is_last_tab {
+        // Repo mode replaces the last tab with a fresh loose one instead of closing the
+        // window (see `remove_tab`), so neither the early return nor the confirmation
+        // hand-off below applies: the window-close prompt they defer to never runs.
+        let closes_window = self.tabs.len() == 1 && !Self::repo_mode_enabled();
+        if !ContextFlag::CloseWindow.is_enabled() && closes_window {
             return;
         }
 
@@ -12459,7 +12465,7 @@ impl Workspace {
         let tabs_closed = self.close_tabs(
             vec![index].into_iter(),
             OpenDialogSource::CloseTab { tab_index: index },
-            skip_confirmation || is_last_tab, // If this is the last tab, the confirmation dialog will be handled by the window close.
+            skip_confirmation || closes_window, // If this is the last tab, the confirmation dialog will be handled by the window close.
             add_to_undo_stack,
             ctx,
         );

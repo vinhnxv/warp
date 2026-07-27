@@ -1705,6 +1705,63 @@ fn test_close_tab_confirmation_dialog() {
     });
 }
 
+/// `close_tab` normally waives the last tab's confirmation because closing it
+/// closes the window, and the window-close prompt covers it. Repo mode keeps the
+/// window alive instead (see `remove_tab`), so that prompt never runs and the
+/// waiver would drop the confirmation entirely.
+#[test]
+fn test_last_tab_close_still_confirms_shared_session_in_repo_mode() {
+    let _shared_sessions_guard = FeatureFlag::CreatingSharedSessions.override_enabled(true);
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(disable_quit_warning);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let tab_view = workspace.get_pane_group_view(0).unwrap();
+            tab_view.update(ctx, |view, ctx| {
+                view.focused_session_view(ctx)
+                    .unwrap()
+                    .update(ctx, |terminal, ctx| {
+                        terminal.attempt_to_share_session(
+                            SharedSessionScrollbackType::None,
+                            None,
+                            SharedSessionSource::user(None),
+                            false,
+                            ctx,
+                        );
+                    });
+            });
+        });
+
+        workspace.read(&mut app, |workspace, ctx| {
+            assert_eq!(workspace.tab_count(), 1);
+            assert_eq!(number_of_shared_sessions_in_tab(workspace, 0, ctx), 1);
+            assert!(
+                !workspace
+                    .current_workspace_state
+                    .is_close_session_confirmation_dialog_open
+            );
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::CloseTab(0), ctx);
+
+            // The tab survives behind the dialog instead of being replaced by a
+            // fresh loose terminal.
+            assert!(
+                workspace
+                    .current_workspace_state
+                    .is_close_session_confirmation_dialog_open
+            );
+            assert_eq!(workspace.tab_count(), 1);
+        });
+    });
+}
+
 #[test]
 fn test_close_active_horizontal_tab_activates_tab_to_right() {
     let _vertical_tabs_guard = FeatureFlag::VerticalTabs.override_enabled(true);
