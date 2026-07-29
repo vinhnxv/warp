@@ -35,7 +35,9 @@ use warpui::ui_components::components::{UiComponent, UiComponentStyles};
 use warpui::ui_components::text_input::TextInput;
 use warpui::{AppContext, EntityId, SingletonEntity, ViewHandle, WindowId};
 
-use super::{render_group_member_icon_collage, select_unique_pane_kinds};
+use super::{
+    TabBarSlot, build_tab_bar_slots, render_group_member_icon_collage, select_unique_pane_kinds,
+};
 use crate::ai::agent::conversation::{ConversationStatus, StatusColorStyle};
 use crate::ai::agent_management::AgentNotificationsModel;
 use crate::ai::cloud_environments::CloudAmbientAgentEnvironment;
@@ -1964,27 +1966,45 @@ pub(super) fn render_groups(
     }
 
     // Consecutive tabs sharing a group_id collapse into a single group container.
-    // TODO(johnturcoo) adopt horizontal tabs 'tab slot' pattern to remove this while loop.
+    //
+    // The runs come from `build_tab_bar_slots` — the same builder the horizontal
+    // tab bar uses — so the two surfaces cannot disagree about which tabs form a
+    // group. Slots partition the projected list in order (a `Single` covers one
+    // entry, a `Group` covers `member_indices.len()`), so advancing `i` by each
+    // slot's width keeps `visible_tabs` aligned and every member's filtered pane
+    // ids attached to it.
+    //
+    // This deliberately does *not* consult `FeatureFlag::GroupedTabs`: the
+    // vertical panel has always grouped independently of that flag. Only the
+    // live-group filter is shared with the horizontal projection.
+    let slot_inputs: Vec<(usize, Option<TabGroupId>)> = visible_tabs
+        .iter()
+        .map(|&(tab_index, _)| {
+            (
+                tab_index,
+                workspace.tabs[tab_index]
+                    .group_id
+                    .filter(|gid| workspace.tab_groups.contains_key(gid)),
+            )
+        })
+        .collect();
+
     let total_visible = visible_tabs.len();
     let mut i = 0;
-    while i < total_visible {
-        let (tab_index, ref filtered_pane_ids) = visible_tabs[i];
-        if ghost_insertion_index == Some(tab_index) {
+    for slot in build_tab_bar_slots(&slot_inputs) {
+        if let Some(start_index) = slot.first_rendered_index()
+            && ghost_insertion_index == Some(start_index)
+        {
             groups.add_child(render_ghost_vertical_tab_slot(workspace, app));
         }
-        let tab = &workspace.tabs[tab_index];
-        match tab.group_id.and_then(|gid| {
-            workspace
-                .tab_groups
-                .get(&gid)
-                .map(|group| (gid, group.clone()))
-        }) {
-            Some((group_id, group)) => {
-                // Members are a contiguous subslice of `visible_tabs`.
-                let run_len = visible_tabs[i..]
-                    .iter()
-                    .take_while(|(idx, _)| workspace.tabs[*idx].group_id == Some(group_id))
-                    .count();
+        match slot {
+            TabBarSlot::Group {
+                group_id,
+                member_indices,
+            } => {
+                let run_len = member_indices.len();
+                // Present: the projection above kept only live groups.
+                let group = workspace.tab_groups[&group_id].clone();
                 let members = &visible_tabs[i..i + run_len];
 
                 // Repo mode: when this block is nested under the repo's row in
@@ -2029,7 +2049,8 @@ pub(super) fn render_groups(
                 ));
                 i += run_len;
             }
-            None => {
+            TabBarSlot::Single { index: tab_index } => {
+                let (_, ref filtered_pane_ids) = visible_tabs[i];
                 let insert_before_index = tab_index;
                 // Gaps between tabs are covered by the next tab's before-indicator,
                 // and the area after the last tab by the trailing indicator below,
@@ -2039,7 +2060,7 @@ pub(super) fn render_groups(
                     state,
                     workspace,
                     tab_index,
-                    tab,
+                    &workspace.tabs[tab_index],
                     filtered_pane_ids.as_deref(),
                     TabGroupDragState {
                         is_any_pane_dragging,
