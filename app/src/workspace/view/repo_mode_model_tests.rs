@@ -1,6 +1,6 @@
 use chrono::{Duration, Utc};
 use repo_mode::{RemoteProbeOutcome, RemoteProbeState, format_remote_key};
-use warpui::App;
+use warpui::{App, TypedActionView as _};
 
 use super::*;
 use crate::persistence::model::Project;
@@ -245,6 +245,91 @@ fn test_bound_tab_is_filed_under_its_binding_not_another_entry() {
                 by_entry
                     .get(&other_root)
                     .is_none_or(|members| !members.contains(&bound_index)),
+            );
+        });
+    });
+}
+
+/// NA3: activating a tab outside the selected repo collapses the selection to
+/// "All", whichever route the activation came in on.
+///
+/// The sync used to hang off the `FocusPane` action alone, so a keyboard tab
+/// switch left the filtered strip showing a repo whose tabs did not include the
+/// active one. It now lives in `activate_tab_internal`, which every activation
+/// route funnels through.
+#[test]
+fn test_keyboard_activation_outside_the_selection_falls_back_to_all() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let first = tempfile::tempdir().expect("tempdir");
+    let second = tempfile::tempdir().expect("tempdir");
+    let first_root = dunce::canonicalize(first.path()).expect("canonicalize");
+    let second_root = dunce::canonicalize(second.path()).expect("canonicalize");
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.select_repo_mode_entry(&first_root, ctx);
+            let first_tab = workspace.active_tab_index;
+            workspace.select_repo_mode_entry(&second_root, ctx);
+            assert_eq!(
+                workspace.selected_repo_root.as_deref(),
+                Some(second_root.to_string_lossy().as_ref()),
+                "selecting the second entry should stick"
+            );
+            assert_ne!(workspace.active_tab_index, first_tab);
+
+            // Activate-by-number onto the first repo's tab: a different repo,
+            // so the selection cannot survive.
+            workspace.handle_action(&WorkspaceAction::ActivateTabByNumber(first_tab + 1), ctx);
+            assert_eq!(workspace.active_tab_index, first_tab);
+            assert_eq!(
+                workspace.selected_repo_root, None,
+                "activating a tab outside the selection must fall back to All"
+            );
+
+            // Same for next-tab cycling, which walks the *unfiltered* tab list
+            // and so always lands outside a single-tab selection.
+            workspace.select_repo_mode_entry(&second_root, ctx);
+            assert!(workspace.selected_repo_root.is_some());
+            let before = workspace.active_tab_index;
+            workspace.handle_action(&WorkspaceAction::ActivateNextTab, ctx);
+            assert_ne!(
+                workspace.active_tab_index, before,
+                "next-tab ignores repo filtering, so it must have moved"
+            );
+            assert_eq!(
+                workspace.selected_repo_root, None,
+                "cycling off the selected repo's tab must fall back to All"
+            );
+        });
+    });
+}
+
+/// NA3, close-tab half: the post-close activation fallback goes through the
+/// same chokepoint, so closing a repo's last visible tab does not leave the
+/// strip selected on a repo with nothing in it.
+#[test]
+fn test_closing_the_selected_repos_tab_falls_back_to_all() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dunce::canonicalize(dir.path()).expect("canonicalize");
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.select_repo_mode_entry(&root, ctx);
+            let repo_tab = workspace.active_tab_index;
+            assert!(workspace.tab_count() > 1, "a loose tab remains to fall to");
+
+            workspace.close_tab(repo_tab, true, false, ctx);
+
+            assert_eq!(
+                workspace.selected_repo_root, None,
+                "closing the selected repo's only tab must fall back to All"
             );
         });
     });

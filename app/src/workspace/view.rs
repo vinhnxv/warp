@@ -5562,6 +5562,16 @@ impl Workspace {
             }
 
             self.set_active_tab_index(index, ctx);
+            // Repo mode: the filtered tab strip must always contain the active
+            // tab, so activating a tab outside the selected repo collapses the
+            // selection to "All". This lives here rather than at each caller
+            // because every activation route funnels through this function —
+            // keyboard next/previous, activate-by-number, `focus_pane`, the
+            // post-close fallback, and the sidebar's own MRU activation. It
+            // used to be attached to the `FocusPane` action alone, which meant
+            // switching tabs by keyboard could leave the strip empty of its
+            // own active tab.
+            self.sync_repo_mode_selection_to_active_tab(ctx);
             self.focus_active_tab(ctx);
             self.update_window_title(ctx);
         }
@@ -13116,14 +13126,18 @@ impl Workspace {
         self.tabs.insert(insert_idx, TabData::new(new_pane_group));
         self.tab_mru_order
             .push(self.tabs[insert_idx].pane_group.id());
-        self.activate_tab_internal(insert_idx, ctx);
 
-        // Inherit the active tab's group membership (skipped for top-level tabs).
+        // Inherit the active tab's group membership (skipped for top-level
+        // tabs). Written *before* activating: activation reconciles the
+        // repo-mode selection against the active tab, and a tab bound to no
+        // group belongs to no repo, so binding afterwards would momentarily
+        // present the new tab as loose and collapse a repo selection that it
+        // actually satisfies.
         if let Some(group_id) = inherited_group_id {
-            let new_idx = self.active_tab_index;
-            if let Some(new_tab) = self.tabs.get_mut(new_idx) {
-                new_tab.group_id = Some(group_id);
-            }
+            self.tabs[insert_idx].group_id = Some(group_id);
+        }
+        self.activate_tab_internal(insert_idx, ctx);
+        if let Some(group_id) = inherited_group_id {
             self.expand_tab_group(group_id, ctx);
         }
 
@@ -25712,8 +25726,9 @@ impl TypedActionView for Workspace {
                 }
             }
             FocusPane(locator) => {
+                // `focus_pane` routes through `activate_tab_internal`, which
+                // owns the repo-mode selection sync for every activation.
                 self.focus_pane(*locator, ctx);
-                self.sync_repo_mode_selection_to_active_tab(ctx);
             }
             StartNewConversation { terminal_view_id } => {
                 Self::set_pending_query_state_for_terminal_view(

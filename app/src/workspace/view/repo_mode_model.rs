@@ -612,6 +612,13 @@ impl Workspace {
         } else {
             dirs::home_dir()
         };
+        // The new tab becomes active before it can be bound below, and every
+        // activation reconciles the repo selection against the active tab
+        // (`sync_repo_mode_selection_to_active_tab`). An unbound tab belongs to
+        // no entry's visible set, so that reconciliation would collapse the very
+        // selection this call is servicing. Restore it once the binding lands,
+        // at which point the tab really is a member and the invariant holds.
+        let selection = self.selected_repo_root.clone();
         self.add_tab_with_pane_layout(
             PanesLayout::SingleTerminal(Box::new(NewTerminalOptions {
                 initial_directory,
@@ -625,6 +632,7 @@ impl Workspace {
         if let Some(tab) = self.tabs.get_mut(self.active_tab_index) {
             tab.group_id = Some(group_id);
         }
+        self.selected_repo_root = selection;
     }
 
     /// Open a tab for a remote entry: connect to the host, then land in the
