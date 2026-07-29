@@ -1027,6 +1027,12 @@ pub(super) enum TabBarSlot {
 
 impl TabBarSlot {
     /// The tab indices this slot renders, in render order.
+    ///
+    /// The one question both slot shapes can answer uniformly, which makes it
+    /// the observable the slot tests assert on: "which tabs reach the screen,
+    /// and how many times". Production code destructures the variant it is
+    /// already in, so this exists for tests only.
+    #[cfg(test)]
     fn rendered_member_indices(&self) -> Vec<usize> {
         match self {
             Self::Single { index } => vec![*index],
@@ -7775,29 +7781,36 @@ impl Workspace {
         self.close_tabs_direction(last, TabMovement::Right, false, ctx);
     }
 
-    /// Moves the contiguous run of tabs belonging to `group_id` so its first
-    /// member ends up at `target`, an index into the current tab list. Uses
-    /// `Vec::drain` + `Vec::splice` to preserve member order, and re-derives
-    /// the active tab index across the move.
+    /// Moves the tabs belonging to `group_id` so the first of them ends up at
+    /// `target`, an index into the current tab list. Preserves member order and
+    /// re-derives the active tab index across the move.
+    ///
+    /// Moves the group's *real* member indices rather than draining the span
+    /// `first..=last`. When a non-member has ended up inside that span (nothing
+    /// enforces contiguity — see `group_member_index_range`), draining the span
+    /// would silently carry it along and hand it the group's identity in every
+    /// later read. Lifting only the members leaves the intruder where it is and
+    /// makes the group contiguous again as a side effect.
     fn move_group_block(
         &mut self,
         group_id: TabGroupId,
         target: usize,
         ctx: &mut ViewContext<Self>,
     ) {
-        let Some((first, last)) = group_member_index_range(&self.tabs, group_id) else {
+        let members: Vec<usize> = group_member_indices(&self.tabs, group_id).collect();
+        let (Some(&first), Some(&last)) = (members.first(), members.last()) else {
             return;
         };
-        // `target` indexes the current list. Draining the group removes
-        // `block_size` tabs ahead of any later index, so shift a past-the-group
-        // target left to land in the right spot after reinsertion.
-        let block_size = last - first + 1;
-        let insert_at = if target > last {
-            target - block_size
-        } else {
-            target
-        };
-        if insert_at == first {
+        // `target` indexes the current list. Lifting the members removes every
+        // one of them that sits before `target`, so shift the target left by
+        // exactly that count. This is the general form of the span arithmetic:
+        // for a contiguous run it is `block_size` when the target is past the
+        // group and `0` when it is before, and for a target *inside* the span
+        // it resolves to `first`, which the guard below turns into a no-op
+        // (the old two-branch form computed an out-of-range splice point there).
+        let lifted_before_target = members.iter().filter(|&&index| index < target).count();
+        let insert_at = target - lifted_before_target;
+        if insert_at == first && members.len() == last - first + 1 {
             return;
         }
 
@@ -7806,8 +7819,15 @@ impl Workspace {
             .get(self.active_tab_index)
             .map(|tab| tab.pane_group.id());
 
-        let drained: Vec<TabData> = self.tabs.drain(first..=last).collect();
-        self.tabs.splice(insert_at..insert_at, drained);
+        // Remove back to front so each earlier index stays valid, then restore
+        // ascending order before reinserting.
+        let mut lifted: Vec<TabData> = members
+            .iter()
+            .rev()
+            .map(|&index| self.tabs.remove(index))
+            .collect();
+        lifted.reverse();
+        self.tabs.splice(insert_at..insert_at, lifted);
 
         if let Some(active_id) = active_pane_group_id
             && let Some(new_idx) = self
@@ -7819,6 +7839,23 @@ impl Workspace {
         }
 
         ctx.notify();
+    }
+
+    /// Returns `true` when swapping the tabs at `a` and `b` would leave some
+    /// group's members non-contiguous where they are contiguous now.
+    ///
+    /// Compares before against after rather than just checking the result: the
+    /// non-contiguous state is reachable through other paths, and refusing
+    /// every reorder for as long as it holds would wedge dragging entirely.
+    /// Only a swap that is itself the cause is refused.
+    fn swap_would_break_group_contiguity(&self, a: usize, b: usize) -> bool {
+        let before: Vec<Option<TabGroupId>> = self.tabs.iter().map(|tab| tab.group_id).collect();
+        if a >= before.len() || b >= before.len() {
+            return false;
+        }
+        let mut after = before.clone();
+        after.swap(a, b);
+        !non_contiguous_groups(&after).is_subset(&non_contiguous_groups(&before))
     }
 
     /// Flips `tab_index`'s group membership. Callers are responsible for
@@ -28701,6 +28738,16 @@ impl Workspace {
                         {
                             return;
                         }
+                        // Skipping group reassignment (above) means the bare
+                        // swap can drop a tab into the middle of a group's
+                        // span, or lift a member out of its own, leaving that
+                        // group non-contiguous — a state every consumer of
+                        // `group_member_index_range` then mis-reads as
+                        // membership. Refuse the reorder instead; the
+                        // placeholder just doesn't travel that far.
+                        if self.swap_would_break_group_contiguity(new_index, current_index) {
+                            return;
+                        }
                         self.tabs.swap(new_index, current_index);
                         if current_index == self.active_tab_index {
                             self.set_active_tab_index(new_index, ctx);
@@ -29609,15 +29656,57 @@ fn group_member_indices(
         .map(|(idx, _)| idx)
 }
 
-/// Returns the `(first, last)` index range for the contiguous run of tabs
-/// in `tabs` that belong to `group_id`, or `None` if the group has no members.
-/// The run is assumed to be contiguous (the workspace enforces this invariant);
-/// only the earliest and latest matching indices are returned.
+/// Returns the `(first, last)` index range spanning the tabs in `tabs` that
+/// belong to `group_id`, or `None` if the group has no members.
+///
+/// The run is *assumed* contiguous — nothing in the workspace enforces that.
+/// `assign_tab_to_group` documents positioning as the caller's job, and several
+/// paths (a bare `tabs.swap`, a reorder that hops a group, a close that removes
+/// a tab from the middle of one) can leave a non-member inside the span. When
+/// that happens the span silently covers tabs the group does not own, and every
+/// consumer here reads it as membership. Report it so the state is visible in
+/// telemetry rather than only in whatever renders wrong.
+///
+/// Deliberately *not* a `debug_assert`: this is reachable through ordinary use,
+/// and with this many call sites (including per-frame render paths) an assert
+/// would abort debug builds on a tab click. Callers that must not absorb a
+/// non-member should use `group_member_indices` and work from real indices.
 fn group_member_index_range(tabs: &[TabData], group_id: TabGroupId) -> Option<(usize, usize)> {
     let mut members = group_member_indices(tabs, group_id);
     let first = members.next()?;
     let last = members.last().unwrap_or(first);
+
+    let span_len = last - first + 1;
+    let member_count = group_member_indices(tabs, group_id).count();
+    if member_count != span_len {
+        // Throttled: this is called from render paths, so `EveryTime` would
+        // log at frame rate for as long as the state holds.
+        report_error!(
+            anyhow::anyhow!(
+                "tab group is not contiguous: {member_count} members span {span_len} indices"
+            ),
+            ReportErrorLogMode::OncePerRun
+        );
+    }
+
     Some((first, last))
+}
+
+/// Returns every group id whose members are not one contiguous run in
+/// `group_ids`, an ordered projection of `Workspace::tabs`.
+fn non_contiguous_groups(group_ids: &[Option<TabGroupId>]) -> HashSet<TabGroupId> {
+    let mut last_seen: HashMap<TabGroupId, usize> = HashMap::new();
+    let mut broken = HashSet::new();
+    for (index, group_id) in group_ids.iter().enumerate() {
+        let Some(group_id) = *group_id else { continue };
+        if let Some(&previous) = last_seen.get(&group_id)
+            && previous + 1 != index
+        {
+            broken.insert(group_id);
+        }
+        last_seen.insert(group_id, index);
+    }
+    broken
 }
 
 /// Collapses an ordered list of `(tab index, effective group id)` pairs into

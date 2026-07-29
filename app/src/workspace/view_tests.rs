@@ -4926,3 +4926,213 @@ fn test_tab_bar_slots_do_not_merge_runs_across_a_visible_loose_tab() {
 
     assert_eq!(slots.len(), 3, "group, loose, group — not one merged group");
 }
+
+/// Returns the ascending indices of `group_id`'s members in `workspace.tabs`.
+fn group_members(workspace: &Workspace, group_id: TabGroupId) -> Vec<usize> {
+    workspace
+        .tabs
+        .iter()
+        .enumerate()
+        .filter(|(_, tab)| tab.group_id == Some(group_id))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Builds a group whose index span covers a tab it does not own — a member, then
+/// an ungrouped tab, then another member. Nothing in the workspace enforces
+/// contiguity, so this is reachable through ordinary use; these tests pin what
+/// the consumers do when it happens.
+///
+/// Returns the group id and the ejected tab's pane group id, which survives
+/// reordering while its index does not.
+fn setup_group_with_intruding_tab(
+    workspace: &mut Workspace,
+    ctx: &mut ViewContext<Workspace>,
+) -> (TabGroupId, EntityId) {
+    workspace.handle_action(
+        &WorkspaceAction::SelectNewSessionMenuItem(NewSessionMenuItem::CreateNewTabGroup),
+        ctx,
+    );
+    let group_id = workspace.tabs[workspace.active_tab_index()]
+        .group_id
+        .expect("new tab group should hold the active tab");
+
+    // Both new tabs inherit the active tab's group, giving three members.
+    workspace.add_terminal_tab(false, ctx);
+    workspace.add_terminal_tab(false, ctx);
+    let members = group_members(workspace, group_id);
+    assert_eq!(members.len(), 3, "expected three grouped tabs");
+
+    // Drop the middle member out of the group without moving it, which is
+    // exactly what `assign_tab_to_group` documents as the caller's problem.
+    let intruder_index = members[1];
+    workspace.assign_tab_to_group(intruder_index, None, ctx);
+    let intruder_id = workspace.tabs[intruder_index].pane_group.id();
+
+    let members = group_members(workspace, group_id);
+    assert_eq!(members.len(), 2);
+    assert!(
+        members[1] > members[0] + 1,
+        "expected a group whose span covers a non-member, got {members:?}"
+    );
+
+    (group_id, intruder_id)
+}
+
+#[test]
+fn test_move_group_block_leaves_an_intruding_non_member_behind() {
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let (group_id, intruder_id) = setup_group_with_intruding_tab(workspace, ctx);
+
+            // Move the group to the end of the tab list.
+            workspace.move_group_block(group_id, workspace.tabs.len(), ctx);
+
+            let intruder_index = workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.pane_group.id() == intruder_id)
+                .expect("the ungrouped tab should still exist");
+            assert_eq!(
+                workspace.tabs[intruder_index].group_id, None,
+                "moving the group must not hand its identity to a tab it never owned"
+            );
+
+            let members = group_members(workspace, group_id);
+            assert_eq!(members.len(), 2, "the group still has its two members");
+            assert_eq!(
+                members[1],
+                members[0] + 1,
+                "lifting only the real members leaves them adjacent, got {members:?}"
+            );
+            assert!(
+                !members.contains(&intruder_index),
+                "the intruder must not be inside the moved block"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_swap_refused_when_it_would_split_a_group() {
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::SelectNewSessionMenuItem(NewSessionMenuItem::CreateNewTabGroup),
+                ctx,
+            );
+            let group_id = workspace.tabs[workspace.active_tab_index()]
+                .group_id
+                .expect("new tab group should hold the active tab");
+            workspace.add_terminal_tab(false, ctx);
+            workspace.add_terminal_tab(false, ctx);
+            // `[T0(G), T1(G), T2(none)]` — a contiguous group plus a loose tab.
+            workspace.assign_tab_to_group(2, None, ctx);
+            assert_eq!(workspace.tabs[2].group_id, None);
+            assert_eq!(workspace.tabs[0].group_id, Some(group_id));
+
+            assert!(
+                workspace.swap_would_break_group_contiguity(1, 2),
+                "swapping the loose tab into the middle of the group splits it"
+            );
+            assert!(
+                !workspace.swap_would_break_group_contiguity(0, 1),
+                "swapping two members with each other keeps the run contiguous"
+            );
+            assert!(
+                !workspace.swap_would_break_group_contiguity(1, 1),
+                "a self-swap changes nothing"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_swap_allowed_when_a_group_is_already_split() {
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let (group_id, intruder_id) = setup_group_with_intruding_tab(workspace, ctx);
+            let intruder_index = workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.pane_group.id() == intruder_id)
+                .expect("the ejected tab should still exist");
+            // Some other ungrouped tab, outside the group's span.
+            let outsider_index = (0..workspace.tabs.len())
+                .find(|index| workspace.tabs[*index].group_id.is_none() && *index != intruder_index)
+                .expect("the workspace's original tab is ungrouped");
+
+            // Swapping the two ungrouped tabs moves no member, so the group is
+            // still split afterwards.
+            let mut after: Vec<Option<TabGroupId>> =
+                workspace.tabs.iter().map(|tab| tab.group_id).collect();
+            after.swap(intruder_index, outsider_index);
+            assert!(
+                non_contiguous_groups(&after).contains(&group_id),
+                "sanity: this swap leaves the group non-contiguous"
+            );
+
+            // So a guard that only asked "is the result broken?" would refuse
+            // it and wedge dragging for as long as the state holds. Comparing
+            // before against after lets it through.
+            assert!(
+                !workspace.swap_would_break_group_contiguity(intruder_index, outsider_index),
+                "an already non-contiguous group must not block every reorder"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_non_contiguous_group_does_not_panic_in_range_or_render() {
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let (group_id, _) = setup_group_with_intruding_tab(workspace, ctx);
+            let members = group_members(workspace, group_id);
+
+            // Regression guard for the report-versus-assert decision: this
+            // state is reachable, so the accessor reports it to telemetry and
+            // returns the span. It must not abort a debug build. This test
+            // fails if someone reintroduces a hard assert here.
+            assert_eq!(
+                group_member_index_range(&workspace.tabs, group_id),
+                Some((members[0], members[1])),
+                "the span still covers the whole run, intruder included"
+            );
+
+            // Same for the render path — the slots must be buildable, and the
+            // intruder between the members must not cost either of them a
+            // render.
+            let slots = workspace.tab_bar_slots(ctx);
+            let rendered: Vec<usize> = slots
+                .iter()
+                .flat_map(|slot| slot.rendered_member_indices())
+                .collect();
+            assert_eq!(
+                rendered,
+                (0..workspace.tabs.len()).collect::<Vec<_>>(),
+                "every tab renders exactly once even while the group is split"
+            );
+        });
+    });
+}
