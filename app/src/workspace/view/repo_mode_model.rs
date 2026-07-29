@@ -18,6 +18,7 @@ use repo_mode::{
     parse_probe_output, parse_remote_key, remote_cd_command, remote_probe_args,
     remote_probe_script, remote_ssh_command,
 };
+use warp_errors::report_error;
 use warpui::{AppContext, SingletonEntity, UpdateView, ViewContext, ViewHandle};
 use warpui_core::r#async::FutureExt as _;
 
@@ -541,12 +542,32 @@ impl Workspace {
             .into_iter()
             .map(|e| e.path)
             .collect();
-        let (mut by_entry, _) = self.repo_mode_tab_partition(&entry_paths, ctx);
+        let (mut by_entry, _) = self.repo_mode_tab_partition(&entry_paths);
         let members = by_entry.remove(&path_buf).unwrap_or_default();
         if members.is_empty() {
-            match path_buf.to_str().and_then(parse_remote_key) {
-                Some(target) => self.open_remote_repo_mode_tab(&path_buf, &target, ctx),
-                None => self.create_repo_mode_group_with_tab(&path_buf, ctx),
+            // Defense in depth. Attribution is by bound root, so a group bound
+            // to this entry cannot report zero members here — the partition
+            // reads the same binding this reads. Under the old cwd-based
+            // attribution it could, and this branch then spawned a second
+            // terminal for a repo that already had one. If a future
+            // attribution change reintroduces that gap, activate the group's
+            // real tab and report it rather than growing a redundant terminal.
+            let bound = self.repo_mode_bound_group_tab_indices(&path_buf);
+            if let Some(index) = self.mru_first_among(&bound) {
+                report_error!(
+                    anyhow::anyhow!(
+                        "repo mode: display partition reported no tabs for a repo whose bound \
+                         group has {} — attribution and binding have diverged",
+                        bound.len()
+                    ),
+                    ReportErrorLogMode::OncePerRun
+                );
+                self.activate_tab(index, ctx);
+            } else {
+                match path_buf.to_str().and_then(parse_remote_key) {
+                    Some(target) => self.open_remote_repo_mode_tab(&path_buf, &target, ctx),
+                    None => self.create_repo_mode_group_with_tab(&path_buf, ctx),
+                }
             }
         } else if !members.contains(&self.active_tab_index) {
             if let Some(index) = self.mru_first_among(&members) {
@@ -842,19 +863,19 @@ impl Workspace {
     }
 
     /// Partition of tabs across registry entries for display. Only tabs bound
-    /// to a repo group participate: a bound tab belongs to the entry whose
-    /// path is the deepest ancestor of its focused terminal's local cwd, so a
-    /// terminal that cd's between repos follows reality; while its cwd is
-    /// unknown (sessions still bootstrapping, or a tab with no terminal at
-    /// all) or outside every entry, the bound group's repo root keeps it under
-    /// its own repo. Tabs with no repo-bound group always stay loose — even
-    /// when their cwd sits inside a registered entry — so registering a new
-    /// repository never absorbs pre-existing "Other tabs". Group membership
-    /// itself is not mutated.
+    /// to a repo group participate, and each belongs to the entry its group is
+    /// bound to — see `repo_mode_bound_tab_owner` for why binding rather than
+    /// live cwd. A bound root that has left the registry drops its tabs loose.
+    /// Tabs with no repo-bound group always stay loose — even when their cwd
+    /// sits inside a registered entry — so registering a new repository never
+    /// absorbs pre-existing "Other tabs". Group membership itself is not
+    /// mutated.
+    ///
+    /// Reads only `tabs` and `tab_groups`, so it touches no terminal state and
+    /// is safe to call from a render path.
     pub(super) fn repo_mode_tab_partition(
         &self,
         entry_paths: &[PathBuf],
-        app: &AppContext,
     ) -> (HashMap<PathBuf, Vec<usize>>, Vec<usize>) {
         let mut by_entry: HashMap<PathBuf, Vec<usize>> = HashMap::new();
         let mut loose = Vec::new();
@@ -869,28 +890,36 @@ impl Workspace {
                 loose.push(index);
                 continue;
             };
-            let pane_group = tab.pane_group.as_ref(app);
-            // Use the canonicalized pwd: entry_paths are dunce-canonicalized,
-            // so comparing against the raw shell cwd (`pwd_if_local`) would miss
-            // matches whenever they differ (macOS /tmp -> /private/tmp, a repo
-            // under a symlinked dir, case-insensitive FS), misplacing the tab
-            // under the fallback root.
-            let cwd = pane_group
-                .active_session_view(app)
-                .and_then(|tv| tv.as_ref(app).canonical_session_pwd_if_local(app))
-                .or_else(|| {
-                    pane_group
-                        .terminal_views(app)
-                        .iter()
-                        .find_map(|tv| tv.as_ref(app).canonical_session_pwd_if_local(app))
-                })
-                .map(PathBuf::from);
-            match repo_mode_bound_tab_owner(&bound_root, cwd.as_deref(), entry_paths) {
+            match repo_mode_bound_tab_owner(&bound_root, entry_paths) {
                 Some(path) => by_entry.entry(path).or_default().push(index),
                 None => loose.push(index),
             }
         }
         (by_entry, loose)
+    }
+
+    /// Tab indices in the group bound to `root`, in tab order; empty when no
+    /// group is bound to it.
+    ///
+    /// Reads group membership directly rather than going through the display
+    /// partition, which is what makes it usable as a backstop *for* that
+    /// partition.
+    pub(super) fn repo_mode_bound_group_tab_indices(&self, root: &Path) -> Vec<usize> {
+        let root = root.to_string_lossy();
+        let Some(group_id) = self
+            .tab_groups
+            .values()
+            .find(|g| g.repo_root.as_deref() == Some(root.as_ref()))
+            .map(|g| g.id)
+        else {
+            return Vec::new();
+        };
+        self.tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| tab.group_id == Some(group_id))
+            .map(|(index, _)| index)
+            .collect()
     }
 
     /// Bound tab-group id for the current selection, if any.
@@ -921,7 +950,7 @@ impl Workspace {
         if !entry_paths.iter().any(|p| p == &selected) {
             return None;
         }
-        let (mut by_entry, _) = self.repo_mode_tab_partition(&entry_paths, app);
+        let (mut by_entry, _) = self.repo_mode_tab_partition(&entry_paths);
         Some(by_entry.remove(&selected).unwrap_or_default())
     }
 }
@@ -1108,29 +1137,24 @@ fn registry_key_path(path: &Path, operation: &str) -> PathBuf {
     })
 }
 
-/// Owning entry for a repo-bound tab: the deepest entry ancestor of `cwd` when
-/// one matches, otherwise the bound root itself while it is still registered.
-/// `None` means the tab lands loose (bound root removed from the registry and
-/// cwd matching no entry). Loose tabs never reach this function — they stay
-/// under "Other tabs" unconditionally.
-fn repo_mode_bound_tab_owner(
-    bound_root: &Path,
-    cwd: Option<&Path>,
-    entry_paths: &[PathBuf],
-) -> Option<PathBuf> {
-    cwd.and_then(|cwd| {
-        entry_paths
-            .iter()
-            .filter(|p| cwd.starts_with(p))
-            .max_by_key(|p| p.as_os_str().len())
-            .cloned()
-    })
-    .or_else(|| {
-        entry_paths
-            .iter()
-            .find(|p| p.as_path() == bound_root)
-            .cloned()
-    })
+/// Owning entry for a repo-bound tab: its bound root, while that root is still
+/// registered. `None` means the tab lands loose because its bound root left the
+/// registry. Loose tabs never reach this function — they stay under "Other
+/// tabs" unconditionally.
+///
+/// Attribution is by binding, deliberately *not* by the terminal's live cwd.
+/// A tab's group binding is what the user established; a cwd is where a shell
+/// happens to be standing. Following the cwd meant a tab that `cd`'d into
+/// another registered repo silently moved out of its own repo's row, and then
+/// selecting that repo found zero tabs and spawned a second terminal for a
+/// repo that already had one. Binding is also stable: it does not change under
+/// the user while sessions bootstrap, and reading it costs no per-frame probe
+/// of every terminal's pwd.
+fn repo_mode_bound_tab_owner(bound_root: &Path, entry_paths: &[PathBuf]) -> Option<PathBuf> {
+    entry_paths
+        .iter()
+        .find(|p| p.as_path() == bound_root)
+        .cloned()
 }
 
 #[cfg(test)]

@@ -136,7 +136,7 @@ pub(super) fn render_repo_tree(
     // Display partition: which repo row each bound tab renders under; loose
     // tabs always land in the "Other tabs" section.
     let entry_paths: Vec<PathBuf> = entries.iter().map(|e| e.path.clone()).collect();
-    let (by_entry, loose) = workspace.repo_mode_tab_partition(&entry_paths, app);
+    let (by_entry, loose) = workspace.repo_mode_tab_partition(&entry_paths);
 
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
