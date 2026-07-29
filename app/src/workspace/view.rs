@@ -1008,15 +1008,43 @@ struct HorizontalTabGroupMouseStates {
 
 /// A unit the horizontal tab bar renders: either a single ungrouped tab or a
 /// contiguous run of same-group tabs collapsed into one group container.
-enum TabBarSlot {
+pub(super) enum TabBarSlot {
     Single {
         index: usize,
     },
     Group {
         group_id: TabGroupId,
-        first_index: usize,
-        run_len: usize,
+        /// The real indices of the members this slot renders, in render order.
+        ///
+        /// Deliberately *not* a start plus a length: the members need not be
+        /// adjacent in `Workspace::tabs`, because group contiguity is an
+        /// emergent property there and nothing enforces it. Reconstructing a
+        /// dense range from a start is what made the horizontal bar render a
+        /// filtered-out tab and drop a visible one. Non-empty by construction.
+        member_indices: Vec<usize>,
     },
+}
+
+impl TabBarSlot {
+    /// The tab indices this slot renders, in render order.
+    fn rendered_member_indices(&self) -> Vec<usize> {
+        match self {
+            Self::Single { index } => vec![*index],
+            Self::Group { member_indices, .. } => member_indices.clone(),
+        }
+    }
+
+    /// The tab index an insertion *before* this slot targets. A group is one
+    /// row, so a drop can only land before or after the whole group.
+    ///
+    /// `None` only for a degenerate empty group slot, which the builder does
+    /// not produce; callers skip such a slot rather than guessing an index.
+    fn first_rendered_index(&self) -> Option<usize> {
+        match self {
+            Self::Single { index } => Some(*index),
+            Self::Group { member_indices, .. } => member_indices.first().copied(),
+        }
+    }
 }
 
 pub struct Workspace {
@@ -20023,8 +20051,7 @@ impl Workspace {
     fn render_horizontal_tab_group(
         &self,
         group: &TabGroup,
-        first_index: usize,
-        run_len: usize,
+        member_indices: &[usize],
         tab_bar_state: TabBarState,
         is_first_in_bar: bool,
         appearance: &Appearance,
@@ -20032,6 +20059,16 @@ impl Workspace {
     ) -> Box<dyn Element> {
         let theme = appearance.theme();
         let is_collapsed = group.collapsed;
+
+        // The members need not be adjacent in `self.tabs`, so the group's front
+        // and back come from the carried indices rather than a start + length.
+        let (Some(&first_index), Some(&last_index)) =
+            (member_indices.first(), member_indices.last())
+        else {
+            // Empty group slot: the builder never produces one and the tab bar
+            // skips it, so render nothing rather than inventing a drop index.
+            return Empty::new().finish();
+        };
 
         let group_color: Option<ColorU> = group
             .color
@@ -20045,9 +20082,8 @@ impl Workspace {
             .or_default()
             .clone();
 
-        let member_range = first_index..first_index + run_len;
         let any_member_active = !self.current_workspace_state.is_agent_management_view_open
-            && member_range.contains(&self.active_tab_index);
+            && member_indices.contains(&self.active_tab_index);
 
         let mut row = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
         // Header fills one slot like a member tab capped at the same 200px as a tab.
@@ -20090,8 +20126,15 @@ impl Workspace {
             // When a group has only one member, suppress that member's per-tab
             // `Draggable` so the parent group's `Draggable` picks up the drag
             // instead, dragging the whole group rather than orphaning it.
+            // Deliberately real membership, not `member_indices.len() == 1`.
+            // This suppresses the member's own `Draggable` so dragging the only
+            // member drags the whole group instead of orphaning it — an
+            // orphaning question about the group's actual contents. A group with
+            // two members, one hidden by the repo filter, must keep the visible
+            // member draggable: dragging it out leaves the hidden member behind,
+            // so nothing is orphaned.
             let is_sole_member = group_has_single_member(&self.tabs, group.id);
-            for idx in member_range {
+            for &idx in member_indices {
                 // Insertion divider before this member when a pane drop lands
                 // here (into the group at `idx`).
                 if show_before_indicator(self.hovered_tab_index, idx, Some(group.id)) {
@@ -20118,11 +20161,7 @@ impl Workspace {
                 row.add_child(member);
             }
             // Divider after the last member (into the group's last slot).
-            if show_before_indicator(
-                self.hovered_tab_index,
-                first_index + run_len,
-                Some(group.id),
-            ) {
+            if show_before_indicator(self.hovered_tab_index, last_index + 1, Some(group.id)) {
                 row.add_child(self.render_tab_hover_indicator(appearance));
             }
         }
@@ -20237,7 +20276,7 @@ impl Workspace {
         let group_flex = if is_collapsed {
             1.0
         } else {
-            1.0 + run_len as f32 + 2.0 * Self::GROUP_EDGE_SPACER_FLEX
+            1.0 + member_indices.len() as f32 + 2.0 * Self::GROUP_EDGE_SPACER_FLEX
         };
         Shrinkable::new(group_flex, positioned_container).finish()
     }
@@ -21184,16 +21223,13 @@ impl Workspace {
             let slots = self.tab_bar_slots(ctx);
 
             // Render each slot in the tab bar, either an individual tab or tab group.
-            for slot in &slots {
-                let start_index = match slot {
-                    TabBarSlot::Single { index } => *index,
-                    TabBarSlot::Group { first_index, .. } => *first_index,
-                };
+            for (slot_position, slot) in slots.iter().enumerate() {
                 // Insert ghost slot before this slot's first tab if the drag
                 // would land here.
-                if ghost
-                    .as_ref()
-                    .is_some_and(|g| g.insertion_index == start_index)
+                if let Some(start_index) = slot.first_rendered_index()
+                    && ghost
+                        .as_ref()
+                        .is_some_and(|g| g.insertion_index == start_index)
                 {
                     tab_bar.add_child(self.render_ghost_tab_slot(appearance, ctx));
                 }
@@ -21201,22 +21237,26 @@ impl Workspace {
                 match slot {
                     TabBarSlot::Group {
                         group_id,
-                        first_index,
-                        run_len,
+                        member_indices,
                     } => {
+                        // Non-empty by construction; skip rather than guess.
+                        let Some(&first_index) = member_indices.first() else {
+                            continue;
+                        };
                         // Ungrouped insertion just before the group; a drop into
                         // the group highlights the group itself instead.
-                        if show_before_indicator(self.hovered_tab_index, *first_index, None) {
+                        if show_before_indicator(self.hovered_tab_index, first_index, None) {
                             tab_bar.add_child(self.render_tab_hover_indicator(appearance));
                         }
                         // Filtered above; the group must exist in `tab_groups`.
                         let group = self.tab_groups[group_id].clone();
                         tab_bar.add_child(self.render_horizontal_tab_group(
                             &group,
-                            *first_index,
-                            *run_len,
+                            member_indices,
                             tab_bar_state,
-                            *first_index == 0,
+                            // First *rendered* slot, not `first_index == 0`: under
+                            // a repo filter the leading tab can sit at any index.
+                            slot_position == 0,
                             appearance,
                             ctx,
                         ));
@@ -28221,46 +28261,28 @@ impl Workspace {
     /// and each contiguous run of same-group tabs becomes one `Group`. Shared by
     /// tab/group rendering and insertion index calculations.
     fn tab_bar_slots(&self, ctx: &AppContext) -> Vec<TabBarSlot> {
+        build_tab_bar_slots(&self.visible_tab_slot_inputs(ctx))
+    }
+
+    /// Projects `self.tabs` into the ordered `(tab index, effective group id)`
+    /// pairs the shared slot builder consumes: repo-mode-filtered, with the
+    /// group id resolved against `GroupedTabs` and the live `tab_groups` map.
+    fn visible_tab_slot_inputs(&self, ctx: &AppContext) -> Vec<(usize, Option<TabGroupId>)> {
         let grouped_tabs_enabled = FeatureFlag::GroupedTabs.is_enabled();
         let visible = self.repo_mode_visible_tab_indices(ctx);
-        let mut slots: Vec<TabBarSlot> = Vec::with_capacity(self.tabs.len());
-        for (idx, tab) in self.tabs.iter().enumerate() {
-            if let Some(ref visible) = visible {
-                if !visible.contains(&idx) {
-                    continue;
-                }
-            }
-            let group_id = if grouped_tabs_enabled {
-                tab.group_id.filter(|gid| self.tab_groups.contains_key(gid))
-            } else {
-                None
-            };
-            match group_id {
-                Some(group_id) => {
-                    if let Some(TabBarSlot::Group {
-                        group_id: last_gid,
-                        run_len,
-                        ..
-                    }) = slots.last_mut()
-                        && *last_gid == group_id
-                    {
-                        // Current tab continues the last group's run.
-                        *run_len += 1;
-                        continue;
-                    }
-                    // We hav reached the last tab in a group.
-                    // Push this as a "Group" slot.
-                    slots.push(TabBarSlot::Group {
-                        group_id,
-                        first_index: idx,
-                        run_len: 1,
-                    });
-                }
-                // This tab is not part of a group. Push a "Single" slot.
-                None => slots.push(TabBarSlot::Single { index: idx }),
-            }
-        }
-        slots
+        self.tabs
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| visible.as_ref().is_none_or(|v| v.contains(idx)))
+            .map(|(idx, tab)| {
+                let group_id = if grouped_tabs_enabled {
+                    tab.group_id.filter(|gid| self.tab_groups.contains_key(gid))
+                } else {
+                    None
+                };
+                (idx, group_id)
+            })
+            .collect()
     }
 
     /// Computes the tab-bar insertion index purely from cursor geometry,
@@ -28325,10 +28347,10 @@ impl Workspace {
                 }
                 TabBarSlot::Group {
                     group_id,
-                    first_index,
-                    ..
+                    ref member_indices,
                 } => {
-                    if let Some(container_rect) = group_container_rect(window_id, group_id, ctx)
+                    if let Some(&first_index) = member_indices.first()
+                        && let Some(container_rect) = group_container_rect(window_id, group_id, ctx)
                         && container_rect.width() > MIN_VISIBLE_TAB_WIDTH
                         && rect_is_within_tab_bar(container_rect, &tab_bar_rects)
                     {
@@ -29596,6 +29618,47 @@ fn group_member_index_range(tabs: &[TabData], group_id: TabGroupId) -> Option<(u
     let first = members.next()?;
     let last = members.last().unwrap_or(first);
     Some((first, last))
+}
+
+/// Collapses an ordered list of `(tab index, effective group id)` pairs into
+/// layout slots: each ungrouped tab is a `Single`, and each run of adjacent
+/// same-group entries becomes one `Group`.
+///
+/// `visible` is already filtered and already resolved — the caller decides
+/// which tabs are on screen and whether a tab's group counts as live. Runs are
+/// therefore computed over what is actually rendered, which is the whole point:
+/// a group whose members are separated in `Workspace::tabs` by a tab the
+/// filter hides still renders every visible member exactly once.
+///
+/// Shared by the horizontal tab bar (`Workspace::tab_bar_slots`) and the
+/// vertical tabs panel (`vertical_tabs::render_groups`) so the two surfaces
+/// cannot disagree about grouping.
+pub(super) fn build_tab_bar_slots(visible: &[(usize, Option<TabGroupId>)]) -> Vec<TabBarSlot> {
+    let mut slots: Vec<TabBarSlot> = Vec::with_capacity(visible.len());
+    for &(idx, group_id) in visible {
+        match group_id {
+            Some(group_id) => {
+                if let Some(TabBarSlot::Group {
+                    group_id: last_gid,
+                    member_indices,
+                }) = slots.last_mut()
+                    && *last_gid == group_id
+                {
+                    // Current tab continues the last group's run. Record its
+                    // real index; it need not be `previous + 1`.
+                    member_indices.push(idx);
+                    continue;
+                }
+                slots.push(TabBarSlot::Group {
+                    group_id,
+                    member_indices: vec![idx],
+                });
+            }
+            // This tab is not part of a group. Push a "Single" slot.
+            None => slots.push(TabBarSlot::Single { index: idx }),
+        }
+    }
+    slots
 }
 
 /// Returns `true` when `group_id` has exactly one member in `tabs`. Shared

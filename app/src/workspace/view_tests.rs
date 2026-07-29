@@ -4842,3 +4842,87 @@ fn test_tools_panel_warp_drive_toggle_updates_available_views() {
         });
     });
 }
+
+// ---------------------------------------------------------------------------
+// Tab-bar slot model (U1)
+//
+// These drive `build_tab_bar_slots` directly. It takes `(tab index, effective
+// group id)` pairs rather than `TabData`, so the grouping logic is testable
+// without an `App`, a `PaneGroup`, or a rendered frame.
+// ---------------------------------------------------------------------------
+
+/// NA1: group G owns the tabs at indices 0 and 2, and index 1 holds a tab the
+/// repo filter hides. The bar must render exactly 0 and 2 — never the hidden
+/// tab at 1.
+#[test]
+fn test_tab_bar_slots_skip_filtered_tab_inside_a_group_run() {
+    let group = TabGroupId::new();
+    // Index 1 is absent: the filter already removed it.
+    let visible = vec![(0, Some(group)), (2, Some(group))];
+
+    let slots = build_tab_bar_slots(&visible);
+
+    assert_eq!(slots.len(), 1, "both members belong to one group slot");
+    assert_eq!(
+        slots[0].rendered_member_indices(),
+        vec![0, 2],
+        "the slot must carry the real member indices, not a dense range from \
+         its first index — a dense range renders the hidden tab at 1 and drops \
+         the visible tab at 2"
+    );
+}
+
+/// A group whose members are non-contiguous in `Workspace::tabs` with nothing
+/// filtered still renders every member exactly once.
+#[test]
+fn test_tab_bar_slots_render_noncontiguous_group_members_exactly_once() {
+    let group = TabGroupId::new();
+    // Contiguity is emergent, not enforced, so a loose tab can sit inside a
+    // group's span.
+    let visible = vec![(0, Some(group)), (1, None), (2, Some(group))];
+
+    let slots = build_tab_bar_slots(&visible);
+
+    let rendered: Vec<usize> = slots
+        .iter()
+        .flat_map(|slot| slot.rendered_member_indices())
+        .collect();
+    assert_eq!(
+        rendered,
+        vec![0, 1, 2],
+        "every visible tab renders exactly once, in order"
+    );
+}
+
+/// Flag-off / unfiltered parity: without a filter, "adjacent while iterating"
+/// and "adjacent in `Workspace::tabs`" coincide, so slot output is the same
+/// shape it was before the slot model changed.
+#[test]
+fn test_tab_bar_slots_unfiltered_grouping_is_unchanged() {
+    let group = TabGroupId::new();
+    let visible = vec![(0, None), (1, Some(group)), (2, Some(group)), (3, None)];
+
+    let slots = build_tab_bar_slots(&visible);
+
+    assert_eq!(slots.len(), 3, "single, group run, single");
+    assert_eq!(slots[0].rendered_member_indices(), vec![0]);
+    assert_eq!(slots[1].rendered_member_indices(), vec![1, 2]);
+    assert_eq!(slots[2].rendered_member_indices(), vec![3]);
+    assert_eq!(
+        slots[1].first_rendered_index(),
+        Some(1),
+        "group's drop target"
+    );
+}
+
+/// Two runs of the same group separated by a visible loose tab stay two slots —
+/// merging them would place the loose tab inside the group's rendered span.
+#[test]
+fn test_tab_bar_slots_do_not_merge_runs_across_a_visible_loose_tab() {
+    let group = TabGroupId::new();
+    let visible = vec![(0, Some(group)), (1, None), (2, Some(group))];
+
+    let slots = build_tab_bar_slots(&visible);
+
+    assert_eq!(slots.len(), 3, "group, loose, group — not one merged group");
+}
