@@ -52,17 +52,26 @@ impl Workspace {
         chosen_shell: Option<&AvailableShell>,
         ctx: &mut ViewContext<Self>,
     ) -> Option<PathBuf> {
-        // R6/KTD8: under an active repo-mode selection, new tabs start at the
-        // entry root rather than inheriting the prior session cwd. Skip a dead
-        // root (deleted since selection) so the shell is not launched at a
-        // missing directory; fall through to the stock resolution instead.
-        if Self::repo_mode_enabled() {
-            if let Some(root) = self.selected_repo_root.as_deref() {
-                let root = PathBuf::from(root);
-                if root.is_dir() {
-                    return Some(root);
-                }
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "local_tty")] {
+                let is_wsl = new_session_shell(chosen_shell, ctx)
+                .wsl_distro()
+                .is_some();
+            } else {
+                let is_wsl = false;
             }
+        }
+
+        // R6/KTD8: under an active repo-mode selection, new tabs start at the
+        // entry root rather than inheriting the prior session cwd.
+        //
+        // Resolved *after* the shell is known, because the root is only usable
+        // by a session that shares this filesystem — see
+        // `repo_mode_startup_directory`. It used to return here before
+        // `chosen_shell` was consulted at all.
+        if let Some(root) = repo_mode_startup_directory(self.selected_repo_root.as_deref(), !is_wsl)
+        {
+            return Some(root);
         }
 
         // Get the Workspace from the window that hosted the previously-active
@@ -94,16 +103,6 @@ impl Workspace {
         let (prev_session_working_directory, prev_session_shell) =
             active_session_info.unwrap_or_default();
 
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "local_tty")] {
-                let is_wsl = new_session_shell(chosen_shell, ctx)
-                .wsl_distro()
-                .is_some();
-            } else {
-                let is_wsl = false;
-            }
-        }
-
         let is_same_system = same_system(prev_session_shell.as_ref(), chosen_shell, ctx);
 
         compute_startup_directory_from_prev_session(
@@ -117,6 +116,30 @@ impl Workspace {
             ctx,
         )
     }
+}
+
+/// The startup directory an active repo-mode selection supplies, if any.
+///
+/// A registry entry root is a path in the **host** filesystem, so it is only a
+/// usable startup directory for a session that shares that filesystem. Handing
+/// `/Users/me/project` or `C:\src\project` to a shell inside a WSL distribution
+/// starts it at a path that does not exist there — or, worse, at a
+/// coincidentally-existing different one. `session_is_on_host` is the caller's
+/// answer to that; this function is otherwise pure so the rule is testable
+/// without a window or a shell registry.
+///
+/// A dead root (deleted since it was selected) yields `None` so the shell is
+/// not launched at a missing directory; the caller falls through to the stock
+/// resolution.
+fn repo_mode_startup_directory(
+    selected_root: Option<&str>,
+    session_is_on_host: bool,
+) -> Option<PathBuf> {
+    if !Workspace::repo_mode_enabled() || !session_is_on_host {
+        return None;
+    }
+    let root = PathBuf::from(selected_root?);
+    root.is_dir().then_some(root)
 }
 
 /// The shell to be used in the new session,
@@ -163,6 +186,10 @@ const fn same_system(
 ) -> bool {
     true
 }
+
+#[cfg(test)]
+#[path = "startup_directory_tests.rs"]
+mod tests;
 
 /// Helper function to compute the actual startup directory for the
 /// new session based on the user's settings.
