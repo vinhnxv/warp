@@ -4180,8 +4180,13 @@ impl Workspace {
                 });
 
                 // Safe now that every restored tab is in place with its own
-                // group membership.
-                self.selected_repo_root = restored_repo_root;
+                // group membership. Gated on the flag, matching the pruned-group
+                // fallback below: with repo mode off nothing ever clears this,
+                // so a persisted selection would sit in a field the rest of the
+                // build does not maintain.
+                if Self::repo_mode_enabled() {
+                    self.selected_repo_root = restored_repo_root;
+                }
 
                 if self.tab_count() == 0 {
                     if self.should_trigger_get_started_onboarding(ctx) {
