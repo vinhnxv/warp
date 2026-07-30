@@ -164,6 +164,22 @@ pub(super) fn render_repo_tree(
     let entry_paths: Vec<PathBuf> = entries.iter().map(|e| e.path.clone()).collect();
     let (by_entry, loose) = workspace.repo_mode_tab_partition(&entry_paths);
 
+    // Badges come from terminals whose *local* repo path matches an entry, so a
+    // remote or dead entry never has any and is left out of the sweep. One sweep
+    // for the whole sidebar: asking per row walked every tab and pane again for
+    // each entry. With both badge settings off nothing reads the result, so the
+    // sweep does not run at all.
+    let badge_paths: Vec<PathBuf> = if show_diff_stats || show_pr_link {
+        entries
+            .iter()
+            .filter(|entry| !entry.is_dead && entry.remote.is_none())
+            .map(|entry| entry.path.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let badges_by_entry = workspace.repo_mode_badges_by_entry(&badge_paths, app);
+
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
@@ -214,13 +230,10 @@ pub(super) fn render_repo_tree(
                 _ => None,
             },
         };
-        // Badges are read from terminals whose *local* repo path matches the
-        // entry, so a remote entry never has any.
-        let mut badges = if entry.is_dead || remote_state.is_some() {
-            RepoModeEntryBadges::default()
-        } else {
-            workspace.repo_mode_entry_badges(&entry.path, app)
-        };
+        let mut badges = badges_by_entry
+            .get(&entry.path)
+            .cloned()
+            .unwrap_or_default();
         if !show_diff_stats {
             badges.diff_stats = None;
         }

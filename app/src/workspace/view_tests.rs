@@ -3929,6 +3929,40 @@ fn test_tab_mru_order() {
     });
 }
 
+/// The sidebar's badge sweep visits tabs most-recently-used first, so a repo
+/// open in two terminals shows the badges of the one the user last touched.
+/// Inverting that sweep from one-pass-per-entry to one pass for the whole
+/// sidebar has to preserve the order, so the ranking is its own function.
+///
+/// `tab_mru_order` is a ranking over `tabs`, not a listing of it: it is keyed by
+/// pane-group id, and a tab can exist before it is ever activated. Every tab
+/// must therefore appear exactly once, ranked tabs first — a tab missing from
+/// the ranking is still a tab the sweep has to visit.
+#[test]
+fn test_tab_indices_in_mru_order_ranks_every_tab_once() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+            workspace.add_terminal_tab(false, ctx);
+
+            workspace.handle_action(&WorkspaceAction::ActivateTab(1), ctx);
+            workspace.handle_action(&WorkspaceAction::ActivateTab(2), ctx);
+            assert_eq!(workspace.tab_indices_in_mru_order(), vec![2, 1, 0]);
+
+            // A tab the MRU list has never heard of still appears, after the
+            // ranked ones, rather than being dropped from the sweep.
+            workspace
+                .tab_mru_order
+                .retain(|id| *id != workspace.tabs[1].pane_group.id());
+            assert_eq!(workspace.tab_indices_in_mru_order(), vec![2, 0, 1]);
+        });
+    });
+}
+
 #[test]
 fn test_restore_keeps_loose_tabs_out_of_the_selected_repo_group() {
     // Regression: with a repo-mode selection persisted, restoring the window

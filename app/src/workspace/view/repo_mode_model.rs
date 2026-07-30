@@ -3,7 +3,7 @@
 //! Selection state lives on [`Workspace`] (`selected_repo_root`). This module
 //! owns list/add/remove/select operations against `ProjectManagementModel`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -837,20 +837,70 @@ impl Workspace {
         ctx.notify();
     }
 
-    /// Diff stats + PR link for a repo row, read from terminals whose current
-    /// git repository IS this entry's path — group membership is irrelevant, so
-    /// a terminal that cd'd into another repo never leaks that repo's status
-    /// onto this row (membership is static per R12, but badges describe the
-    /// repository, not the group). MRU tabs are consulted first so the badges
-    /// track the terminal the user last touched.
-    pub(super) fn repo_mode_entry_badges(
+    /// Diff stats + PR link for every entry in `entry_paths`, read from
+    /// terminals whose current git repository IS that entry's path — group
+    /// membership is irrelevant, so a terminal that cd'd into another repo never
+    /// leaks that repo's status onto the wrong row (membership is static per
+    /// R12, but badges describe the repository, not the group). MRU tabs are
+    /// consulted first so the badges track the terminal the user last touched.
+    ///
+    /// One sweep for all entries, not one sweep per entry. The per-entry form
+    /// walked every tab and every pane looking for one repository, so a sidebar
+    /// with N entries over M panes did N×M terminal reads on every frame — and
+    /// nothing memoized it, because the underlying git state changes on its own
+    /// and a stale badge is worse than a recomputed one. Inverting the loop
+    /// makes it M reads per frame with no cache to go stale.
+    ///
+    /// Entries with no matching terminal are absent from the map; the caller
+    /// reads a default for them.
+    pub(super) fn repo_mode_badges_by_entry(
         &self,
-        entry_path: &Path,
+        entry_paths: &[PathBuf],
         app: &AppContext,
-    ) -> RepoModeEntryBadges {
-        let mut badges = RepoModeEntryBadges::default();
+    ) -> HashMap<PathBuf, RepoModeEntryBadges> {
+        let mut badges: HashMap<PathBuf, RepoModeEntryBadges> = HashMap::new();
+        if entry_paths.is_empty() {
+            return badges;
+        }
+        let wanted: HashSet<&Path> = entry_paths.iter().map(PathBuf::as_path).collect();
 
-        // Tab indices in MRU order, then any tabs missing from the MRU list.
+        for index in self.tab_indices_in_mru_order() {
+            let Some(tab) = self.tabs.get(index) else {
+                continue;
+            };
+            for terminal_view in tab.pane_group.as_ref(app).terminal_views(app) {
+                let terminal_view = terminal_view.as_ref(app);
+                let Some(repo_path) = terminal_view.current_local_repo_path() else {
+                    continue;
+                };
+                if !wanted.contains(repo_path) {
+                    continue;
+                }
+                let entry = badges.entry(repo_path.to_path_buf()).or_default();
+                if entry.diff_stats.is_some() && entry.pull_request_url.is_some() {
+                    // An earlier, more recently used terminal already answered
+                    // for this repository.
+                    continue;
+                }
+                if entry.diff_stats.is_none() {
+                    entry.diff_stats = terminal_view.current_diff_line_changes(app);
+                }
+                if entry.pull_request_url.is_none() {
+                    entry.pull_request_url = terminal_view.current_pull_request_url(app);
+                }
+            }
+        }
+        badges
+    }
+
+    /// Tab indices in most-recently-used order, then any tab the MRU list does
+    /// not mention, in tab order.
+    ///
+    /// The MRU list is keyed by pane-group id and can fall out of step with
+    /// `tabs` — it holds ids for closed tabs, and a tab can exist before it is
+    /// ever activated — so it is a ranking over `tabs`, never a listing of it.
+    /// Every tab appears exactly once.
+    pub(super) fn tab_indices_in_mru_order(&self) -> Vec<usize> {
         let mut indices: Vec<usize> = self
             .tab_mru_order
             .iter()
@@ -865,28 +915,7 @@ impl Workspace {
                 indices.push(index);
             }
         }
-
-        for index in indices {
-            let Some(tab) = self.tabs.get(index) else {
-                continue;
-            };
-            for terminal_view in tab.pane_group.as_ref(app).terminal_views(app) {
-                let terminal_view = terminal_view.as_ref(app);
-                if terminal_view.current_local_repo_path() != Some(entry_path) {
-                    continue;
-                }
-                if badges.diff_stats.is_none() {
-                    badges.diff_stats = terminal_view.current_diff_line_changes(app);
-                }
-                if badges.pull_request_url.is_none() {
-                    badges.pull_request_url = terminal_view.current_pull_request_url(app);
-                }
-                if badges.diff_stats.is_some() && badges.pull_request_url.is_some() {
-                    return badges;
-                }
-            }
-        }
-        badges
+        indices
     }
 
     /// Partition of tabs across registry entries for display. Only tabs bound
