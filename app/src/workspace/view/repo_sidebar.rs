@@ -7,7 +7,7 @@
 //! detached from every repo.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -55,8 +55,34 @@ pub(super) struct RepoSidebarState {
     pub entry_rows: RefCell<HashMap<String, MouseStateHandle>>,
     /// Hover state for the clickable PR badge on each repo row.
     pub pr_badges: RefCell<HashMap<String, MouseStateHandle>>,
+    /// Hover state for the "Remove" button on each dead repo row.
+    pub remove_buttons: RefCell<HashMap<String, MouseStateHandle>>,
     /// Cached branch per repo root, refreshed at most every `BRANCH_CACHE_TTL`.
     pub branch_cache: RefCell<HashMap<String, (Instant, Option<String>)>>,
+}
+
+impl RepoSidebarState {
+    /// Drops per-entry state for keys that are no longer in the registry.
+    ///
+    /// These maps are keyed by registry path and only ever grew: removing an
+    /// entry, or renaming the directory behind one, left its mouse states and
+    /// cached branch behind for the lifetime of the window. The sibling caches
+    /// on `Workspace` (`repo_mode_fs_cache`, `repo_mode_remote_probes`) are
+    /// already pruned this way.
+    fn prune_to(&self, live_keys: &HashSet<String>) {
+        self.entry_rows
+            .borrow_mut()
+            .retain(|key, _| live_keys.contains(key));
+        self.pr_badges
+            .borrow_mut()
+            .retain(|key, _| live_keys.contains(key));
+        self.remove_buttons
+            .borrow_mut()
+            .retain(|key, _| live_keys.contains(key));
+        self.branch_cache
+            .borrow_mut()
+            .retain(|key, _| live_keys.contains(key));
+    }
 }
 
 /// Fixed "Repositories" header (with + Add) rendered above the scrolling tree.
@@ -146,6 +172,10 @@ pub(super) fn render_repo_tree(
         column = column.with_child(render_empty_state(appearance));
     }
 
+    // Registry keys seen this frame, so per-entry state for removed entries can
+    // be dropped rather than accumulating for the window's lifetime.
+    let mut live_keys: HashSet<String> = HashSet::new();
+
     for entry in entries {
         let key = entry.path.to_string_lossy().into_owned();
         let mouse = sidebar
@@ -160,6 +190,13 @@ pub(super) fn render_repo_tree(
             .entry(key.clone())
             .or_default()
             .clone();
+        let remove_mouse = sidebar
+            .remove_buttons
+            .borrow_mut()
+            .entry(key.clone())
+            .or_default()
+            .clone();
+        live_keys.insert(key.clone());
         let is_selected = selected == Some(key.as_str());
         let remote_state = entry
             .remote
@@ -200,6 +237,7 @@ pub(super) fn render_repo_tree(
             badges,
             mouse,
             pr_badge_mouse,
+            remove_mouse,
             is_selected,
             appearance,
         ));
@@ -221,6 +259,8 @@ pub(super) fn render_repo_tree(
             );
         }
     }
+
+    sidebar.prune_to(&live_keys);
 
     // "Other tabs" section: loose tabs (cwd outside every registry entry) stay
     // visible below the tree regardless of selection, as plain terminal rows —
@@ -319,6 +359,27 @@ fn render_empty_state(app_appearance: &Appearance) -> Box<dyn Element> {
     .finish()
 }
 
+/// What a left-click on a repo row's body does, or `None` for no action.
+///
+/// A pure function so the one property that matters can be asserted directly:
+/// **the row body is never destructive.** It used to dispatch
+/// `RemoveRepoModeEntry` for a dead entry, so a single unmodified left-click
+/// anywhere on the row permanently dropped the registry entry — no
+/// confirmation, no undo — and a repo on a briefly-unavailable network mount
+/// reads as dead. Removal now belongs to the row's own "Remove" button.
+fn repo_row_click_action(is_dead: bool, is_selected: bool, path: &Path) -> Option<WorkspaceAction> {
+    if is_dead {
+        // A dead entry cannot be opened, and must not be removed from here.
+        // Right-click still opens the row's context menu.
+        None
+    } else if is_selected {
+        // Clicking the expanded repo collapses it (deselect).
+        Some(WorkspaceAction::SelectRepoModeAll)
+    } else {
+        Some(WorkspaceAction::SelectRepoModeEntry(path.to_path_buf()))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_entry_row(
     entry: RepoModeListEntry,
@@ -327,6 +388,7 @@ fn render_entry_row(
     badges: RepoModeEntryBadges,
     mouse: MouseStateHandle,
     pr_badge_mouse: MouseStateHandle,
+    remove_mouse: MouseStateHandle,
     is_selected: bool,
     app_appearance: &Appearance,
 ) -> Box<dyn Element> {
@@ -343,7 +405,6 @@ fn render_entry_row(
         theme.font_color(theme.background())
     };
     let sub_color = theme.sub_text_color(theme.background());
-    let accent = theme.accent();
 
     let full_path = entry.path.to_string_lossy().into_owned();
     // R10: a remote row names its machine where a local row shows its path,
@@ -381,6 +442,7 @@ fn render_entry_row(
     let display_name = entry.display_name.clone();
     let path = entry.path.clone();
     let path_for_menu = path.clone();
+    let remove_path = path.clone();
 
     Hoverable::new(mouse, move |hover| {
         let background = if is_selected {
@@ -449,11 +511,21 @@ fn render_entry_row(
                 )
                 .finish(),
             );
-            top_row.add_child(
-                Text::new("Remove", font, 10.)
-                    .with_color(accent.into())
-                    .finish(),
-            );
+            // "Remove" is its own hit target. It used to be inert text on a row
+            // whose whole area dispatched `RemoveRepoModeEntry`, so a single
+            // left-click anywhere on the row deleted the registry entry with no
+            // confirmation and no undo. A repo on a briefly-unavailable network
+            // mount reads as dead, which made an ordinary click on a healthy
+            // repository destructive.
+            top_row.add_child(render_header_button(
+                "Remove",
+                remove_mouse.clone(),
+                {
+                    let path = remove_path.clone();
+                    move |_| WorkspaceAction::RemoveRepoModeEntry(path.clone())
+                },
+                app_appearance,
+            ));
         }
 
         let mut lines = Flex::column()
@@ -550,13 +622,8 @@ fn render_entry_row(
         }
     })
     .on_click(move |ctx, _, _| {
-        if is_dead {
-            ctx.dispatch_typed_action(WorkspaceAction::RemoveRepoModeEntry(path.clone()));
-        } else if is_selected {
-            // Clicking the expanded repo collapses it (deselect).
-            ctx.dispatch_typed_action(WorkspaceAction::SelectRepoModeAll);
-        } else {
-            ctx.dispatch_typed_action(WorkspaceAction::SelectRepoModeEntry(path.clone()));
+        if let Some(action) = repo_row_click_action(is_dead, is_selected, &path) {
+            ctx.dispatch_typed_action(action);
         }
     })
     .on_right_click(move |ctx, _, position| {

@@ -106,6 +106,85 @@ fn long_host_label_truncates_but_the_tooltip_keeps_it_whole() {
     assert!(state.tooltip.contains(&full));
 }
 
+/// NA11: the row body is never destructive. A dead row's body dispatches
+/// nothing at all; removal is reachable only through the row's own "Remove"
+/// button, which is wired separately in `render_entry_row`.
+#[test]
+fn a_dead_rows_body_click_never_removes_the_entry() {
+    let path = Path::new("/repo/gone");
+
+    assert!(
+        repo_row_click_action(true, false, path).is_none(),
+        "a left-click on a dead row's body must not remove the registry entry"
+    );
+    assert!(
+        repo_row_click_action(true, true, path).is_none(),
+        "and that holds whether or not the dead row is the selected one"
+    );
+
+    // A live row still selects and deselects.
+    assert!(matches!(
+        repo_row_click_action(false, false, path),
+        Some(WorkspaceAction::SelectRepoModeEntry(ref p)) if p == path
+    ));
+    assert!(matches!(
+        repo_row_click_action(false, true, path),
+        Some(WorkspaceAction::SelectRepoModeAll)
+    ));
+}
+
+/// Per-entry sidebar state is dropped when its entry leaves the registry,
+/// rather than accumulating for the window's lifetime.
+#[test]
+fn removing_an_entry_leaves_no_sidebar_state_behind() {
+    let state = RepoSidebarState::default();
+    for key in ["/repo/a", "/repo/b"] {
+        state
+            .entry_rows
+            .borrow_mut()
+            .insert(key.to_string(), MouseStateHandle::default());
+        state
+            .pr_badges
+            .borrow_mut()
+            .insert(key.to_string(), MouseStateHandle::default());
+        state
+            .remove_buttons
+            .borrow_mut()
+            .insert(key.to_string(), MouseStateHandle::default());
+        state
+            .branch_cache
+            .borrow_mut()
+            .insert(key.to_string(), (Instant::now(), Some("main".to_string())));
+    }
+
+    let live: HashSet<String> = ["/repo/a".to_string()].into_iter().collect();
+    state.prune_to(&live);
+
+    for map_keys in [
+        state
+            .entry_rows
+            .borrow()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        state.pr_badges.borrow().keys().cloned().collect::<Vec<_>>(),
+        state
+            .remove_buttons
+            .borrow()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        state
+            .branch_cache
+            .borrow()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+    ] {
+        assert_eq!(map_keys, vec!["/repo/a".to_string()]);
+    }
+}
+
 #[test]
 fn truncate_label_keeps_both_ends() {
     assert_eq!(truncate_label("short", 10), "short");
