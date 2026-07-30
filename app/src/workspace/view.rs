@@ -28,7 +28,7 @@ mod vertical_tabs;
 #[cfg(target_family = "wasm")]
 mod wasm_view;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 #[cfg(feature = "local_fs")]
@@ -1242,10 +1242,22 @@ pub struct Workspace {
     /// registered path on each render.
     repo_mode_fs_cache:
         RefCell<HashMap<String, (instant::Instant, repo_mode::RepoEntryKind, bool)>>,
-    /// Last SSH probe result per remote entry key. Ephemeral by design (R11):
-    /// remote entries are never polled for liveness, so this starts empty on
-    /// every launch and a restored entry renders pending until it is used.
-    repo_mode_remote_probes: RefCell<HashMap<String, repo_mode::RemoteProbeState>>,
+    /// SSH probe session per remote entry key: the last result, plus the
+    /// generation that owns it. Ephemeral by design (R11): remote entries are
+    /// never polled for liveness, so this starts empty on every launch and a
+    /// restored entry renders pending until it is used.
+    ///
+    /// A key is present here without being in the registry while its first
+    /// probe is in flight — an unverified connection is shown, never persisted.
+    repo_mode_remote_probes: RefCell<HashMap<String, repo_mode_model::RemoteProbeSession>>,
+    /// Monotonic source of probe generations. Global rather than per-key so a
+    /// key that is removed and re-added cannot reuse a generation an in-flight
+    /// probe from the previous entry is still holding.
+    repo_mode_probe_generation: Cell<u64>,
+    /// Remote key the open connection form is probing, if any. Closing the form
+    /// drops that key's pending row — the user walked away from a connection
+    /// that was never verified, so nothing should outlive the form.
+    repo_mode_pending_remote_key: Option<String>,
     /// Anchor for the repo-mode entry context menu / picker menu (reuses
     /// `tab_right_click_menu`), or None when closed.
     show_repo_mode_menu: Option<TabContextMenuAnchor>,
@@ -3657,6 +3669,8 @@ impl Workspace {
             repo_mode_launch_order: RefCell::new(None),
             repo_mode_fs_cache: RefCell::new(HashMap::new()),
             repo_mode_remote_probes: RefCell::new(HashMap::new()),
+            repo_mode_probe_generation: Cell::new(0),
+            repo_mode_pending_remote_key: None,
             show_repo_mode_menu: None,
             vertical_tabs_panel: Default::default(),
             left_panel_view,
@@ -11160,6 +11174,13 @@ impl Workspace {
     }
 
     pub(super) fn close_remote_connection_modal(&mut self, ctx: &mut ViewContext<Self>) {
+        // Cancelling the form abandons the connection it was probing. The
+        // pending row lives only in the probe session, so dropping it here both
+        // removes the row and orphans the probe still running behind it — a
+        // result that lands afterwards has nothing to land on.
+        if let Some(pending) = self.repo_mode_pending_remote_key.take() {
+            self.drop_pending_remote_entry(&pending, ctx);
+        }
         self.remote_connection_modal.close();
         self.remote_connection_modal.view.update(ctx, |modal, ctx| {
             modal.body().update(ctx, |body, ctx| {

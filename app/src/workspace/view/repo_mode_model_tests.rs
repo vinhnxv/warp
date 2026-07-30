@@ -10,6 +10,16 @@ fn register_projects_model(app: &mut App, projects: Vec<Project>) {
     app.add_singleton_model(|ctx| ProjectManagementModel::new(projects, None, ctx));
 }
 
+/// A probe session that has already landed, for rendering tests that care about
+/// the state a row shows and not about which probe wrote it.
+fn settled_session(state: RemoteProbeState) -> RemoteProbeSession {
+    RemoteProbeSession {
+        generation: 1,
+        in_flight: false,
+        state,
+    }
+}
+
 fn registered_paths(ctx: &AppContext) -> Vec<String> {
     let mut paths: Vec<String> = ProjectManagementModel::handle(ctx).read(ctx, |projects, _| {
         projects.all_projects().map(|p| p.path.clone()).collect()
@@ -529,10 +539,10 @@ fn remote_row_is_pending_until_a_probe_resolves() {
 
     probes.insert(
         key.clone(),
-        RemoteProbeState::Resolved {
+        settled_session(RemoteProbeState::Resolved {
             kind: RepoEntryKind::Repo,
             branch: Some("main".to_string()),
-        },
+        }),
     );
     let resolved = remote_list_entry(key.clone(), PathBuf::from(&key), Some(now), now, &probes);
     assert_eq!(resolved.kind, RepoEntryKind::Repo);
@@ -546,9 +556,9 @@ fn remote_row_is_pending_until_a_probe_resolves() {
 
     probes.insert(
         key.clone(),
-        RemoteProbeState::Failed {
+        settled_session(RemoteProbeState::Failed {
             reason: repo_mode::RemoteProbeFailure::Unreachable,
-        },
+        }),
     );
     let failed = remote_list_entry(key.clone(), PathBuf::from(&key), Some(now), now, &probes);
     assert!(!failed.is_dead);
@@ -641,14 +651,12 @@ fn test_probe_success_resolves_the_row_onto_the_expanded_path() {
         register_projects_model(&mut app, projects);
         let workspace = mock_workspace(&mut app);
         workspace.update(&mut app, |workspace, ctx| {
-            workspace
-                .repo_mode_remote_probes
-                .borrow_mut()
-                .insert(pending_key.clone(), RemoteProbeState::Pending);
+            let generation = workspace.restart_remote_probe(&pending_key);
 
             workspace.apply_remote_probe_result(
                 &target,
                 &pending_key,
+                generation,
                 None,
                 Ok(RemoteProbeOutcome::Found {
                     remote_path: "/home/vinh/app".to_string(),
@@ -693,25 +701,22 @@ fn test_probe_failure_at_add_time_registers_nothing() {
         remote_path: "/srv/app".to_string(),
     };
     let key = target.key();
-    let now = Utc::now().naive_utc();
-    let projects = vec![Project {
-        path: key.clone(),
-        added_ts: now,
-        last_opened_ts: Some(now),
-    }];
     App::test((), |mut app| async move {
         initialize_app(&mut app);
-        register_projects_model(&mut app, projects);
+        register_projects_model(&mut app, Vec::new());
         let workspace = mock_workspace(&mut app);
         workspace.update(&mut app, |workspace, ctx| {
-            workspace
-                .repo_mode_remote_probes
-                .borrow_mut()
-                .insert(key.clone(), RemoteProbeState::Pending);
+            let generation = workspace.restart_remote_probe(&key);
+
+            // The pending row is visible while the probe runs, and it is
+            // visible without being registered — the registry means "verified".
+            assert_eq!(workspace.repo_mode_entries(ctx).len(), 1);
+            assert!(registered_paths(ctx).is_empty());
 
             workspace.apply_remote_probe_result(
                 &target,
                 &key,
+                generation,
                 Some(1),
                 Err(repo_mode::RemoteProbeFailure::Unreachable),
                 ctx,
@@ -755,9 +760,13 @@ fn test_reprobe_failure_keeps_the_entry_and_marks_it_unreachable() {
         register_projects_model(&mut app, projects);
         let workspace = mock_workspace(&mut app);
         workspace.update(&mut app, |workspace, ctx| {
+            let generation = workspace
+                .begin_remote_probe(&key)
+                .expect("no probe is running for a freshly restored entry");
             workspace.apply_remote_probe_result(
                 &target,
                 &key,
+                generation,
                 None,
                 Err(repo_mode::RemoteProbeFailure::NeedsFirstHandConnect),
                 ctx,
@@ -1086,4 +1095,398 @@ fn probe_path_env_prefers_the_shell_path_and_replaces_an_empty_one() {
     } else {
         assert_eq!(empty_path, None);
     }
+}
+
+fn probe_target(path: &str) -> RemoteTarget {
+    RemoteTarget {
+        server: "10.0.0.7".to_string(),
+        port: 22,
+        user: "vinh".to_string(),
+        identity: "/k".to_string(),
+        remote_path: path.to_string(),
+    }
+}
+
+/// NA4 (N7/N9): the user submits a connection and closes the form while the
+/// probe is still running. When the probe later succeeds it must register
+/// nothing and close nothing — they walked away from that connection.
+///
+/// The old path wrote the row to the registry on *submit*, so this sequence
+/// left a permanent entry for a host the user cancelled out of, and the late
+/// success then closed whatever form happened to be open.
+#[test]
+fn test_a_probe_that_lands_after_the_form_closed_registers_nothing() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let target = probe_target("/srv/app");
+    let key = target.key();
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let generation = workspace.restart_remote_probe(&key);
+            workspace.repo_mode_pending_remote_key = Some(key.clone());
+            assert_eq!(workspace.repo_mode_entries(ctx).len(), 1);
+
+            // Escape / the close button.
+            workspace.close_remote_connection_modal(ctx);
+            assert!(workspace.repo_mode_entries(ctx).is_empty());
+
+            workspace.apply_remote_probe_result(
+                &target,
+                &key,
+                generation,
+                Some(1),
+                Ok(RemoteProbeOutcome::Found {
+                    remote_path: "/srv/app".to_string(),
+                    kind: RepoEntryKind::Repo,
+                    branch: Some("main".to_string()),
+                }),
+                ctx,
+            );
+
+            assert!(
+                registered_paths(ctx).is_empty(),
+                "a connection the user cancelled must not be persisted"
+            );
+            assert!(workspace.repo_mode_entries(ctx).is_empty());
+            assert!(
+                !workspace
+                    .repo_mode_remote_probes
+                    .borrow()
+                    .contains_key(&key)
+            );
+        });
+    });
+}
+
+/// NA5 (N7/N10): re-adding a connection the user already has, while the host is
+/// down, must not damage the entry they already have. The failed add drops its
+/// own pending row and leaves the existing entry, its group, and its tabs alone.
+#[test]
+fn test_a_failed_re_add_leaves_the_existing_entry_intact() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let target = probe_target("/srv/app");
+    let key = target.key();
+    let now = Utc::now().naive_utc();
+    let projects = vec![Project {
+        path: key.clone(),
+        added_ts: now,
+        last_opened_ts: Some(now),
+    }];
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.select_repo_mode_entry(Path::new(&key), ctx);
+            let tabs_before = workspace.tabs.len();
+            let group_before = workspace
+                .tab_groups
+                .values()
+                .find(|group| group.repo_root.as_deref() == Some(key.as_str()))
+                .map(|group| group.id)
+                .expect("selecting the entry binds a group to it");
+
+            // The user re-adds the identical connection, and it fails.
+            let generation = workspace.restart_remote_probe(&key);
+            workspace.repo_mode_pending_remote_key = Some(key.clone());
+            workspace.apply_remote_probe_result(
+                &target,
+                &key,
+                generation,
+                Some(1),
+                Err(repo_mode::RemoteProbeFailure::Unreachable),
+                ctx,
+            );
+
+            assert_eq!(
+                registered_paths(ctx),
+                vec![key.clone()],
+                "the entry the user already had must survive a failed re-add"
+            );
+            assert_eq!(workspace.tabs.len(), tabs_before);
+            assert!(
+                workspace.tab_groups.contains_key(&group_before),
+                "the bound group must survive too"
+            );
+        });
+    });
+}
+
+/// NA6 (N8): selecting the same unreachable row repeatedly must not stack up
+/// `ssh` subprocesses. A probe is only started when none is in flight for that
+/// key, and the row ends up showing the newest result.
+#[test]
+fn test_repeated_selection_runs_one_probe_at_a_time() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let target = probe_target("/srv/app");
+    let key = target.key();
+    let now = Utc::now().naive_utc();
+    let projects = vec![Project {
+        path: key.clone(),
+        added_ts: now,
+        last_opened_ts: Some(now),
+    }];
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let first = workspace
+                .begin_remote_probe(&key)
+                .expect("the first click starts a probe");
+            assert_eq!(
+                workspace.begin_remote_probe(&key),
+                None,
+                "a second click while the first probe runs must not spawn another ssh"
+            );
+            assert_eq!(workspace.begin_remote_probe(&key), None);
+
+            workspace.apply_remote_probe_result(
+                &target,
+                &key,
+                first,
+                None,
+                Err(repo_mode::RemoteProbeFailure::Unreachable),
+                ctx,
+            );
+
+            // With the probe landed, the next click is free to start a new one,
+            // and its result replaces the previous one.
+            let second = workspace
+                .begin_remote_probe(&key)
+                .expect("a landed probe releases the key");
+            assert_ne!(first, second);
+            workspace.apply_remote_probe_result(
+                &target,
+                &key,
+                second,
+                None,
+                Ok(RemoteProbeOutcome::Found {
+                    remote_path: "/srv/app".to_string(),
+                    kind: RepoEntryKind::Repo,
+                    branch: Some("main".to_string()),
+                }),
+                ctx,
+            );
+
+            let entries = workspace.repo_mode_entries(ctx);
+            assert_eq!(
+                entries[0].remote.as_ref().expect("remote detail").probe,
+                RemoteProbeState::Resolved {
+                    kind: RepoEntryKind::Repo,
+                    branch: Some("main".to_string()),
+                }
+            );
+        });
+    });
+}
+
+/// Two probes for one key resolving out of order leave the newer result. The
+/// older probe's callback carries a generation the key no longer recognises, so
+/// it is dropped rather than overwriting the answer that superseded it.
+#[test]
+fn test_an_out_of_order_probe_result_does_not_overwrite_the_newer_one() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let target = probe_target("/srv/app");
+    let key = target.key();
+    let now = Utc::now().naive_utc();
+    let projects = vec![Project {
+        path: key.clone(),
+        added_ts: now,
+        last_opened_ts: Some(now),
+    }];
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let stale = workspace.begin_remote_probe(&key).expect("first probe");
+            // The user resubmits, orphaning the first probe.
+            let fresh = workspace.restart_remote_probe(&key);
+
+            workspace.apply_remote_probe_result(
+                &target,
+                &key,
+                fresh,
+                None,
+                Err(repo_mode::RemoteProbeFailure::PathNotFound),
+                ctx,
+            );
+            workspace.apply_remote_probe_result(
+                &target,
+                &key,
+                stale,
+                None,
+                Ok(RemoteProbeOutcome::Found {
+                    remote_path: "/srv/app".to_string(),
+                    kind: RepoEntryKind::Repo,
+                    branch: None,
+                }),
+                ctx,
+            );
+
+            let entries = workspace.repo_mode_entries(ctx);
+            assert_eq!(
+                entries[0].remote.as_ref().expect("remote detail").probe,
+                RemoteProbeState::Failed {
+                    reason: repo_mode::RemoteProbeFailure::PathNotFound
+                },
+                "the late result of an orphaned probe must not replace the newer answer"
+            );
+        });
+    });
+}
+
+/// A success for a key the user removed while the probe was running registers
+/// nothing: the entry is gone, and re-registering it would resurrect a row they
+/// deleted.
+#[test]
+fn test_a_probe_success_for_a_removed_key_registers_nothing() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let target = probe_target("/srv/app");
+    let key = target.key();
+    let now = Utc::now().naive_utc();
+    let projects = vec![Project {
+        path: key.clone(),
+        added_ts: now,
+        last_opened_ts: Some(now),
+    }];
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let generation = workspace.begin_remote_probe(&key).expect("probe starts");
+            workspace.remove_repo_mode_entry(Path::new(&key), ctx);
+
+            workspace.apply_remote_probe_result(
+                &target,
+                &key,
+                generation,
+                None,
+                Ok(RemoteProbeOutcome::Found {
+                    remote_path: "/srv/app".to_string(),
+                    kind: RepoEntryKind::Repo,
+                    branch: None,
+                }),
+                ctx,
+            );
+
+            assert!(registered_paths(ctx).is_empty());
+            assert!(workspace.repo_mode_entries(ctx).is_empty());
+        });
+    });
+}
+
+/// NA13 (N7/N12): a remote key persisted by the pre-U4 path — written on submit
+/// and never verified — has no probe session on this launch. It must not render
+/// as a resolved entry, and it must not be treated as dead either: the user
+/// typed those connection details, and a row vanishing on upgrade is worse than
+/// one that says it has not connected.
+#[test]
+fn test_a_persisted_but_never_verified_row_renders_unresolved() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let key = probe_target("/srv/app").key();
+    let now = Utc::now().naive_utc();
+    let projects = vec![Project {
+        path: key.clone(),
+        added_ts: now,
+        last_opened_ts: Some(now),
+    }];
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            assert!(workspace.repo_mode_remote_probes.borrow().is_empty());
+
+            let entries = workspace.repo_mode_entries(ctx);
+            assert_eq!(entries.len(), 1);
+            let remote = entries[0].remote.as_ref().expect("remote detail");
+            assert_eq!(remote.probe, RemoteProbeState::Pending);
+            assert_eq!(remote.probe.kind(), None, "it has resolved to nothing");
+            assert!(!entries[0].is_dead, "and it is not the dead-path state");
+
+            // Touching it is what refreshes it (R11), and that is a probe the
+            // key did not previously have.
+            assert!(workspace.begin_remote_probe(&key).is_some());
+        });
+    });
+}
+
+/// A success for the host the user *was* adding must not close the form they
+/// have since reopened for a different host — nor register the abandoned one.
+///
+/// Submitting again swaps the pending row, which orphans the first probe, so
+/// its late result has no session to land on.
+#[test]
+fn test_a_late_success_does_not_close_a_form_reopened_for_another_host() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let abandoned = probe_target("/srv/first");
+    let abandoned_key = abandoned.key();
+    let current = probe_target("/srv/second");
+    let current_key = current.key();
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let stale = workspace.restart_remote_probe(&abandoned_key);
+            workspace.repo_mode_pending_remote_key = Some(abandoned_key.clone());
+
+            // The user goes back and submits a different connection.
+            workspace.add_remote_repo_mode_entry(
+                2,
+                current.server.clone(),
+                current.port,
+                current.user.clone(),
+                current.identity.clone(),
+                current.remote_path.clone(),
+                ctx,
+            );
+            assert_eq!(
+                workspace.repo_mode_pending_remote_key.as_deref(),
+                Some(current_key.as_str())
+            );
+
+            workspace.apply_remote_probe_result(
+                &abandoned,
+                &abandoned_key,
+                stale,
+                Some(1),
+                Ok(RemoteProbeOutcome::Found {
+                    remote_path: "/srv/first".to_string(),
+                    kind: RepoEntryKind::Repo,
+                    branch: None,
+                }),
+                ctx,
+            );
+
+            assert!(
+                registered_paths(ctx).is_empty(),
+                "the abandoned host must not be registered"
+            );
+            assert_eq!(
+                workspace.repo_mode_pending_remote_key.as_deref(),
+                Some(current_key.as_str()),
+                "the form the user is actually looking at must still be probing"
+            );
+            let keys: Vec<String> = workspace
+                .repo_mode_remote_probes
+                .borrow()
+                .keys()
+                .cloned()
+                .collect();
+            assert_eq!(keys, vec![current_key.clone()]);
+        });
+    });
 }

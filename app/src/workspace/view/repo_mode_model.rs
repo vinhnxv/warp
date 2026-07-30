@@ -76,6 +76,26 @@ pub struct RemoteListEntry {
     pub probe: RemoteProbeState,
 }
 
+/// One remote key's probe history: what the last probe said, and which
+/// generation is entitled to speak for the key.
+///
+/// A probe is a subprocess that can outlive everything it was started for — the
+/// modal that requested it, the entry it describes, even a later entry that
+/// happens to reuse the key. Every callback therefore carries the generation it
+/// was spawned under and is dropped unless the key still agrees, so a result can
+/// only ever land on the state it was asked about.
+#[derive(Clone, Debug)]
+pub(super) struct RemoteProbeSession {
+    /// Generation of the most recent probe started for this key. A callback
+    /// holding any other value is stale.
+    generation: u64,
+    /// Whether that probe is still running. A second probe for a key is not
+    /// started while one is in flight — a row cannot be more pending than
+    /// pending, and two `ssh` connections per click is what RC4 is about.
+    in_flight: bool,
+    state: RemoteProbeState,
+}
+
 /// Git badge data for a repository row, sourced from the repo's terminals so
 /// the row always matches what the tab rows display.
 #[derive(Clone, Debug, Default)]
@@ -97,7 +117,7 @@ impl Workspace {
         }
         // Read the registry rows first (no filesystem work under the model
         // read-lock), then classify kind/liveness through the TTL cache below.
-        let projects: Vec<(PathBuf, Option<NaiveDateTime>, NaiveDateTime)> =
+        let mut projects: Vec<(PathBuf, Option<NaiveDateTime>, NaiveDateTime)> =
             ProjectManagementModel::handle(ctx).read(ctx, |projects, _| {
                 projects
                     .all_projects()
@@ -110,6 +130,31 @@ impl Workspace {
                     })
                     .collect()
             });
+
+        // A remote key whose first probe has not succeeded yet is not in the
+        // registry — the registry means "verified" (R9). Project it into the
+        // list so the row is visible while it connects, timestamped now so it
+        // sorts to the top like the newest entry it is about to become.
+        let registered: HashSet<String> = projects
+            .iter()
+            .map(|(path, _, _)| path.to_string_lossy().into_owned())
+            .collect();
+        let unverified: Vec<String> = self
+            .repo_mode_remote_probes
+            .borrow()
+            .keys()
+            .filter(|key| !registered.contains(*key))
+            .cloned()
+            .collect();
+        if !unverified.is_empty() {
+            let added = chrono::Utc::now().naive_utc();
+            projects.extend(
+                unverified
+                    .into_iter()
+                    .map(|key| (PathBuf::from(key), Some(added), added)),
+            );
+        }
+
         let now = Instant::now();
         let remote_probes = self.repo_mode_remote_probes.borrow();
         let mut fs_cache = self.repo_mode_fs_cache.borrow_mut();
@@ -248,10 +293,15 @@ impl Workspace {
         );
     }
 
-    /// Covers R6/R7/R9: register the connection as a pending entry so its row
-    /// appears at once, then probe the host under a wall-clock bound. Success
-    /// resolves the row in place and closes the form; failure leaves nothing
-    /// registered and hands the form back with the reason.
+    /// Covers R6/R7/R9: show the connection as a pending row at once, then probe
+    /// the host under a wall-clock bound. Success registers the row at the key
+    /// the host resolved and closes the form; failure leaves nothing registered
+    /// and hands the form back with the reason.
+    ///
+    /// The pending row lives in the probe session, not the registry. Writing it
+    /// on submit made the registry mean "the user typed this", so a host that
+    /// never answered — or one the user cancelled — still came back after a
+    /// restart as an entry they never successfully connected to.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn add_remote_repo_mode_entry(
         &mut self,
@@ -274,22 +324,100 @@ impl Workspace {
             remote_path: path,
         };
         let pending_key = target.key();
-        ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
-            projects.upsert_project(PathBuf::from(&pending_key), ctx);
-        });
-        self.repo_mode_remote_probes
-            .borrow_mut()
-            .insert(pending_key.clone(), RemoteProbeState::Pending);
+        // A previous submit in this same form was for a different host: drop
+        // its row rather than leaving two pending connections the user only
+        // asked for one of.
+        if let Some(previous) = self.repo_mode_pending_remote_key.take()
+            && previous != pending_key
+        {
+            self.drop_pending_remote_entry(&previous, ctx);
+        }
+        let generation = self.restart_remote_probe(&pending_key);
+        self.repo_mode_pending_remote_key = Some(pending_key.clone());
         ctx.notify();
-        self.spawn_remote_probe(target, pending_key, Some(token), ctx);
+        self.spawn_remote_probe(target, pending_key, generation, Some(token), ctx);
     }
 
     /// R11: remote entries are not polled. Displayed state is refreshed by use
     /// — selecting an entry reprobes it — so a stale row corrects itself the
     /// next time the user touches it.
+    ///
+    /// Skipped while a probe for the key is already running: selecting a row
+    /// twice, or a row that is still resolving its first probe, must not open a
+    /// second `ssh` connection to the same host.
     fn reprobe_remote_entry(&mut self, target: RemoteTarget, ctx: &mut ViewContext<Self>) {
         let key = target.key();
-        self.spawn_remote_probe(target, key, None, ctx);
+        let Some(generation) = self.begin_remote_probe(&key) else {
+            return;
+        };
+        self.spawn_remote_probe(target, key, generation, None, ctx);
+    }
+
+    /// Claim the next generation for `key`, unless a probe is already running
+    /// for it. `None` means "already covered — do not spawn".
+    fn begin_remote_probe(&self, key: &str) -> Option<u64> {
+        let mut sessions = self.repo_mode_remote_probes.borrow_mut();
+        if sessions.get(key).is_some_and(|session| session.in_flight) {
+            return None;
+        }
+        let generation = self.next_probe_generation();
+        sessions
+            .entry(key.to_string())
+            .and_modify(|session| {
+                session.generation = generation;
+                session.in_flight = true;
+            })
+            .or_insert(RemoteProbeSession {
+                generation,
+                in_flight: true,
+                // The row exists from this moment, before anything is
+                // registered, and renders as pending until the probe answers.
+                state: RemoteProbeState::Pending,
+            });
+        Some(generation)
+    }
+
+    /// Claim the next generation for `key` unconditionally, orphaning any probe
+    /// already running for it.
+    ///
+    /// The user resubmitting the form is an explicit request for a fresh answer,
+    /// and the form is waiting on a token only this probe carries — deferring to
+    /// an older probe would leave the modal waiting for a result that will be
+    /// discarded.
+    fn restart_remote_probe(&self, key: &str) -> u64 {
+        let generation = self.next_probe_generation();
+        self.repo_mode_remote_probes.borrow_mut().insert(
+            key.to_string(),
+            RemoteProbeSession {
+                generation,
+                in_flight: true,
+                state: RemoteProbeState::Pending,
+            },
+        );
+        generation
+    }
+
+    fn next_probe_generation(&self) -> u64 {
+        let generation = self.repo_mode_probe_generation.get().wrapping_add(1);
+        self.repo_mode_probe_generation.set(generation);
+        generation
+    }
+
+    /// Record a landed probe, or report that it is no longer wanted.
+    ///
+    /// `false` means the key was removed, re-added, or reprobed since this probe
+    /// was spawned — the caller must drop the result rather than apply it.
+    fn finish_remote_probe(&self, key: &str, generation: u64, state: RemoteProbeState) -> bool {
+        let mut sessions = self.repo_mode_remote_probes.borrow_mut();
+        let Some(session) = sessions.get_mut(key) else {
+            return false;
+        };
+        if session.generation != generation {
+            return false;
+        }
+        session.in_flight = false;
+        session.state = state;
+        true
     }
 
     /// `token` is `Some` for an add-time probe, whose result drives the open
@@ -298,6 +426,7 @@ impl Workspace {
         &mut self,
         target: RemoteTarget,
         key: String,
+        generation: u64,
         token: Option<u64>,
         ctx: &mut ViewContext<Self>,
     ) {
@@ -326,18 +455,24 @@ impl Workspace {
                 run_remote_probe(args, script, REMOTE_PROBE_TIMEOUT, path_env).await
             },
             move |workspace, result, ctx| {
-                workspace.apply_remote_probe_result(&target, &key, token, result, ctx);
+                workspace.apply_remote_probe_result(&target, &key, generation, token, result, ctx);
             },
         );
     }
 
-    /// Land a probe result on the registry, the probe cache, and (for an
+    /// Land a probe result on the registry, the probe session, and (for an
     /// add-time probe) the form. Split out from the spawn so the resolution
     /// rules are exercisable without a subprocess.
+    ///
+    /// A result whose `generation` no longer owns `probed_key` is dropped
+    /// without touching anything: the entry was removed, re-added, or reprobed
+    /// while this probe was running, and it is describing a question nobody is
+    /// still asking.
     pub(super) fn apply_remote_probe_result(
         &mut self,
         target: &RemoteTarget,
         probed_key: &str,
+        generation: u64,
         token: Option<u64>,
         result: Result<RemoteProbeOutcome, RemoteProbeFailure>,
         ctx: &mut ViewContext<Self>,
@@ -355,13 +490,22 @@ impl Workspace {
                     ..target.clone()
                 };
                 let resolved_key = resolved.key();
-                if resolved_key != probed_key {
-                    self.replace_registry_key(probed_key, &resolved_key, ctx);
+                if !self.finish_remote_probe(
+                    probed_key,
+                    generation,
+                    RemoteProbeState::Resolved { kind, branch },
+                ) {
+                    return;
                 }
-                self.repo_mode_remote_probes
-                    .borrow_mut()
-                    .insert(resolved_key, RemoteProbeState::Resolved { kind, branch });
+                // R6/R9: the registry means "verified". Only a probe that found
+                // the path writes a row, so a connection that never answered
+                // cannot come back after a restart as an entry the user never
+                // successfully made.
+                self.commit_remote_key(probed_key, &resolved_key, ctx);
                 if token.is_some() {
+                    // Cleared before the close so the form's own cleanup does
+                    // not drop the row this probe just verified.
+                    self.repo_mode_pending_remote_key = None;
                     self.close_remote_connection_modal(ctx);
                 }
                 ctx.notify();
@@ -371,41 +515,81 @@ impl Workspace {
             Err(failure) => failure,
         };
 
+        if !self.finish_remote_probe(
+            probed_key,
+            generation,
+            RemoteProbeState::Failed { reason: failure },
+        ) {
+            return;
+        }
+
         match token {
             // AE3: an add that fails registers nothing — the pending row goes
             // away and the form comes back with the reason.
             Some(token) => {
+                if self.repo_mode_pending_remote_key.as_deref() == Some(probed_key) {
+                    self.repo_mode_pending_remote_key = None;
+                }
                 self.drop_pending_remote_entry(probed_key, ctx);
                 self.fail_remote_connection_modal(token, failure, ctx);
             }
             // A reprobe of an entry the user already has: mark it unreachable
             // and leave it in place. Removing it behind their back would lose
             // the entry over a temporary network blip.
-            None => {
-                self.repo_mode_remote_probes.borrow_mut().insert(
-                    probed_key.to_string(),
-                    RemoteProbeState::Failed { reason: failure },
-                );
-                ctx.notify();
+            None => ctx.notify(),
+        }
+    }
+
+    /// Register the key a probe resolved, retiring the key it was probed under
+    /// when the host expanded the path to something else.
+    ///
+    /// An already-registered key is left alone rather than upserted: `upsert`
+    /// bumps `last_opened_ts`, and merely confirming an entry is still reachable
+    /// is not the user opening it (R3).
+    fn commit_remote_key(&mut self, probed: &str, resolved: &str, ctx: &mut ViewContext<Self>) {
+        let registered = ProjectManagementModel::handle(ctx).read(ctx, |projects, _| {
+            projects.all_projects().any(|p| p.path == resolved)
+        });
+        ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+            if probed != resolved {
+                projects.remove_project(PathBuf::from(probed), ctx);
+            }
+            if !registered {
+                projects.upsert_project(PathBuf::from(resolved), ctx);
+            }
+        });
+        if probed != resolved {
+            // Move the session across, so the resolved row keeps the state the
+            // probe just wrote and the retired key stops being rendered.
+            let session = self.repo_mode_remote_probes.borrow_mut().remove(probed);
+            if let Some(session) = session {
+                self.repo_mode_remote_probes
+                    .borrow_mut()
+                    .insert(resolved.to_string(), session);
+            }
+            if let Some(order) = self.repo_mode_launch_order.borrow_mut().as_mut() {
+                order.retain(|pinned| pinned != probed);
             }
         }
     }
 
-    /// Move a registry row to the key the probe resolved, without leaving the
-    /// pending key behind in the registry, the probe cache, or the pinned
-    /// launch order.
-    fn replace_registry_key(&mut self, old: &str, new: &str, ctx: &mut ViewContext<Self>) {
-        ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
-            projects.remove_project(PathBuf::from(old), ctx);
-            projects.upsert_project(PathBuf::from(new), ctx);
+    /// Drop a row whose probe never succeeded. Nothing was persisted for it, but
+    /// it was rendered and therefore clickable, so it can have collected a
+    /// selection and a bound group like any other row.
+    ///
+    /// A key that is *registered* is not a pending row: the user re-added a
+    /// connection they already have, or reopened the form on one. Failing that
+    /// probe says the host is unreachable right now, which is not grounds to
+    /// delete the entry, its bound group, and its tabs — the row keeps its
+    /// unreachable state and stays exactly where it was.
+    pub(super) fn drop_pending_remote_entry(&mut self, key: &str, ctx: &mut ViewContext<Self>) {
+        let registered = ProjectManagementModel::handle(ctx).read(ctx, |projects, _| {
+            projects.all_projects().any(|p| p.path == key)
         });
-        self.forget_remote_key(old);
-    }
-
-    fn drop_pending_remote_entry(&mut self, key: &str, ctx: &mut ViewContext<Self>) {
-        ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
-            projects.remove_project(PathBuf::from(key), ctx);
-        });
+        if registered {
+            return;
+        }
+        self.detach_repo_mode_key(key, ctx);
         self.forget_remote_key(key);
         ctx.notify();
     }
@@ -424,33 +608,42 @@ impl Workspace {
         let path_buf = registry_key_path(path, "remove");
         let path_str = path_buf.to_string_lossy().into_owned();
 
+        self.detach_repo_mode_key(&path_str, ctx);
+        self.repo_mode_fs_cache.borrow_mut().remove(&path_str);
+        self.forget_remote_key(&path_str);
+
+        ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+            projects.remove_project(path_buf, ctx);
+        });
+        ctx.notify();
+    }
+
+    /// Cut a registry key loose from everything in this window that points at
+    /// it: its bound group, the selection, and the pinned launch order.
+    ///
+    /// Shared by removal and by dropping a failed pending row, because a pending
+    /// row is rendered and clickable and so can have collected all three.
+    fn detach_repo_mode_key(&mut self, key: &str, ctx: &mut ViewContext<Self>) {
         let group_ids: Vec<TabGroupId> = self
             .tab_groups
             .values()
-            .filter(|g| g.repo_root.as_deref() == Some(path_str.as_str()))
+            .filter(|g| g.repo_root.as_deref() == Some(key))
             .map(|g| g.id)
             .collect();
         for group_id in group_ids {
             self.ungroup_tabs(group_id, ctx);
         }
 
-        if self.selected_repo_root.as_deref() == Some(path_str.as_str()) {
+        if self.selected_repo_root.as_deref() == Some(key) {
             self.selected_repo_root = None;
         }
 
-        // Drop the removed path from the pinned launch order so a later re-add
-        // in the same session appends at the end (R3) instead of resurfacing at
-        // its stale slot.
+        // Drop the key from the pinned launch order so a later re-add in the
+        // same session appends at the end (R3) instead of resurfacing at its
+        // stale slot.
         if let Some(order) = self.repo_mode_launch_order.borrow_mut().as_mut() {
-            order.retain(|k| k != &path_str);
+            order.retain(|pinned| pinned != key);
         }
-        self.repo_mode_fs_cache.borrow_mut().remove(&path_str);
-        self.repo_mode_remote_probes.borrow_mut().remove(&path_str);
-
-        ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
-            projects.remove_project(path_buf, ctx);
-        });
-        ctx.notify();
     }
 
     pub(super) fn select_repo_mode_all(&mut self, ctx: &mut ViewContext<Self>) {
@@ -1151,7 +1344,7 @@ fn remote_list_entry(
     path: PathBuf,
     last_opened_ts: Option<NaiveDateTime>,
     added_ts: NaiveDateTime,
-    probes: &HashMap<String, RemoteProbeState>,
+    probes: &HashMap<String, RemoteProbeSession>,
 ) -> RepoModeListEntry {
     let Some(target) = parse_remote_key(&key) else {
         log::warn!("repo_mode: unparseable remote registry key {key:?}");
@@ -1165,7 +1358,13 @@ fn remote_list_entry(
             remote: None,
         };
     };
-    let probe = probes.get(&key).cloned().unwrap_or_default();
+    // No session means a row persisted by an older build that registered on
+    // submit rather than on success: not resolved, and not dead either. Pending
+    // is the honest answer, and touching the row reprobes it (R11).
+    let probe = probes
+        .get(&key)
+        .map(|session| session.state.clone())
+        .unwrap_or_default();
     RepoModeListEntry {
         display_name: target.display_name(),
         kind: probe.kind().unwrap_or(RepoEntryKind::Folder),
