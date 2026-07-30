@@ -1347,9 +1347,14 @@ fn remote_list_entry(
     probes: &HashMap<String, RemoteProbeSession>,
 ) -> RepoModeListEntry {
     let Some(target) = parse_remote_key(&key) else {
-        log::warn!("repo_mode: unparseable remote registry key {key:?}");
+        // Neither logged nor displayed. The key is the whole connection string —
+        // user, host, port, remote path, and the local path to a private key —
+        // and this runs on the render path, so a warn here wrote those to the
+        // log file on every frame, and showing the raw URI as the row's name put
+        // them on screen. The row still offers "Remove", which is all the user
+        // can do with a key nothing can read.
         return RepoModeListEntry {
-            display_name: key,
+            display_name: "Unreadable entry".to_string(),
             kind: RepoEntryKind::Folder,
             is_dead: true,
             path,

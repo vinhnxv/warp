@@ -251,3 +251,29 @@ fn submit_is_closed_while_a_probe_is_in_flight() {
     lifecycle.fail(token, "unreachable".to_string());
     assert!(lifecycle.can_start_probe());
 }
+
+/// U5: brackets around an IPv6 address are URL syntax for "the colons here are
+/// not a port", not part of the address. `ssh` does not accept them in a
+/// destination, and the registry key adds its own, so a pasted `[::1]` has to be
+/// unwrapped once on the way in rather than stored and re-wrapped.
+#[test]
+fn a_pasted_ipv6_address_loses_its_brackets() {
+    assert_eq!(normalize_server("[::1]"), "::1");
+    assert_eq!(normalize_server("[fe80::1%en0]"), "fe80::1%en0");
+    assert_eq!(normalize_server("  [::1]  "), "::1");
+
+    // Not bracket syntax: left exactly as typed, so it fails the charset check
+    // and the user is told, instead of being silently rewritten into a
+    // different host.
+    assert_eq!(normalize_server("[not-ipv6]"), "[not-ipv6]");
+    assert_eq!(normalize_server("[::1"), "[::1");
+    assert_eq!(normalize_server("::1"), "::1");
+    assert_eq!(normalize_server("example.com"), "example.com");
+
+    // And the form agrees: a bracketed address submits like a bare one.
+    let bracketed = validate(&form("[::1]", "22", "u", "", "/srv"), false);
+    assert_eq!(bracketed.server_error, None);
+    assert!(bracketed.can_submit());
+    let bad = validate(&form("[not-ipv6]", "22", "u", "", "/srv"), false);
+    assert!(bad.server_error.is_some());
+}

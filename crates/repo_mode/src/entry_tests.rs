@@ -628,3 +628,144 @@ fn unquote(word: &str) -> String {
     }
     out
 }
+
+/// U5: the codec must be total over the grammar it documents — every target the
+/// form can produce round-trips through the key it is stored under.
+///
+/// A generated cross product rather than a handful of examples, because the two
+/// defects this replaces were both in combinations nobody thought to write down:
+/// a path that starts with `~` collided with the port, and a path that starts
+/// with a digit would have extended it.
+#[test]
+fn every_target_in_the_grammar_round_trips() {
+    let users = [
+        "vinh",
+        "deploy_bot",
+        "CORP\\vinh",
+        "svc$",
+        "v i",
+        "v@x",
+        "v?x",
+    ];
+    let servers = [
+        "example.com",
+        "10.0.0.7",
+        "::1",
+        "fe80::1%en0",
+        "host_name",
+        "h:8080",
+    ];
+    let ports = [22u16, 1, 2222, 65535];
+    let identities = [
+        "",
+        "/Users/v/.ssh/id_ed25519",
+        "~/.ssh/id ed25519",
+        "C:\\keys\\id?x",
+    ];
+    let paths = [
+        "",
+        "/",
+        "/srv/app",
+        "~",
+        "~/projects/app",
+        "rel/x",
+        "app",
+        "2fa/logs",
+        "/srv/my app",
+        "/srv/it's",
+        "/srv/a?b",
+        "/srv/a@b",
+        "/srv/a:b",
+        "/srv/a#b",
+        "/srv/ünïcode",
+    ];
+
+    for user in users {
+        for server in servers {
+            for &port in &ports {
+                for identity in identities {
+                    for path in paths {
+                        let target = RemoteTarget {
+                            server: server.to_string(),
+                            port,
+                            user: user.to_string(),
+                            identity: identity.to_string(),
+                            remote_path: path.to_string(),
+                        };
+                        let key = target.key();
+                        assert!(
+                            is_remote_key(&key),
+                            "{key:?} must be recognised as a remote key"
+                        );
+                        assert_eq!(
+                            parse_remote_key(&key),
+                            Some(target.clone()),
+                            "key {key:?} did not round-trip"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The exact key the old split-at-the-first-slash rule could not read back: a
+/// home-relative remote path put everything before its first `/` into the port,
+/// so `22~` failed to parse and an ordinary entry rendered as a corrupt row.
+///
+/// The bytes were never ambiguous — only the rule for reading them was — so the
+/// repair is in the parser and keys already on disk are read correctly with no
+/// migration.
+#[test]
+fn a_home_relative_path_key_persisted_in_the_old_shape_still_reads() {
+    let key = "ssh://u@h:22~/projects/app";
+    assert_eq!(
+        parse_remote_key(key),
+        Some(RemoteTarget {
+            server: "h".to_string(),
+            port: 22,
+            user: "u".to_string(),
+            identity: String::new(),
+            remote_path: "~/projects/app".to_string(),
+        })
+    );
+}
+
+/// A path that begins with a digit is the one case the port/path boundary
+/// cannot be read off the raw bytes, so the encoder escapes that byte. Absolute
+/// paths begin `/` and are therefore untouched, which is what keeps every key
+/// already on disk byte-identical.
+#[test]
+fn a_leading_digit_in_the_path_cannot_extend_the_port() {
+    let key = format_remote_key("h", 22, "u", "", "2fa/logs");
+    assert_eq!(key, "ssh://u@h:22%32fa/logs");
+    assert_eq!(
+        parse_remote_key(&key).expect("parses").remote_path,
+        "2fa/logs"
+    );
+
+    // An absolute path is written exactly as it was before this rule existed.
+    assert_eq!(
+        format_remote_key("h", 22, "u", "", "/srv/app"),
+        "ssh://u@h:22/srv/app"
+    );
+}
+
+/// Keys that are genuinely malformed are still rejected: repairing the port rule
+/// must not turn "unreadable" into "reads as some other connection".
+#[test]
+fn malformed_keys_are_still_rejected() {
+    for key in [
+        "/local/path",
+        "ssh://",
+        "ssh://no-at-sign:22/srv",
+        "ssh://u@h/srv",     // no port at all
+        "ssh://u@h:/srv",    // empty port
+        "ssh://u@h:99999/x", // does not fit a u16
+        "ssh://u@[::1/srv",  // unterminated bracket
+        "ssh://u@h:22/srv?x=1",
+        "ssh://u@h:22/sr%zz",
+    ] {
+        assert_eq!(parse_remote_key(key), None, "{key:?} should not parse");
+    }
+}

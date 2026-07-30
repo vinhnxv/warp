@@ -66,7 +66,10 @@ const USER_CHARSET_ERROR: &str = "Only letters, digits, and . - _ \\ $";
 /// literals (hex plus `:`, an optional `%zone`, and the brackets some users
 /// type by hand).
 fn is_server_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | ':' | '%' | '[' | ']')
+    // No brackets: `normalize_server` has already unwrapped the one place they
+    // are meaningful, so anything still carrying them is not a host `ssh` can
+    // dial and the user is better off being told than having it rewritten.
+    ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | ':' | '%')
 }
 
 /// Characters a username field may contain. `useradd` shapes plus `\` for
@@ -142,13 +145,32 @@ pub fn check_identity_missing(identity: &str, home: Option<&Path>) -> bool {
     !identity.is_empty() && !expand_local_identity_path(identity, home).exists()
 }
 
+/// The server field as `ssh` should see it.
+///
+/// A user copying an IPv6 address out of a URL or an `ssh` example brings the
+/// brackets with it. `[::1]` is bracket syntax for "this is a host, the colons
+/// are not a port" — it is not part of the address, and `ssh` does not accept
+/// it as a destination. The registry key re-adds brackets itself when it needs
+/// them, so storing them here would round-trip a host of `[::1]` into a
+/// destination of `[[::1]]`.
+pub fn normalize_server(server: &str) -> &str {
+    let server = server.trim();
+    match server.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        // Only when what is inside actually looks like an IPv6 literal, so a
+        // hostname that genuinely begins with a bracket is left to fail the
+        // charset check rather than being silently rewritten.
+        Some(inner) if inner.contains(':') => inner,
+        _ => server,
+    }
+}
+
 /// Validate the form against this machine.
 ///
 /// Pure: every check here reads the form's own text. `identity_missing` comes
 /// from [`check_identity_missing`], which does the one filesystem lookup the
 /// form needs, so this stays safe to call from `render`.
 pub fn validate(form: &RemoteConnectionForm, identity_missing: bool) -> RemoteConnectionValidation {
-    let server = form.server.trim();
+    let server = normalize_server(&form.server);
     let user = form.user.trim();
     let port = form.port.trim();
     let identity = form.identity.trim();
@@ -437,7 +459,7 @@ impl RemoteConnectionModal {
         let token = self.lifecycle.begin_probe();
         ctx.emit(RemoteConnectionModalEvent::Submit {
             token,
-            server: form.server.trim().to_string(),
+            server: normalize_server(&form.server).to_string(),
             port: validation.port_number,
             user: form.user.trim().to_string(),
             identity: form.identity.trim().to_string(),

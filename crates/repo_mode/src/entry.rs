@@ -189,6 +189,14 @@ impl RemoteProbeFailure {
 /// no byte of a user, path, or identity can be read back as a `@`, `:`, `?`, or
 /// `#` delimiter (KTD1). A raw delimiter would not fail loudly — it would parse
 /// into a *different* connection.
+///
+/// The port and the path are adjacent with no delimiter between them, so the
+/// port is read back as the run of digits after the `:` and the path is
+/// everything after it. That requires the path never to *start* with a digit,
+/// which the encoding guarantees: `/` and `~` are left readable, and a leading
+/// digit is percent-encoded even though it is otherwise unreserved. An absolute
+/// path always begins `/`, so every key written before this rule existed is
+/// byte-identical under it.
 pub fn format_remote_key(
     server: &str,
     port: u16,
@@ -206,7 +214,7 @@ pub fn format_remote_key(
     let mut key = format!(
         "{REMOTE_KEY_SCHEME}{user}@{host}:{port}{path}",
         user = percent_encode(user, b""),
-        path = percent_encode(remote_path, b"/"),
+        path = encode_remote_path(remote_path),
     );
     if !identity.is_empty() {
         key.push_str("?i=");
@@ -215,8 +223,27 @@ pub fn format_remote_key(
     key
 }
 
+/// The path segment of a remote key: `/` stays readable, and a leading digit is
+/// escaped so it cannot be read back as more of the port.
+fn encode_remote_path(remote_path: &str) -> String {
+    let encoded = percent_encode(remote_path, b"/");
+    match encoded.as_bytes().first() {
+        Some(&byte) if byte.is_ascii_digit() => {
+            format!("%{:02X}{}", byte, &encoded[1..])
+        }
+        _ => encoded,
+    }
+}
+
 /// Inverse of [`format_remote_key`]. `None` for anything that is not a
 /// well-formed remote key, including a local path.
+///
+/// Total over every target [`format_remote_key`] can produce. It used to split
+/// the path off at the first `/`, which put anything before that `/` into the
+/// port: a path of `~/projects/app` produced a port of `22~`, and the key for a
+/// perfectly ordinary home-relative directory did not parse at all. Reading the
+/// port as its leading digits instead repairs those keys where they sit — the
+/// bytes were never ambiguous, only the rule for reading them was.
 pub fn parse_remote_key(key: &str) -> Option<RemoteTarget> {
     let rest = key.strip_prefix(REMOTE_KEY_SCHEME)?;
     // Free-text `?` is encoded, so the first raw one is the query delimiter.
@@ -224,27 +251,31 @@ pub fn parse_remote_key(key: &str) -> Option<RemoteTarget> {
         Some((head, query)) => (head, percent_decode(query.strip_prefix("i=")?)?),
         None => (rest, String::new()),
     };
-    let (authority, remote_path) = match rest.find('/') {
-        Some(index) => (&rest[..index], percent_decode(&rest[index..])?),
-        None => (rest, String::new()),
-    };
-    let (user, host_port) = authority.split_once('@')?;
-    let (server, port) = match host_port.strip_prefix('[') {
+    let (user, host_rest) = rest.split_once('@')?;
+    let (server, after_colon) = match host_rest.strip_prefix('[') {
         Some(after_bracket) => {
             let (host, tail) = after_bracket.split_once(']')?;
             (percent_decode(host)?, tail.strip_prefix(':')?)
         }
         None => {
-            let (host, port) = host_port.rsplit_once(':')?;
-            (percent_decode(host)?, port)
+            // The host is percent-encoded, so any `:` it contains is escaped and
+            // the first raw one is the port delimiter.
+            let (host, tail) = host_rest.split_once(':')?;
+            (percent_decode(host)?, tail)
         }
     };
+    let digits = after_colon
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(after_colon.len());
+    if digits == 0 {
+        return None;
+    }
     Some(RemoteTarget {
         server,
-        port: port.parse().ok()?,
+        port: after_colon[..digits].parse().ok()?,
         user: percent_decode(user)?,
         identity,
-        remote_path,
+        remote_path: percent_decode(&after_colon[digits..])?,
     })
 }
 
