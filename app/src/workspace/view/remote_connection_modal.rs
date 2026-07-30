@@ -6,6 +6,7 @@
 //! the probing/failure *visual* lifecycle only — it has no network dependency,
 //! so its validation and state transitions are testable without a window.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use warp_core::ui::theme::color::internal_colors;
@@ -126,9 +127,27 @@ pub fn expand_local_identity_path(identity: &str, home: Option<&Path>) -> PathBu
     }
 }
 
-/// Validate the form against this machine. `home` is the local home directory
-/// used to expand the identity path (`None` disables expansion).
-pub fn validate(form: &RemoteConnectionForm, home: Option<&Path>) -> RemoteConnectionValidation {
+/// Whether a typed identity path fails to resolve on this machine.
+///
+/// Touches the filesystem, so it must not be called from a render path: an
+/// identity under a stalled network mount (sshfs, an unreachable SMB share)
+/// makes `exists()` block for as long as the mount takes to time out, and
+/// `render` runs on every keystroke. Callers memoize the answer on the identity
+/// text and only recheck when it changes.
+///
+/// An empty identity is not missing — the field is optional, because an
+/// ssh-agent may already hold the key.
+pub fn check_identity_missing(identity: &str, home: Option<&Path>) -> bool {
+    let identity = identity.trim();
+    !identity.is_empty() && !expand_local_identity_path(identity, home).exists()
+}
+
+/// Validate the form against this machine.
+///
+/// Pure: every check here reads the form's own text. `identity_missing` comes
+/// from [`check_identity_missing`], which does the one filesystem lookup the
+/// form needs, so this stays safe to call from `render`.
+pub fn validate(form: &RemoteConnectionForm, identity_missing: bool) -> RemoteConnectionValidation {
     let server = form.server.trim();
     let user = form.user.trim();
     let port = form.port.trim();
@@ -173,9 +192,12 @@ pub fn validate(form: &RemoteConnectionForm, home: Option<&Path>) -> RemoteConne
     // The identity is optional — an ssh-agent may already hold the key — but a
     // path that was typed has to exist, or the probe fails for a reason the
     // form could have named up front.
-    let identity_error = (!identity.is_empty()
-        && !expand_local_identity_path(identity, home).exists())
-    .then_some(IDENTITY_MISSING_ERROR);
+    //
+    // Whether it exists is *not* answered here: that needs the filesystem, and
+    // this function runs on the render path. `identity_missing` is supplied by
+    // `check_identity`, which the caller memoizes on the identity text.
+    let identity_error =
+        (!identity.is_empty() && identity_missing).then_some(IDENTITY_MISSING_ERROR);
 
     RemoteConnectionValidation {
         server_error,
@@ -263,6 +285,13 @@ pub struct RemoteConnectionModal {
     cancel_button_mouse_state: MouseStateHandle,
     add_button_mouse_state: MouseStateHandle,
     close_button_mouse_state: MouseStateHandle,
+    /// Last identity text checked against the filesystem, and the answer.
+    ///
+    /// `render` needs to know whether the identity resolves, but the lookup can
+    /// block on a stalled network mount and `render` runs on every keystroke.
+    /// Cached on the exact text so the disk is touched once per edit rather than
+    /// once per frame.
+    identity_check: RefCell<Option<(String, bool)>>,
 }
 
 pub enum RemoteConnectionModalEvent {
@@ -299,6 +328,7 @@ impl RemoteConnectionModal {
             cancel_button_mouse_state: Default::default(),
             add_button_mouse_state: Default::default(),
             close_button_mouse_state: Default::default(),
+            identity_check: RefCell::new(None),
         }
     }
 
@@ -378,12 +408,29 @@ impl RemoteConnectionModal {
         }
     }
 
+    /// `check_identity_missing` for the current identity, from cache when the
+    /// text has not changed since the last lookup.
+    fn identity_missing(&self, identity: &str) -> bool {
+        if let Some((checked, missing)) = self.identity_check.borrow().as_ref()
+            && checked == identity
+        {
+            return *missing;
+        }
+        let missing = check_identity_missing(identity, dirs::home_dir().as_deref());
+        *self.identity_check.borrow_mut() = Some((identity.to_string(), missing));
+        missing
+    }
+
     fn try_submit(&mut self, ctx: &mut ViewContext<Self>) {
         if !self.lifecycle.can_start_probe() {
             return;
         }
         let form = self.form(ctx);
-        let validation = validate(&form, dirs::home_dir().as_deref());
+        // Submitting is a user action, not a frame: check for real rather than
+        // trusting a cache that predates an edit the editor has not reported.
+        let identity_missing = check_identity_missing(&form.identity, dirs::home_dir().as_deref());
+        *self.identity_check.borrow_mut() = Some((form.identity.clone(), identity_missing));
+        let validation = validate(&form, identity_missing);
         if !validation.can_submit() {
             return;
         }
@@ -461,7 +508,8 @@ impl View for RemoteConnectionModal {
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
         let theme = appearance.theme();
-        let validation = validate(&self.form(app), dirs::home_dir().as_deref());
+        let form = self.form(app);
+        let validation = validate(&form, self.identity_missing(&form.identity));
         let probing = matches!(self.lifecycle.state(), RemoteConnectionModalState::Probing);
         let can_submit = validation.can_submit() && !probing;
 
