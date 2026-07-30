@@ -3741,8 +3741,17 @@ impl Workspace {
         ws.sync_settings_error_state_into_settings_pane(ctx);
         // Seed the open-folder button's disabled state + tooltip now that the
         // initial tabs are configured.
+        //
+        // Deferred by a tick rather than run inline: the first refresh is what
+        // populates the installed-editor cache, and on macOS that is one
+        // uncached LaunchServices lookup per supported editor (~26) on the UI
+        // thread — per window, in the middle of building it. A tick later the
+        // window is already up, and the button corrects itself well before it
+        // can be clicked. Users without the feature never scan at all.
         #[cfg(feature = "local_fs")]
-        ws.refresh_open_folder_button_state(ctx);
+        ctx.spawn(async {}, |ws, _, ctx| {
+            ws.refresh_open_folder_button_state(ctx);
+        });
 
         let weak_handle = ctx.handle();
         WorkspaceRegistry::handle(ctx).update(ctx, |registry, _| {

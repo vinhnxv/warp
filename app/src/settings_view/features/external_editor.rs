@@ -17,11 +17,10 @@ use crate::settings_view::settings_page::{
 };
 use crate::util::file::external_editor::settings::{
     DefaultFolderEditor, EditorChoice, EditorLayout, OpenCodePanelsFileEditor, OpenFileEditor,
-    OpenFileLayout, PreferMarkdownViewer, PreferTabbedEditorView, resolve_default_folder_editor,
+    OpenFileLayout, PreferMarkdownViewer, PreferTabbedEditorView,
+    resolve_default_folder_editor_with_installed,
 };
-use crate::util::file::external_editor::{
-    Editor, EditorSettings, SUPPORTED_EDITORS, installed_editors,
-};
+use crate::util::file::external_editor::{Editor, EditorSettings, installed_editors};
 use crate::view_components::{Dropdown, DropdownItem};
 
 const TABBED_FILE_VIEWER_TOGGLE_HEADER: &str = "Group files into single editor pane";
@@ -55,18 +54,23 @@ impl ExternalEditorView {
         let editor_to_open_files = *settings.as_ref(ctx).open_file_editor;
         let code_panels_editor_to_open_files = *settings.as_ref(ctx).open_code_panels_file_editor;
         let layout_to_open_files = *settings.as_ref(ctx).open_file_layout;
-        // Only resolve the folder default when the feature is on: resolving it
-        // probes every installed editor, which is wasted work while the row is
-        // hidden.
+        // One scan for the whole page. Three of the four dropdowns below need
+        // the installed-editor list, and each used to probe for it: on macOS
+        // that is an uncached LaunchServices lookup per supported editor, so
+        // opening Settings cost four sweeps of the same answer.
+        let installed = installed_editors(ctx);
+        // Only resolve the folder default when the feature is on, so the
+        // hidden row costs nothing.
         let folder_editor_to_open_folders = FeatureFlag::OpenFolderInIde
             .is_enabled()
-            .then(|| resolve_default_folder_editor(ctx))
+            .then(|| resolve_default_folder_editor_with_installed(ctx, &installed))
             .flatten();
 
         let editor_dropdown = ctx.add_typed_action_view(|ctx| {
             let mut dropdown = Dropdown::new(ctx);
             Self::init_editor_dropdown(
                 &editor_to_open_files,
+                &installed,
                 &mut dropdown,
                 ExternalEditorAction::SetEditor,
                 ctx,
@@ -78,6 +82,7 @@ impl ExternalEditorView {
             if FeatureFlag::OpenFolderInIde.is_enabled() {
                 Self::init_folder_editor_dropdown(
                     folder_editor_to_open_folders,
+                    &installed,
                     &mut dropdown,
                     ctx,
                 );
@@ -88,6 +93,7 @@ impl ExternalEditorView {
             let mut dropdown = Dropdown::new(ctx);
             Self::init_editor_dropdown(
                 &code_panels_editor_to_open_files,
+                &installed,
                 &mut dropdown,
                 ExternalEditorAction::SetCodePanelsEditor,
                 ctx,
@@ -102,10 +108,15 @@ impl ExternalEditorView {
         ctx.subscribe_to_model(
             &EditorSettings::handle(ctx),
             |me, editor_settings, _, ctx| {
+                // Same one-scan-per-rebuild rule as construction: this fires on
+                // every settings change, including the cloud syncs that arrive
+                // unprompted.
+                let installed = installed_editors(ctx);
                 me.editor_dropdown.update(ctx, |dropdown, ctx| {
                     let editor = *editor_settings.as_ref(ctx).open_file_editor;
                     Self::init_editor_dropdown(
                         &editor,
+                        &installed,
                         dropdown,
                         ExternalEditorAction::SetEditor,
                         ctx,
@@ -115,15 +126,16 @@ impl ExternalEditorView {
                     let editor = *editor_settings.as_ref(ctx).open_code_panels_file_editor;
                     Self::init_editor_dropdown(
                         &editor,
+                        &installed,
                         dropdown,
                         ExternalEditorAction::SetCodePanelsEditor,
                         ctx,
                     );
                 });
                 if FeatureFlag::OpenFolderInIde.is_enabled() {
+                    let selected = resolve_default_folder_editor_with_installed(ctx, &installed);
                     me.folder_editor_dropdown.update(ctx, |dropdown, ctx| {
-                        let selected = resolve_default_folder_editor(ctx);
-                        Self::init_folder_editor_dropdown(selected, dropdown, ctx);
+                        Self::init_folder_editor_dropdown(selected, &installed, dropdown, ctx);
                     });
                 }
                 ctx.notify()
@@ -166,36 +178,51 @@ impl ExternalEditorView {
         };
     }
 
+    /// The default option's label, and the selection shown when the setting is
+    /// [`EditorChoice::SystemDefault`].
+    const DEFAULT_OPTION_TEXT: &'static str = "Default App";
+
+    /// Builds the `(label, choice)` entries for an open-*file* editor dropdown:
+    /// the fixed Warp / system / `$EDITOR` entries, then one per installed
+    /// editor.
+    ///
+    /// Takes the installed list rather than probing per editor. That is what
+    /// lets the page detect once and build every dropdown from the one answer —
+    /// this used to be an `is_installed` call per supported editor per
+    /// dropdown, so opening Settings ran the sweep four times over.
+    fn editor_dropdown_items(installed: &[Editor]) -> Vec<(String, EditorChoice)> {
+        let mut items = vec![
+            (
+                Self::DEFAULT_OPTION_TEXT.to_string(),
+                EditorChoice::SystemDefault,
+            ),
+            ("Warp".to_string(), EditorChoice::Warp),
+        ];
+        if FeatureFlag::AllowOpeningFileLinksUsingEditorEnv.is_enabled() {
+            items.push(("$EDITOR".to_string(), EditorChoice::EnvEditor));
+        }
+        // `installed` is already `SUPPORTED_EDITORS` filtered by installation,
+        // and in the same order, so the entries land exactly as they did.
+        items.extend(
+            installed
+                .iter()
+                .map(|editor| (format!("{editor}"), EditorChoice::ExternalEditor(*editor))),
+        );
+        items
+    }
+
     fn init_editor_dropdown(
         editor_to_open_files: &EditorChoice,
+        installed: &[Editor],
         dropdown: &mut Dropdown<ExternalEditorAction>,
         mut make_action: impl FnMut(EditorChoice) -> ExternalEditorAction,
         ctx: &mut ViewContext<Dropdown<ExternalEditorAction>>,
     ) {
-        let default_option_text = "Default App";
-        let default_app = DropdownItem::new(
-            default_option_text,
-            make_action(EditorChoice::SystemDefault),
-        );
-
-        let mut items = vec![default_app];
-
-        items.push(DropdownItem::new("Warp", make_action(EditorChoice::Warp)));
-        if FeatureFlag::AllowOpeningFileLinksUsingEditorEnv.is_enabled() {
-            items.push(DropdownItem::new(
-                "$EDITOR",
-                make_action(EditorChoice::EnvEditor),
-            ));
-        }
-        for editor in SUPPORTED_EDITORS {
-            if editor.is_installed(ctx) {
-                let editor_name = format!("{editor}");
-                items.push(DropdownItem::new(
-                    editor_name,
-                    make_action(EditorChoice::ExternalEditor(*editor)),
-                ));
-            }
-        }
+        let default_option_text = Self::DEFAULT_OPTION_TEXT;
+        let items: Vec<DropdownItem<ExternalEditorAction>> = Self::editor_dropdown_items(installed)
+            .into_iter()
+            .map(|(label, choice)| DropdownItem::new(label, make_action(choice)))
+            .collect();
 
         dropdown.set_items(items, ctx);
         match editor_to_open_files {
@@ -222,12 +249,12 @@ impl ExternalEditorView {
 
     fn init_folder_editor_dropdown(
         selected_editor: Option<Editor>,
+        installed: &[Editor],
         dropdown: &mut Dropdown<ExternalEditorAction>,
         ctx: &mut ViewContext<Dropdown<ExternalEditorAction>>,
     ) {
-        let installed = installed_editors(ctx);
         let items: Vec<DropdownItem<ExternalEditorAction>> =
-            Self::folder_editor_dropdown_items(&installed)
+            Self::folder_editor_dropdown_items(installed)
                 .into_iter()
                 .map(|(label, choice)| {
                     DropdownItem::new(label, ExternalEditorAction::SetDefaultFolderEditor(choice))

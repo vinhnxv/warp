@@ -5170,3 +5170,34 @@ fn test_non_contiguous_group_does_not_panic_in_range_or_render() {
         });
     });
 }
+
+/// NA10: a settings sync must not trigger editor detection for a user who
+/// cannot see the button the detection exists for.
+///
+/// The `EditorSettings` subscription rescans on every change, and cloud
+/// settings sync fires it unprompted — so users with the feature off were
+/// paying for a full LaunchServices sweep (one uncached lookup per supported
+/// editor) and then discarding it, because the button refresh right after
+/// returns early on the flag.
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_a_settings_sync_runs_no_editor_detection_when_the_feature_is_off() {
+    let _off = FeatureFlag::OpenFolderInIde.override_enabled(false);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            // Exactly what the `EditorSettings` subscription does on a sync.
+            assert!(workspace.installed_editors_cached(true, ctx).is_empty());
+            workspace.refresh_open_folder_button_state(ctx);
+
+            assert!(
+                workspace.installed_editors_cache.is_none(),
+                "an unpopulated cache is how we can tell no sweep ran"
+            );
+        });
+    });
+}

@@ -55,10 +55,10 @@ impl Workspace {
     /// Opens the active tab's folder in the default folder IDE (primary click),
     /// falling back to revealing in Finder when no default is set/installed.
     pub(super) fn open_current_folder_in_default_ide(&mut self, ctx: &mut ViewContext<Self>) {
-        let installed = self.installed_editors_cached(false, ctx);
-        let action = default_open_folder_action(resolve_default_folder_editor_with_installed(
-            ctx, &installed,
-        ));
+        let action = {
+            let installed = self.installed_editors_cached(false, ctx);
+            default_open_folder_action(resolve_default_folder_editor_with_installed(ctx, installed))
+        };
         self.open_current_folder(action, false, ctx);
     }
 
@@ -133,8 +133,10 @@ impl Workspace {
             return;
         }
         let is_remote = self.resolve_open_folder_target(ctx).is_none();
-        let installed = self.installed_editors_cached(false, ctx);
-        let default_editor = resolve_default_folder_editor_with_installed(ctx, &installed);
+        let default_editor = {
+            let installed = self.installed_editors_cached(false, ctx);
+            resolve_default_folder_editor_with_installed(ctx, installed)
+        };
 
         // This runs on every session-state change, including the
         // `TerminalViewStateChanged` events the active terminal emits as it
@@ -162,15 +164,27 @@ impl Workspace {
     /// expensive on macOS (one uncached LaunchServices lookup per supported
     /// editor), so state refreshes reuse the cache and only rare, user-initiated
     /// events (opening the dropdown, changing editor settings) force a rescan.
-    pub(super) fn installed_editors_cached(
-        &mut self,
+    ///
+    /// Returns a borrow of the cache rather than a copy of it: the callers all
+    /// read the list and drop it, and this runs on the toolbar refresh path.
+    ///
+    /// The feature gate lives here rather than at each call site. The list only
+    /// ever feeds the open-folder button, so a user without the button has no
+    /// use for it — and the `EditorSettings` subscription below is driven by
+    /// cloud settings sync, which arrives for everyone. Gating only the button
+    /// meant those users still paid for the scan and then threw it away.
+    pub(super) fn installed_editors_cached<'a>(
+        &'a mut self,
         rescan: bool,
         ctx: &mut ViewContext<Self>,
-    ) -> Vec<Editor> {
+    ) -> &'a [Editor] {
+        if !FeatureFlag::OpenFolderInIde.is_enabled() {
+            return &[];
+        }
         if rescan || self.installed_editors_cache.is_none() {
             self.installed_editors_cache = Some(installed_editors(ctx));
         }
-        self.installed_editors_cache.clone().unwrap_or_default()
+        self.installed_editors_cache.as_deref().unwrap_or_default()
     }
 
     /// Toggles the open-folder dropdown. Opening rescans the installed
@@ -182,9 +196,11 @@ impl Workspace {
     pub(super) fn toggle_open_folder_menu(&mut self, ctx: &mut ViewContext<Self>) {
         self.show_open_folder_menu = !self.show_open_folder_menu;
         if self.show_open_folder_menu {
-            let installed = self.installed_editors_cached(true, ctx);
-            let default_editor = resolve_default_folder_editor_with_installed(ctx, &installed);
-            let items = open_folder_menu_items(&installed, default_editor);
+            let items = {
+                let installed = self.installed_editors_cached(true, ctx);
+                let default_editor = resolve_default_folder_editor_with_installed(ctx, installed);
+                open_folder_menu_items(installed, default_editor)
+            };
             self.open_folder_menu.update(ctx, |menu, ctx| {
                 menu.set_items(items, ctx);
             });
