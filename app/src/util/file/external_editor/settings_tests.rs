@@ -188,11 +188,7 @@ fn opting_out_of_an_ide_resolves_to_no_editor() {
 #[test]
 fn the_first_resolve_persists_its_suggestion() {
     let (resolved, persisted) = with_settings(|ctx| {
-        assert_eq!(
-            persisted_folder_editor(ctx).0,
-            false,
-            "the setting starts unset"
-        );
+        assert!(!persisted_folder_editor(ctx).0, "the setting starts unset");
         let resolved =
             resolve_default_folder_editor_with_installed(ctx, &[Editor::Sublime3, Editor::VSCode]);
         (resolved, persisted_folder_editor(ctx))

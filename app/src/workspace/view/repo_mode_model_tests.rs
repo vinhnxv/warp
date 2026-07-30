@@ -249,7 +249,8 @@ fn test_bound_tab_is_filed_under_its_binding_not_another_entry() {
 
             // Its bound root leaving the registry drops it loose rather than
             // reassigning it to whatever else is registered.
-            let (by_entry, loose) = workspace.repo_mode_tab_partition(&[other_root.clone()]);
+            let (by_entry, loose) =
+                workspace.repo_mode_tab_partition(std::slice::from_ref(&other_root));
             assert!(loose.contains(&bound_index));
             assert!(
                 by_entry
