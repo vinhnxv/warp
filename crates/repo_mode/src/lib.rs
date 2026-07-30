@@ -11,5 +11,5 @@ pub use entry::{
     classify_entry_kind, classify_probe_failure, display_name_for_path,
     display_name_for_registry_path, format_remote_key, is_dead_path, is_remote_key, is_remote_path,
     parse_probe_output, parse_remote_key, remote_cd_command, remote_probe_args,
-    remote_probe_script, remote_ssh_command, shell_quote,
+    remote_probe_script, remote_ssh_command, remote_ssh_command_landing_in_path, shell_quote,
 };

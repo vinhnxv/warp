@@ -523,3 +523,108 @@ fn cd_command_quotes_the_remote_path() {
     // host already resolved at probe time (R3), so this is only a fallback.
     assert_eq!(remote_cd_command("~/app"), "cd '~/app'");
 }
+
+/// Covers R12 with warpification off: no `WarpifiedRemote` session is created,
+/// so the bootstrap the deferred `cd` waits for never fires and the tab would
+/// otherwise sit in the remote home directory, silently ignoring the path the
+/// user picked. The path therefore travels on the command line instead.
+///
+/// KTD7's trade is not being given up here — warpification is already off, so
+/// the second positional costs nothing that was not already lost. The `-t` is
+/// what keeps the session interactive: `ssh` allocates no pty for a command.
+#[test]
+fn landing_command_carries_the_path_when_nothing_else_will() {
+    let target = RemoteTarget {
+        server: "10.0.0.7".to_string(),
+        port: 2222,
+        user: "vinh".to_string(),
+        identity: "/Users/v/my keys/id".to_string(),
+        remote_path: "/srv/my app".to_string(),
+    };
+
+    assert_eq!(
+        remote_ssh_command_landing_in_path(&target),
+        r#"ssh -i '/Users/v/my keys/id' -p 2222 -t -- 'vinh@10.0.0.7' 'cd '\''/srv/my app'\''; exec "${SHELL:-/bin/sh}" -l'"#
+    );
+
+    // The warpified shape is untouched: it still carries no path and no `-t`.
+    let warpified = remote_ssh_command(&target);
+    assert!(!warpified.contains("/srv/my app"));
+    assert!(!warpified.contains(" -t "));
+}
+
+/// KTD10 applies to the landing shape too, and one step harder: the remote path
+/// crosses *two* shells. The local shell must see the whole remote command as
+/// one inert word, and the remote shell must then see the path as one argument
+/// to `cd` — so a payload cannot escape at either hop.
+#[test]
+fn landing_command_quotes_the_path_at_both_hops() {
+    let injected = RemoteTarget {
+        server: "host".to_string(),
+        port: DEFAULT_SSH_PORT,
+        user: "vinh".to_string(),
+        identity: String::new(),
+        remote_path: "/srv/app'; rm -rf ~; '".to_string(),
+    };
+
+    assert_eq!(
+        remote_ssh_command_landing_in_path(&injected),
+        concat!(
+            r#"ssh -p 22 -t -- 'vinh@host' "#,
+            r#"'cd '\''/srv/app'\''\'\'''\''; rm -rf ~; '\''\'\'''\'''\''; "#,
+            r#"exec "${SHELL:-/bin/sh}" -l'"#
+        )
+    );
+
+    // Read back what each shell would actually see, rather than trusting the
+    // literal above to be right by inspection.
+    let command = remote_ssh_command_landing_in_path(&injected);
+    let remote_command = single_quoted_suffix(&command);
+    assert_eq!(
+        remote_command,
+        r#"cd '/srv/app'\''; rm -rf ~; '\'''; exec "${SHELL:-/bin/sh}" -l"#
+    );
+    assert_eq!(
+        single_quoted_prefix(&remote_command),
+        injected.remote_path,
+        "the remote shell must see the path as one argument to cd"
+    );
+}
+
+/// Undo one layer of POSIX single-quoting on the trailing quoted word — what
+/// the local shell hands `ssh` as the remote command.
+fn single_quoted_suffix(command: &str) -> String {
+    let start = command
+        .find(" 'cd ")
+        .expect("landing command ends in a quoted remote command");
+    unquote(&command[start + 1..])
+}
+
+/// Undo one layer of POSIX single-quoting on the leading quoted word — what the
+/// remote shell hands `cd` as its argument.
+fn single_quoted_prefix(remote_command: &str) -> String {
+    unquote(
+        remote_command
+            .strip_prefix("cd ")
+            .expect("remote command starts with cd"),
+    )
+}
+
+/// POSIX single-quote removal: quoted runs contribute their contents verbatim,
+/// and `'\''` reduces to one literal quote. Stops at the first unquoted space or
+/// `;`, either of which ends the word — that boundary is the whole point, since
+/// a payload escaping its quotes would show up as extra text past it.
+fn unquote(word: &str) -> String {
+    let mut out = String::new();
+    let mut in_quotes = false;
+    let mut chars = word.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' => in_quotes = !in_quotes,
+            '\\' if !in_quotes => out.push(chars.next().expect("trailing backslash")),
+            ' ' | ';' if !in_quotes => break,
+            _ => out.push(ch),
+        }
+    }
+    out
+}

@@ -16,8 +16,9 @@ use repo_mode::{
     canonicalize_repo_path, classify_entry_kind, classify_probe_failure, display_name_for_path,
     display_name_for_registry_path, is_dead_path, is_remote_key, is_remote_path,
     parse_probe_output, parse_remote_key, remote_cd_command, remote_probe_args,
-    remote_probe_script, remote_ssh_command,
+    remote_probe_script, remote_ssh_command, remote_ssh_command_landing_in_path,
 };
+use settings::Setting as _;
 use warp_errors::report_error;
 use warpui::{AppContext, SingletonEntity, UpdateView, ViewContext, ViewHandle};
 use warpui_core::r#async::FutureExt as _;
@@ -47,6 +48,7 @@ use crate::terminal::TerminalView;
 #[cfg(feature = "local_tty")]
 use crate::terminal::local_shell::LocalShellState;
 use crate::terminal::model::session::{BootstrapSessionType, SessionsEvent};
+use crate::terminal::warpify::settings::WarpifySettings;
 use crate::workspace::tab_group::{TabGroup, TabGroupId};
 use crate::workspace::{TabContextMenuAnchor, WorkspaceAction, WorkspaceRegistry};
 
@@ -647,6 +649,13 @@ impl Workspace {
     /// positional argument would silently cost warpification (KTD7). It runs
     /// instead when the remote shell reports itself bootstrapped — see
     /// [`Self::land_in_remote_path_when_connected`].
+    ///
+    /// That trade only pays while warpification is on. With it off no
+    /// `WarpifiedRemote` session is ever created, so the bootstrap the `cd`
+    /// waits for never arrives and the tab lands in the remote home directory,
+    /// silently ignoring the path the user picked. There is no other "remote
+    /// shell is ready" signal to hang it on, so that case sends the path on the
+    /// command line instead — see [`remote_ssh_command_landing_in_path`].
     fn open_remote_repo_mode_tab(
         &mut self,
         key: &Path,
@@ -664,12 +673,22 @@ impl Workspace {
             return;
         };
 
-        self.land_in_remote_path_when_connected(&terminal, &target.remote_path, ctx);
+        let warpification_enabled = *WarpifySettings::as_ref(ctx)
+            .enable_ssh_warpification
+            .value();
+
+        if warpification_enabled {
+            self.land_in_remote_path_when_connected(&terminal, &target.remote_path, ctx);
+        }
 
         // The tab's shell is still bootstrapping, so this queues and fires on
         // `BootstrapPrecmdDone` — the same route saved launch-config commands
         // take.
-        let ssh_command = remote_ssh_command(target);
+        let ssh_command = if warpification_enabled {
+            remote_ssh_command(target)
+        } else {
+            remote_ssh_command_landing_in_path(target)
+        };
         terminal.update(ctx, |terminal, ctx| {
             terminal.execute_command_or_set_pending(&ssh_command, ctx);
         });

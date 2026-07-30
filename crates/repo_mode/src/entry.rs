@@ -374,12 +374,53 @@ fi
 /// `bash_body.sh` counts positionals *after* the shell has word-split and
 /// stripped quotes, so a quoted destination is still exactly one `ARGS` entry.
 pub fn remote_ssh_command(target: &RemoteTarget) -> String {
+    ssh_command_prefix(target, false)
+}
+
+/// The `ssh` line for a tab that must land in the entry's path *by itself*,
+/// because nothing else will.
+///
+/// [`remote_ssh_command`] keeps the `cd` off the command line so warpification
+/// survives, and relies on the `WarpifiedRemote` bootstrap to run it afterwards
+/// (KTD7). With `warpify.ssh.enable_ssh_warpification` off, that bootstrap never
+/// happens: the tab connects and sits in the remote home directory, silently
+/// ignoring the path the user picked. There is no other signal for "the remote
+/// shell is ready" — without warpification the app cannot see inside the `ssh`
+/// at all — so the path has to travel on the command line or not at all.
+///
+/// The trade KTD7 refuses is not available to give up here: warpification is
+/// already off, so the second positional costs nothing that was not already
+/// lost. `-t` forces a pty, which `ssh` does not allocate for a command;
+/// without it the remote shell would start non-interactive.
+///
+/// `exec` replaces the `cd`'s shell so the session is the login shell rather
+/// than a child of it, and `${SHELL:-/bin/sh}` covers a remote account whose
+/// `SHELL` is unset. Both are expanded by the *remote* shell: the whole remote
+/// command is one shell-quoted local argument, so the local shell strips the
+/// outer quotes and passes it through untouched.
+pub fn remote_ssh_command_landing_in_path(target: &RemoteTarget) -> String {
+    let mut command = ssh_command_prefix(target, true);
+    let remote = format!(
+        r#"{cd}; exec "${{SHELL:-/bin/sh}}" -l"#,
+        cd = remote_cd_command(&target.remote_path),
+    );
+    command.push(' ');
+    command.push_str(&shell_quote(&remote));
+    command
+}
+
+/// `ssh` up to and including the destination, shared by both command shapes.
+fn ssh_command_prefix(target: &RemoteTarget, force_pty: bool) -> String {
     let mut command = String::from("ssh");
     if !target.identity.is_empty() {
         command.push_str(" -i ");
         command.push_str(&shell_quote(&target.identity));
     }
-    command.push_str(&format!(" -p {} -- ", target.port));
+    command.push_str(&format!(" -p {}", target.port));
+    if force_pty {
+        command.push_str(" -t");
+    }
+    command.push_str(" -- ");
     command.push_str(&shell_quote(&target.user_host()));
     command
 }
