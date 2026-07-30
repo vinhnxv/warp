@@ -20,7 +20,9 @@ use crate::util::file::external_editor::settings::{
     OpenFileLayout, PreferMarkdownViewer, PreferTabbedEditorView,
     resolve_default_folder_editor_with_installed,
 };
-use crate::util::file::external_editor::{Editor, EditorSettings, installed_editors};
+use crate::util::file::external_editor::{
+    Editor, EditorSettings, file_manager_name, installed_editors,
+};
 use crate::view_components::{Dropdown, DropdownItem};
 
 const TABBED_FILE_VIEWER_TOGGLE_HEADER: &str = "Group files into single editor pane";
@@ -235,15 +237,25 @@ impl ExternalEditorView {
         };
     }
 
+    /// The label of the row that opts out of an IDE. Opening a folder then
+    /// reveals it in the OS file manager, which is what the toolbar button
+    /// already fell back to — it just had no way to say so from Settings.
+    fn no_folder_editor_label() -> String {
+        format!("None — reveal in {}", file_manager_name())
+    }
+
     /// Builds the `(label, choice)` entries for the default-folder-editor
-    /// dropdown: one per installed editor. Unlike [`Self::init_editor_dropdown`]
-    /// there are no "Default App" / "Warp" / "$EDITOR" entries, because the
-    /// `default_folder_editor` setting only ever holds an
-    /// [`EditorChoice::ExternalEditor`].
+    /// dropdown: the opt-out row, then one per installed editor. Unlike
+    /// [`Self::init_editor_dropdown`] there are no "Default App" / "Warp" /
+    /// "$EDITOR" entries, because opening a *folder* in Warp or `$EDITOR` is
+    /// not a thing — the only two outcomes are an IDE or the file manager.
     fn folder_editor_dropdown_items(installed_editors: &[Editor]) -> Vec<(String, EditorChoice)> {
-        installed_editors
-            .iter()
-            .map(|editor| (format!("{editor}"), EditorChoice::ExternalEditor(*editor)))
+        std::iter::once((Self::no_folder_editor_label(), EditorChoice::SystemDefault))
+            .chain(
+                installed_editors
+                    .iter()
+                    .map(|editor| (format!("{editor}"), EditorChoice::ExternalEditor(*editor))),
+            )
             .collect()
     }
 
@@ -262,9 +274,13 @@ impl ExternalEditorView {
                 .collect();
 
         dropdown.set_items(items, ctx);
-        if let Some(editor) = selected_editor {
-            dropdown.set_selected_by_name(format!("{editor}"), ctx);
-        }
+        // No resolved editor means the folder is revealed, so show the row that
+        // says that. Leaving the dropdown blank made the reveal behaviour look
+        // like a missing setting rather than a state.
+        dropdown.set_selected_by_name(
+            selected_editor.map_or_else(Self::no_folder_editor_label, |editor| format!("{editor}")),
+            ctx,
+        );
     }
 
     /// Handles [`ExternalEditorAction::SetEditor`] by updating the external editor settings.

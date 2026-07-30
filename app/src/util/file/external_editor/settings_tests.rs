@@ -92,3 +92,150 @@ fn unset_default_folder_editor_is_not_explicitly_set() {
     let setting = DefaultFolderEditor::new(None);
     assert!(!setting.is_value_explicitly_set());
 }
+
+/// Builds an app with settings registered, runs `body` against it, and returns
+/// what `body` produced. `resolve_default_folder_editor_with_installed` reads
+/// (and, on a first run, writes) the settings model, so its arms need a real
+/// context rather than the pure-setting construction the tests above use.
+fn with_settings<T: 'static>(body: impl FnOnce(&mut warpui::AppContext) -> T + 'static) -> T {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let out = Rc::new(RefCell::new(None));
+    let captured = Rc::clone(&out);
+    warpui::App::test((), move |mut app| async move {
+        crate::test_util::settings::initialize_settings_for_tests(&mut app);
+        let value = app.update(body);
+        *captured.borrow_mut() = Some(value);
+    });
+    let value = out.borrow_mut().take();
+    value.expect("App::test runs its body to completion")
+}
+
+/// Writes `default_folder_editor` the way the Settings dropdown does.
+fn choose_folder_editor(choice: EditorChoice, ctx: &mut warpui::AppContext) {
+    use warpui::SingletonEntity as _;
+
+    EditorSettings::handle(ctx).update(ctx, |settings, ctx| {
+        settings
+            .default_folder_editor
+            .set_value(choice, ctx)
+            .expect("the folder editor setting accepts every EditorChoice");
+    });
+}
+
+/// Reads back what is persisted, without going through the resolver.
+fn persisted_folder_editor(ctx: &warpui::AppContext) -> (bool, EditorChoice) {
+    use warpui::SingletonEntity as _;
+
+    let settings = EditorSettings::as_ref(ctx);
+    (
+        settings.default_folder_editor.is_value_explicitly_set(),
+        *settings.default_folder_editor,
+    )
+}
+
+/// NA9: an explicitly chosen editor resolves to itself while it is installed.
+#[test]
+fn a_chosen_editor_that_is_installed_resolves_to_itself() {
+    let resolved = with_settings(|ctx| {
+        choose_folder_editor(EditorChoice::ExternalEditor(Editor::VSCode), ctx);
+        resolve_default_folder_editor_with_installed(ctx, &[Editor::VSCode, Editor::Sublime3])
+    });
+
+    assert_eq!(resolved, Some(Editor::VSCode));
+}
+
+/// NA9: the user chose an IDE and then uninstalled it. The folder is revealed
+/// in the file manager — it is *not* opened in whichever other IDE happens to
+/// sort first.
+///
+/// This arm used to fall through to the first-run seed, so uninstalling your
+/// editor silently promoted an unrelated one: the button showed its logo, the
+/// tooltip named it, and clicking opened a folder in an IDE the user never
+/// chose.
+#[test]
+fn a_chosen_editor_that_is_gone_reveals_rather_than_substituting_another() {
+    let resolved = with_settings(|ctx| {
+        choose_folder_editor(EditorChoice::ExternalEditor(Editor::VSCode), ctx);
+        // VS Code is no longer among the installed editors.
+        resolve_default_folder_editor_with_installed(ctx, &[Editor::Sublime3])
+    });
+
+    assert_eq!(resolved, None);
+}
+
+/// NA9: the "None — reveal in the file manager" row. Every non-IDE choice
+/// resolves to no editor, including with IDEs installed and available.
+#[test]
+fn opting_out_of_an_ide_resolves_to_no_editor() {
+    for choice in [
+        EditorChoice::SystemDefault,
+        EditorChoice::Warp,
+        EditorChoice::EnvEditor,
+    ] {
+        let resolved = with_settings(move |ctx| {
+            choose_folder_editor(choice, ctx);
+            resolve_default_folder_editor_with_installed(ctx, &[Editor::VSCode, Editor::Sublime3])
+        });
+
+        assert_eq!(resolved, None, "{choice:?} should resolve to no editor");
+    }
+}
+
+/// NA9: with nothing chosen, the first resolve suggests an editor *and* writes
+/// it down.
+#[test]
+fn the_first_resolve_persists_its_suggestion() {
+    let (resolved, persisted) = with_settings(|ctx| {
+        assert_eq!(
+            persisted_folder_editor(ctx).0,
+            false,
+            "the setting starts unset"
+        );
+        let resolved =
+            resolve_default_folder_editor_with_installed(ctx, &[Editor::Sublime3, Editor::VSCode]);
+        (resolved, persisted_folder_editor(ctx))
+    });
+
+    assert_eq!(resolved, Some(Editor::Sublime3));
+    assert_eq!(
+        persisted,
+        (true, EditorChoice::ExternalEditor(Editor::Sublime3))
+    );
+}
+
+/// NA9: installing an editor that sorts ahead of the seeded one does not change
+/// an already-decided default.
+///
+/// The seed reads `installed_editors.first()`, and it used to be recomputed on
+/// every resolve rather than written down — so installing an application
+/// silently changed which IDE the button opened.
+#[test]
+fn installing_a_higher_priority_editor_does_not_change_the_default() {
+    let (before, after) = with_settings(|ctx| {
+        let before = resolve_default_folder_editor_with_installed(ctx, &[Editor::VSCode]);
+        // Sublime sorts ahead of VS Code in `SUPPORTED_EDITORS`, so an
+        // unpersisted seed would switch to it here.
+        let after =
+            resolve_default_folder_editor_with_installed(ctx, &[Editor::Sublime3, Editor::VSCode]);
+        (before, after)
+    });
+
+    assert_eq!(before, Some(Editor::VSCode));
+    assert_eq!(after, Some(Editor::VSCode));
+}
+
+/// With no editor installed there is no suggestion to make: the folder is
+/// revealed, and nothing is written down, so the first editor the user installs
+/// can still seed the default.
+#[test]
+fn nothing_is_persisted_when_no_editor_is_installed() {
+    let (resolved, persisted) = with_settings(|ctx| {
+        let resolved = resolve_default_folder_editor_with_installed(ctx, &[]);
+        (resolved, persisted_folder_editor(ctx))
+    });
+
+    assert_eq!(resolved, None);
+    assert_eq!(persisted, (false, EditorChoice::SystemDefault));
+}

@@ -2,15 +2,20 @@ use super::*;
 use crate::util::file::external_editor::Editor;
 use crate::util::file::external_editor::settings::EditorChoice;
 
-/// The default-folder-editor dropdown lists exactly the installed editors, in
-/// order, each mapped to an `ExternalEditor` choice (the setting never holds
-/// Warp / System / $EDITOR, so those entries are absent).
+/// The default-folder-editor dropdown lists the opt-out row and then the
+/// installed editors, in order. There are no Warp / System / $EDITOR rows:
+/// opening a *folder* in Warp or `$EDITOR` is not a thing, so the only two
+/// outcomes are an IDE or the file manager.
 #[test]
-fn folder_editor_dropdown_lists_only_installed_editors() {
+fn folder_editor_dropdown_lists_the_opt_out_row_then_installed_editors() {
     let items = ExternalEditorView::folder_editor_dropdown_items(&[Editor::VSCode, Editor::Zed]);
     assert_eq!(
         items,
         vec![
+            (
+                ExternalEditorView::no_folder_editor_label(),
+                EditorChoice::SystemDefault
+            ),
             (
                 format!("{}", Editor::VSCode),
                 EditorChoice::ExternalEditor(Editor::VSCode)
@@ -23,11 +28,19 @@ fn folder_editor_dropdown_lists_only_installed_editors() {
     );
 }
 
-/// With nothing installed, the dropdown offers no editors.
+/// N15: with nothing installed, the opt-out row is still there — the state the
+/// toolbar button already falls back to has to be visible and selectable, not
+/// an empty dropdown that reads as a broken setting.
 #[test]
-fn folder_editor_dropdown_is_empty_when_no_editor_installed() {
+fn folder_editor_dropdown_still_offers_the_opt_out_row_when_no_editor_installed() {
     let items = ExternalEditorView::folder_editor_dropdown_items(&[]);
-    assert!(items.is_empty());
+    assert_eq!(
+        items,
+        vec![(
+            ExternalEditorView::no_folder_editor_label(),
+            EditorChoice::SystemDefault
+        )]
+    );
 }
 
 /// The open-file dropdowns build from a supplied installed-editor list, which

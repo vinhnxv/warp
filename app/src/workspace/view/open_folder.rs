@@ -20,7 +20,9 @@ use crate::code::buffer_location::LocalOrRemotePath;
 use crate::menu::{MenuItem, MenuItemFields};
 use crate::ui_components::icons;
 use crate::util::file::external_editor::settings::resolve_default_folder_editor_with_installed;
-use crate::util::file::external_editor::{Editor, OpenOutcome, installed_editors};
+use crate::util::file::external_editor::{
+    Editor, OpenOutcome, file_manager_name, installed_editors,
+};
 use crate::view_components::compactible_action_button::RenderCompactibleActionButton;
 use crate::workspace::WorkspaceAction;
 use crate::{TelemetryEvent, send_telemetry_from_ctx};
@@ -290,16 +292,9 @@ fn default_open_folder_action(default_editor: Option<Editor>) -> OpenFolderActio
 }
 
 /// OS-aware label for revealing a folder in the system file manager. Mirrors
-/// the label the code view's context menu uses (`app/src/code/view.rs`). Pure
-/// so the platform branch is unit-testable.
-fn os_reveal_label() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "Reveal in Finder"
-    } else if cfg!(target_os = "windows") {
-        "Reveal in Explorer"
-    } else {
-        "Reveal in file manager"
-    }
+/// the label the code view's context menu uses (`app/src/code/view.rs`).
+fn os_reveal_label() -> String {
+    format!("Reveal in {}", file_manager_name())
 }
 
 /// Pure tooltip decision for the open-folder toolbar button:
@@ -313,7 +308,7 @@ fn open_folder_button_tooltip(default_editor: Option<Editor>, is_remote: bool) -
     } else if let Some(editor) = default_editor {
         format!("Open folder in {editor}")
     } else {
-        os_reveal_label().to_string()
+        os_reveal_label()
     }
 }
 

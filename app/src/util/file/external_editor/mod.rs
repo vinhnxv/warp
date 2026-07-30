@@ -57,6 +57,20 @@ pub const SUPPORTED_EDITORS: &[Editor] = &[
     Editor::Windsurf,
 ];
 
+/// What this platform calls the thing that shows a folder on disk. Lives here
+/// so the toolbar's "Reveal in …" label and the Settings row that opts out of
+/// an IDE in favour of it cannot drift apart. Pure so the platform branch is
+/// unit-testable.
+pub fn file_manager_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Finder"
+    } else if cfg!(target_os = "windows") {
+        "Explorer"
+    } else {
+        "file manager"
+    }
+}
+
 /// Returns the subset of [`SUPPORTED_EDITORS`] currently installed on this
 /// machine, in the same order as `SUPPORTED_EDITORS`.
 pub fn installed_editors(ctx: &mut AppContext) -> Vec<Editor> {
