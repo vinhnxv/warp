@@ -4213,11 +4213,18 @@ impl Workspace {
                 // pruned (no remaining members), fall back to "All" (R11).
                 if Self::repo_mode_enabled() {
                     // Bound groups created before naming landed show the stock
-                    // "New Group" label; backfill the repo basename.
+                    // "New Group" label; backfill the repo name.
+                    //
+                    // `display_name_for_registry_path`, not `display_name_for_path`:
+                    // a bound root can be a remote key, whose basename is a
+                    // fragment of an encoded string rather than a repo name.
+                    // This is the same function `create_repo_mode_group_with_tab`
+                    // names a group with, so a backfilled name and a freshly
+                    // created one agree.
                     for group in self.tab_groups.values_mut() {
                         if group.name.is_none() {
                             if let Some(root) = group.repo_root.as_deref() {
-                                group.name = Some(repo_mode::display_name_for_path(
+                                group.name = Some(repo_mode::display_name_for_registry_path(
                                     std::path::Path::new(root),
                                 ));
                             }
