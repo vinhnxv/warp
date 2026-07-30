@@ -1052,10 +1052,9 @@ async fn run_remote_probe(
     };
 
     if !output.status.success() {
-        return Err(classify_probe_failure(
-            output.status.code(),
-            &String::from_utf8_lossy(&output.stderr),
-        ));
+        return Err(classify_probe_failure(&String::from_utf8_lossy(
+            &output.stderr,
+        )));
     }
     parse_probe_output(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
         log::warn!("repo_mode: unreadable ssh probe output");

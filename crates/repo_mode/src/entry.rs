@@ -123,6 +123,19 @@ pub enum RemoteProbeFailure {
     /// a passphrase-protected key with no loaded agent into a non-zero exit —
     /// even though the later interactive tab would prompt and succeed (KTD6).
     NeedsFirstHandConnect,
+    /// The host presented a different identity key than the one already trusted
+    /// for it.
+    ///
+    /// Kept apart from [`NeedsFirstHandConnect`] because the two call for
+    /// opposite responses. An unknown key is an ordinary first connection. A
+    /// *changed* key is OpenSSH's man-in-the-middle signal: it can mean the
+    /// server was legitimately rebuilt, or that something is intercepting the
+    /// connection. Either way the user has to verify the new key out of band —
+    /// telling them to "connect once by hand" would be advice to click through
+    /// the warning.
+    ///
+    /// [`NeedsFirstHandConnect`]: RemoteProbeFailure::NeedsFirstHandConnect
+    HostKeyChanged,
     /// The host answered, but the remote path is not there.
     PathNotFound,
     /// The `ssh` client could not be started on *this* machine, so nothing was
@@ -143,6 +156,7 @@ impl RemoteProbeFailure {
         match self {
             Self::Unreachable => "Unreachable",
             Self::NeedsFirstHandConnect => "Needs first connection",
+            Self::HostKeyChanged => "Host key changed",
             Self::PathNotFound => "Path not found",
             Self::SshUnavailable => "No ssh client",
         }
@@ -154,6 +168,11 @@ impl RemoteProbeFailure {
             Self::Unreachable => "Host did not respond — check the server, port, and network.",
             Self::NeedsFirstHandConnect => {
                 "Connect once by hand first — the host key is unknown or the key is locked."
+            }
+            Self::HostKeyChanged => {
+                "This host's key has changed. That happens when a server is rebuilt, but it is \
+                 also what an intercepted connection looks like — verify the new key before \
+                 trusting it."
             }
             Self::PathNotFound => "That path does not exist on the host.",
             Self::SshUnavailable => {
@@ -411,17 +430,25 @@ pub fn parse_probe_output(stdout: &str) -> Option<RemoteProbeOutcome> {
 /// host at the exit-code level — even though the interactive tab (no
 /// `BatchMode`) would prompt and succeed. The stderr text is what separates
 /// them (KTD6).
-pub fn classify_probe_failure(_exit_code: Option<i32>, stderr: &str) -> RemoteProbeFailure {
-    const FIRST_HAND_MARKERS: [&str; 7] = [
+/// The exit code carries no information here — `BatchMode` collapses every one
+/// of these cases to a non-zero status — so only stderr is read.
+pub fn classify_probe_failure(stderr: &str) -> RemoteProbeFailure {
+    const HOST_KEY_CHANGED_MARKER: &str = "remote host identification has changed";
+    const FIRST_HAND_MARKERS: [&str; 6] = [
         "host key verification failed",
         "authenticity of host",
         "permission denied",
         "enter passphrase",
         "no matching host key",
         "too many authentication failures",
-        "remote host identification has changed",
     ];
     let stderr = stderr.to_ascii_lowercase();
+    // Checked first: a changed host key also prints "host key verification
+    // failed", so the generic marker would otherwise swallow it and hand the
+    // user setup instructions in place of a warning.
+    if stderr.contains(HOST_KEY_CHANGED_MARKER) {
+        return RemoteProbeFailure::HostKeyChanged;
+    }
     if FIRST_HAND_MARKERS
         .iter()
         .any(|marker| stderr.contains(marker))

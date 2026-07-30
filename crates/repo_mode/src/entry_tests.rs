@@ -313,7 +313,7 @@ fn probe_failures_are_classified_by_what_the_user_must_do() {
         "The authenticity of host '10.0.0.7' can't be established.",
     ] {
         assert_eq!(
-            classify_probe_failure(Some(255), stderr),
+            classify_probe_failure(stderr),
             RemoteProbeFailure::NeedsFirstHandConnect,
             "stderr: {stderr}"
         );
@@ -326,11 +326,47 @@ fn probe_failures_are_classified_by_what_the_user_must_do() {
         "",
     ] {
         assert_eq!(
-            classify_probe_failure(Some(255), stderr),
+            classify_probe_failure(stderr),
             RemoteProbeFailure::Unreachable,
             "stderr: {stderr}"
         );
     }
+}
+
+/// A *changed* host key is not a first connection. OpenSSH prints it as its
+/// man-in-the-middle warning, and its stderr also contains "host key
+/// verification failed", so it has to be classified before the generic markers
+/// or the user is handed setup instructions in place of a warning.
+#[test]
+fn a_changed_host_key_is_its_own_reason_not_a_first_connection() {
+    let stderr = "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n\
+                  @    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n\
+                  @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n\
+                  IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!\n\
+                  Host key verification failed.";
+
+    let reason = classify_probe_failure(stderr);
+    assert_eq!(reason, RemoteProbeFailure::HostKeyChanged);
+    assert_ne!(
+        reason,
+        RemoteProbeFailure::NeedsFirstHandConnect,
+        "the generic 'host key verification failed' marker must not win"
+    );
+
+    // The advice must read as a warning, not as a setup step.
+    let message = reason.message().to_ascii_lowercase();
+    assert!(
+        !message.contains("connect once by hand"),
+        "must not tell the user to click through a MITM warning: {message:?}"
+    );
+    assert!(
+        message.contains("verify"),
+        "should tell the user to verify the new key: {message:?}"
+    );
+    assert_ne!(
+        reason.short_label(),
+        RemoteProbeFailure::NeedsFirstHandConnect.short_label()
+    );
 }
 
 /// Covers KTD6/KTD10: the probe is argv, never a shell string; `--` fences the
