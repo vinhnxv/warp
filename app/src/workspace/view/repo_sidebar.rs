@@ -201,7 +201,7 @@ pub(super) fn render_repo_tree(
         let remote_state = entry
             .remote
             .as_ref()
-            .map(|remote| remote_row_state(remote, REMOTE_LABEL_BUDGET));
+            .map(|remote| remote_row_state(remote, SECONDARY_LABEL_BUDGET));
         let branch = match &remote_state {
             // R11: a remote branch comes from the last probe. Reading
             // `.git/HEAD` here would answer about the local filesystem, which
@@ -419,6 +419,7 @@ fn render_entry_row(
             )
         }
     };
+    let labels = row_labels(&entry.display_name, secondary, hover_text);
 
     // R10: the cloud icon is what distinguishes a remote row at a glance, and
     // it goes offline when the last probe failed.
@@ -439,7 +440,11 @@ fn render_entry_row(
     };
 
     let is_dead = entry.is_dead;
-    let display_name = entry.display_name.clone();
+    let RowLabels {
+        name: display_name,
+        secondary,
+        hover: hover_text,
+    } = labels;
     let path = entry.path.clone();
     let path_for_menu = path.clone();
     let remove_path = path.clone();
@@ -635,10 +640,15 @@ fn render_entry_row(
     .finish()
 }
 
-/// Character budget for the `user@host` line before it is ellipsized. The
-/// sidebar is narrow, and a long host or user would otherwise push the row
-/// wider than the panel.
-const REMOTE_LABEL_BUDGET: usize = 28;
+/// Character budget for the secondary line — `user@host` on a remote row, the
+/// path on a local one — before it is ellipsized. The sidebar is narrow, and a
+/// long host, user, or path would otherwise push the row wider than the panel.
+const SECONDARY_LABEL_BUDGET: usize = 28;
+
+/// Character budget for the primary name line. Smaller than the secondary
+/// budget because the name is set two points larger, so fewer characters fit
+/// across the same panel width.
+const NAME_BUDGET: usize = 23;
 
 /// What a remote row is doing, from its last probe alone (R11 — nothing
 /// rechecks in the background).
@@ -686,6 +696,42 @@ pub(super) fn remote_row_state(remote: &RemoteListEntry, budget: usize) -> Remot
         branch,
         status,
         tooltip,
+    }
+}
+
+/// The three strings a repo row shows, after clipping.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RowLabels {
+    pub name: String,
+    pub secondary: String,
+    /// Hover text, which must still carry whatever clipping removed.
+    pub hover: String,
+}
+
+/// Clip a row's name and secondary line to the panel width, keeping the clipped
+/// text recoverable on hover.
+///
+/// Only the remote `user@host` was clipped before, so a long repo name or a deep
+/// local path pushed the row wider than the panel — the sidebar is fixed-width,
+/// so the overflow was simply cut off with nothing to say it had been.
+///
+/// The secondary line is idempotent under this: a remote row arrives already
+/// clipped to the same budget by `remote_row_state`, so re-clipping it is a
+/// no-op rather than a second ellipsis.
+pub(super) fn row_labels(display_name: &str, secondary: String, hover: String) -> RowLabels {
+    let name = truncate_label(display_name, NAME_BUDGET);
+    // A clipped name has to stay recoverable somewhere. A local row's hover text
+    // is its full path, which already ends in the name; a remote row's is
+    // `user@host`, which does not.
+    let hover = if name != display_name && !hover.contains(display_name) {
+        format!("{display_name} — {hover}")
+    } else {
+        hover
+    };
+    RowLabels {
+        name,
+        secondary: truncate_label(&secondary, SECONDARY_LABEL_BUDGET),
+        hover,
     }
 }
 
