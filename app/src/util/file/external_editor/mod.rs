@@ -351,21 +351,36 @@ pub fn open_file_path_in_external_editor(
     open_file_path_with_editor(line_column_number, full_path, editor, ctx);
 }
 
+/// Where a path actually ended up being opened.
+///
+/// Every platform can fall back to the OS file manager — the editor may be
+/// gone, its launch target may not exist, or the spawn may simply fail — and
+/// the caller has no other way to find out. Callers that only want the side
+/// effect can ignore it; the ones that report what happened cannot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OpenOutcome {
+    /// The chosen (or inferred) editor was launched.
+    Editor,
+    /// The path was handed to the OS: the file manager, or the default handler.
+    FileManager,
+}
+
 pub fn open_file_path_with_editor(
     line_column_number: Option<LineAndColumnArg>,
     full_path: PathBuf,
     editor: Option<Editor>,
     ctx: &mut AppContext,
-) {
+) -> OpenOutcome {
     cfg_if::cfg_if! {
         if #[cfg(target_os = "macos")] {
-            mac::open_file_path_with_line_and_col(line_column_number, editor, &full_path, ctx);
+            mac::open_file_path_with_line_and_col(line_column_number, editor, &full_path, ctx)
         } else if #[cfg(any(target_os = "linux", target_os = "freebsd"))] {
-            linux::open_file_path_with_line_and_col(line_column_number, editor, &full_path, ctx);
+            linux::open_file_path_with_line_and_col(line_column_number, editor, &full_path, ctx)
         } else if #[cfg(windows)]{
-            windows::open_file_path_with_line_and_col(line_column_number, editor, &full_path, ctx);
+            windows::open_file_path_with_line_and_col(line_column_number, editor, &full_path, ctx)
         } else {
             ctx.open_file_path(&full_path);
+            OpenOutcome::FileManager
         }
     }
 }

@@ -340,7 +340,7 @@ pub fn open_file_path_with_line_and_col(
     with_editor: Option<Editor>,
     full_path: &Path,
     ctx: &mut AppContext,
-) {
+) -> OpenOutcome {
     if full_path.is_file() || full_path.is_dir() {
         let editor = if with_editor.is_some_and(|editor| editor.is_installed(ctx)) {
             with_editor
@@ -354,7 +354,7 @@ pub fn open_file_path_with_line_and_col(
         if let Some(editor) = editor
             && editor.open(line_column_number, full_path, ctx)
         {
-            return;
+            return OpenOutcome::Editor;
         }
 
         // NSWorkspace's default-app routing can hand files to a sibling
@@ -368,11 +368,12 @@ pub fn open_file_path_with_line_and_col(
                 && is_warp_bundle(bundle_id)
                 && open_with_bundle(&current, full_path)
             {
-                return;
+                return OpenOutcome::Editor;
             }
         }
     }
     ctx.open_file_path(full_path);
+    OpenOutcome::FileManager
 }
 
 fn is_warp_bundle(bundle_id: &str) -> bool {

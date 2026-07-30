@@ -20,7 +20,7 @@ use crate::code::buffer_location::LocalOrRemotePath;
 use crate::menu::{MenuItem, MenuItemFields};
 use crate::ui_components::icons;
 use crate::util::file::external_editor::settings::resolve_default_folder_editor_with_installed;
-use crate::util::file::external_editor::{Editor, installed_editors};
+use crate::util::file::external_editor::{Editor, OpenOutcome, installed_editors};
 use crate::view_components::compactible_action_button::RenderCompactibleActionButton;
 use crate::workspace::WorkspaceAction;
 use crate::{TelemetryEvent, send_telemetry_from_ctx};
@@ -83,16 +83,21 @@ impl Workspace {
             return;
         };
 
-        // Snapshot the telemetry target before consuming `action` in the launch.
-        let target = action.telemetry_target();
-        match action {
+        // The target is read from the *outcome*, not from the action. Launching
+        // an editor can fall back to the file manager — the editor may be gone,
+        // or the spawn may fail — and reporting the requested IDE regardless
+        // made every such fallback look like a successful launch, which is the
+        // one thing this metric exists to distinguish.
+        let outcome = match &action {
             OpenFolderAction::LaunchEditor(editor) => {
-                crate::util::file::open_file_path_with_editor(None, folder, Some(editor), ctx);
+                crate::util::file::open_file_path_with_editor(None, folder, Some(*editor), ctx)
             }
             OpenFolderAction::Reveal => {
                 ctx.open_file_path_in_explorer(&folder);
+                OpenOutcome::FileManager
             }
-        }
+        };
+        let target = telemetry_target_for(&action, outcome);
 
         // Record which app the folder opened in and whether it came from the
         // primary click (`false`) or the dropdown (`true`).
@@ -239,6 +244,21 @@ impl OpenFolderAction {
             OpenFolderAction::LaunchEditor(editor) => format!("{editor}"),
             OpenFolderAction::Reveal => "finder".to_string(),
         }
+    }
+}
+
+/// What to report the folder as having opened in, given what was asked for and
+/// what actually happened.
+///
+/// Read from the outcome rather than the action, because launching an editor
+/// can end at the file manager: the editor may have been uninstalled since it
+/// was detected, its launch target may not exist, or the spawn may fail.
+/// Reporting the requested IDE regardless made every one of those look like a
+/// successful launch, which is the one thing this metric exists to tell apart.
+fn telemetry_target_for(action: &OpenFolderAction, outcome: OpenOutcome) -> String {
+    match outcome {
+        OpenOutcome::Editor => action.telemetry_target(),
+        OpenOutcome::FileManager => OpenFolderAction::Reveal.telemetry_target(),
     }
 }
 

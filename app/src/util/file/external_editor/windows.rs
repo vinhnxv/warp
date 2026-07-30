@@ -13,7 +13,7 @@ use warpui::AppContext;
 use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 use winreg::{HKEY, RegKey};
 
-use super::Editor;
+use super::{Editor, OpenOutcome};
 
 static INSTALLED_EDITOR_METADATA: OnceLock<HashMap<Editor, EditorMetadata>> = OnceLock::new();
 
@@ -122,6 +122,16 @@ fn compute_installed_editors() -> HashMap<Editor, EditorMetadata> {
             else {
                 continue;
             };
+
+            // Detection is "the thing we would launch exists", not "the
+            // registry mentions this app". An uninstall that leaves its
+            // Uninstall key behind, or a `path_to_executable` that does not
+            // match how this build lays itself out, used to report the editor
+            // as installed — so it appeared in the dropdown, was offered as the
+            // default, and then did nothing at all when clicked.
+            if !executable_path.exists() {
+                continue;
+            }
 
             let editor_metadata = EditorMetadata { executable_path };
             installed_editors.insert(*editor, editor_metadata);
@@ -241,7 +251,7 @@ pub fn open_file_path_with_line_and_col(
     mut with_editor: Option<Editor>,
     full_path: &Path,
     ctx: &mut AppContext,
-) {
+) -> OpenOutcome {
     let is_dir = full_path.is_dir();
     if full_path.is_file() || is_dir {
         with_editor = with_editor.filter(|editor| editor.is_installed(ctx));
@@ -251,19 +261,25 @@ pub fn open_file_path_with_line_and_col(
             } else {
                 editor.command(line_column_number, full_path)
             };
+            // A failed spawn falls through to the file manager rather than
+            // returning past it. Reporting the error and then doing nothing at
+            // all left the user's click with no visible effect — macOS has
+            // always fallen back here, and there is no reason Windows should
+            // not.
             if let Some(mut command) = command {
-                if let Err(err) = command.spawn() {
-                    report_error!(
+                match command.spawn() {
+                    Ok(_) => return OpenOutcome::Editor,
+                    Err(err) => report_error!(
                         anyhow::Error::new(err).context("Error launching editor"),
                         extra: { "editor" => ?editor }
-                    );
+                    ),
                 }
-                return;
             }
         }
     }
 
     ctx.open_file_path(full_path);
+    OpenOutcome::FileManager
 }
 
 #[cfg(test)]

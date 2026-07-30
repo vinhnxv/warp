@@ -9,7 +9,7 @@ use warp_errors::report_error;
 use warp_util::path::LineAndColumnArg;
 use warpui::AppContext;
 
-use super::Editor;
+use super::{Editor, OpenOutcome};
 
 static INSTALLED_EDITOR_METADATA: OnceLock<HashMap<Editor, EditorMetadata>> = OnceLock::new();
 
@@ -329,7 +329,7 @@ pub fn open_file_path_with_line_and_col(
     with_editor: Option<Editor>,
     full_path: &Path,
     ctx: &mut AppContext,
-) {
+) -> OpenOutcome {
     let is_dir = full_path.is_dir();
     if full_path.is_file() || is_dir {
         // A directory can only be opened through an explicitly chosen editor.
@@ -347,19 +347,24 @@ pub fn open_file_path_with_line_and_col(
             } else {
                 editor.command(full_path, line_column_number)
             };
+            // A failed spawn falls through to the file manager rather than
+            // returning past it. Reporting the error and then doing nothing at
+            // all left the user's click with no visible effect — macOS has
+            // always fallen back here, and there is no reason Linux should not.
             if let Some(mut command) = command {
-                if let Err(err) = command.spawn() {
-                    report_error!(
+                match command.spawn() {
+                    Ok(_) => return OpenOutcome::Editor,
+                    Err(err) => report_error!(
                         anyhow::Error::new(err).context("Error launching editor"),
                         extra: { "editor" => ?editor }
-                    );
+                    ),
                 }
-                return;
             }
         }
     }
 
     ctx.open_file_path(full_path);
+    OpenOutcome::FileManager
 }
 
 /// Attempt to match a file with an existing editor based on Mime type

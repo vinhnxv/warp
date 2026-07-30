@@ -245,3 +245,31 @@ fn test_menu_items_lists_installed_ides_then_divider_then_reveal() {
         other => panic!("expected the Reveal item, got {other:?}"),
     }
 }
+
+/// NA8: a launch that ended at the file manager is reported as the file
+/// manager, not as the IDE the user asked for.
+///
+/// The target used to be snapshotted from the action before the launch ran, so
+/// an editor that had been uninstalled since it was detected — or whose spawn
+/// failed — still reported as a successful open in that IDE. That is precisely
+/// the case this metric exists to surface.
+#[test]
+fn a_launch_that_falls_back_to_the_file_manager_reports_the_file_manager() {
+    let launch = OpenFolderAction::LaunchEditor(Editor::VSCode);
+
+    assert_eq!(
+        telemetry_target_for(&launch, OpenOutcome::Editor),
+        format!("{}", Editor::VSCode)
+    );
+    assert_eq!(
+        telemetry_target_for(&launch, OpenOutcome::FileManager),
+        "finder",
+        "a fallback must not be reported as the IDE that was asked for"
+    );
+
+    // Reveal is unaffected: it always was the file manager.
+    assert_eq!(
+        telemetry_target_for(&OpenFolderAction::Reveal, OpenOutcome::FileManager),
+        "finder"
+    );
+}
