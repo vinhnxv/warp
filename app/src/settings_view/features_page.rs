@@ -4812,7 +4812,7 @@ impl SettingsWidget for ExternalEditorWidget {
     type View = FeaturesPageView;
 
     fn search_terms(&self) -> &str {
-        "editor open files markdown AI conversations layout pane tab"
+        "editor open files markdown AI conversations layout pane tab folders ide toolbar reveal"
     }
 
     fn render(

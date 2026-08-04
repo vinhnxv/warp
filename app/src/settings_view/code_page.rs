@@ -2592,7 +2592,7 @@ impl SettingsWidget for ExternalEditorCodeWidget {
     type View = CodeSettingsPageView;
 
     fn search_terms(&self) -> &str {
-        "code editor open files markdown AI conversations layout pane tab"
+        "code editor open files markdown AI conversations layout pane tab folders ide toolbar reveal"
     }
 
     fn render(
