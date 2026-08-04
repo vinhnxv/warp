@@ -4254,12 +4254,12 @@ impl Workspace {
                     // names a group with, so a backfilled name and a freshly
                     // created one agree.
                     for group in self.tab_groups.values_mut() {
-                        if group.name.is_none() {
-                            if let Some(root) = group.repo_root.as_deref() {
-                                group.name = Some(repo_mode::display_name_for_registry_path(
-                                    std::path::Path::new(root),
-                                ));
-                            }
+                        if group.name.is_none()
+                            && let Some(root) = group.repo_root.as_deref()
+                        {
+                            group.name = Some(repo_mode::display_name_for_registry_path(
+                                std::path::Path::new(root),
+                            ));
                         }
                     }
                     if let Some(root) = self.selected_repo_root.clone() {
@@ -4279,11 +4279,10 @@ impl Workspace {
                                     .tabs
                                     .get(self.active_tab_index)
                                     .is_some_and(|t| t.group_id == Some(group_id));
-                                if !active_in_group {
-                                    if let Some(index) = self.mru_first_tab_index_in_group(group_id)
-                                    {
-                                        self.activate_tab_internal(index, ctx);
-                                    }
+                                if !active_in_group
+                                    && let Some(index) = self.mru_first_tab_index_in_group(group_id)
+                                {
+                                    self.activate_tab_internal(index, ctx);
                                 }
                             }
                         }
@@ -12572,17 +12571,15 @@ impl Workspace {
         // R11: fall back to "All" when the last bound-group tab was closed, so
         // the filtered strip still contains the newly activated tab instead of
         // auto-opening a fresh terminal at the entry root.
-        if Self::repo_mode_enabled() {
-            if let Some(root) = pruned_repo_root {
-                if self.selected_repo_root.as_deref() == Some(root.as_str())
-                    && !self
-                        .tab_groups
-                        .values()
-                        .any(|g| g.repo_root.as_deref() == Some(root.as_str()))
-                {
-                    self.selected_repo_root = None;
-                }
-            }
+        if Self::repo_mode_enabled()
+            && let Some(root) = pruned_repo_root
+            && self.selected_repo_root.as_deref() == Some(root.as_str())
+            && !self
+                .tab_groups
+                .values()
+                .any(|g| g.repo_root.as_deref() == Some(root.as_str()))
+        {
+            self.selected_repo_root = None;
         }
 
         ctx.dispatch_global_action("workspace:save_app", ());
@@ -13220,16 +13217,16 @@ impl Workspace {
     fn new_tab_index_and_group(&self, ctx: &AppContext) -> (usize, Option<TabGroupId>) {
         // R6: while a repo-mode entry is selected, new tabs join that entry's
         // bound group (even with AfterAllTabs / ungrouped active tab).
-        if Self::repo_mode_enabled() {
-            if let Some(group_id) = self.selected_repo_mode_group_id() {
-                let insert_idx = self
-                    .tabs
-                    .iter()
-                    .rposition(|t| t.group_id == Some(group_id))
-                    .map(|i| i + 1)
-                    .unwrap_or_else(|| self.tab_count());
-                return (insert_idx, Some(group_id));
-            }
+        if Self::repo_mode_enabled()
+            && let Some(group_id) = self.selected_repo_mode_group_id()
+        {
+            let insert_idx = self
+                .tabs
+                .iter()
+                .rposition(|t| t.group_id == Some(group_id))
+                .map(|i| i + 1)
+                .unwrap_or_else(|| self.tab_count());
+            return (insert_idx, Some(group_id));
         }
 
         let active_group_id = if FeatureFlag::GroupedTabs.is_enabled() {

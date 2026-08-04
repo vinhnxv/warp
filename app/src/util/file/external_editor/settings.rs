@@ -186,10 +186,10 @@ fn seed_default_folder_editor(
     open_file_editor: EditorChoice,
     installed_editors: &[super::Editor],
 ) -> Option<super::Editor> {
-    if let EditorChoice::ExternalEditor(editor) = open_file_editor {
-        if installed_editors.contains(&editor) {
-            return Some(editor);
-        }
+    if let EditorChoice::ExternalEditor(editor) = open_file_editor
+        && installed_editors.contains(&editor)
+    {
+        return Some(editor);
     }
     installed_editors.first().copied()
 }

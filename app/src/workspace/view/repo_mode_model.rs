@@ -764,10 +764,10 @@ impl Workspace {
                     None => self.create_repo_mode_group_with_tab(&path_buf, ctx),
                 }
             }
-        } else if !members.contains(&self.active_tab_index) {
-            if let Some(index) = self.mru_first_among(&members) {
-                self.activate_tab(index, ctx);
-            }
+        } else if !members.contains(&self.active_tab_index)
+            && let Some(index) = self.mru_first_among(&members)
+        {
+            self.activate_tab(index, ctx);
         }
         ctx.notify();
     }

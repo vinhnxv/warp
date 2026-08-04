@@ -1793,7 +1793,7 @@ fn test_last_tab_close_still_confirms_shared_session_in_repo_mode() {
             });
         });
 
-        workspace.read(&mut app, |workspace, ctx| {
+        workspace.read(&app, |workspace, ctx| {
             assert_eq!(workspace.tab_count(), 1);
             assert_eq!(number_of_shared_sessions_in_tab(workspace, 0, ctx), 1);
             assert!(
