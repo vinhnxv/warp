@@ -17,8 +17,8 @@ use pathfinder_geometry::vector::{Vector2F, vec2f};
 use repo_mode::{RemoteProbeFailure, RemoteProbeState, RepoEntryKind};
 use settings::Setting;
 use warp_core::ui::Icon as WarpIcon;
-use warp_core::ui::theme::Fill as ThemeFill;
 use warp_core::ui::theme::color::internal_colors;
+use warp_core::ui::theme::{AnsiColorIdentifier, Fill as ThemeFill};
 use warpui::elements::{
     ChildAnchor, ConstrainedBox, Container, CrossAxisAlignment, Element, Empty, Expanded, Flex,
     Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning, Padding,
@@ -104,6 +104,7 @@ pub(super) fn render_repo_header(state: &RepoSidebarState, app: &AppContext) -> 
         )
         .with_child(render_header_button(
             "+ Add",
+            HeaderButtonRole::Accent,
             state.add_button.clone(),
             // R1: one control, two destinations — the menu opens at the click.
             |position| WorkspaceAction::ToggleRepoModeAddMenu { position },
@@ -133,6 +134,7 @@ fn render_other_tabs_header(
         )
         .with_child(render_header_button(
             "+ New",
+            HeaderButtonRole::Accent,
             mouse,
             |_| WorkspaceAction::NewRepoModeLooseTab,
             app_appearance,
@@ -323,33 +325,48 @@ fn render_divider(app_appearance: &Appearance) -> Box<dyn Element> {
     .finish()
 }
 
-/// Small accent text button used on section headers ("+ Add", "+ New").
+/// Which color role a header button takes.
+enum HeaderButtonRole {
+    /// Additive actions — the affirmative accent.
+    Accent,
+    /// Permanently deletes something. Mirrors `DangerNakedTheme` so a
+    /// destructive control never wears the same color as an additive one.
+    Danger,
+}
+
+/// Small text button used on section headers.
 ///
 /// `action` receives the click position so a button can open a menu anchored
 /// where the user clicked, not just fire a fixed action.
 fn render_header_button(
     label: &'static str,
+    role: HeaderButtonRole,
     mouse: MouseStateHandle,
     action: impl Fn(Vector2F) -> WorkspaceAction + 'static,
     app_appearance: &Appearance,
 ) -> Box<dyn Element> {
     let theme = app_appearance.theme();
-    let accent = theme.accent();
+    // Kept in sync with `NakedTheme`/`DangerNakedTheme` in `action_button.rs`.
+    let (text_color, hover_background) = match role {
+        HeaderButtonRole::Accent => (theme.accent().into(), internal_colors::fg_overlay_2(theme)),
+        HeaderButtonRole::Danger => (
+            theme.ansi_fg_red(),
+            ThemeFill::Solid(theme.ansi_overlay_1(
+                AnsiColorIdentifier::Red.to_ansi_color(&theme.terminal_colors().normal),
+            )),
+        ),
+    };
     let font = app_appearance.ui_font_family();
     Hoverable::new(mouse, move |hover| {
         let background = if hover.is_hovered() {
-            internal_colors::fg_overlay_2(theme)
+            hover_background
         } else {
             ThemeFill::Solid(ColorU::transparent_black())
         };
-        Container::new(
-            Text::new(label, font, 11.)
-                .with_color(accent.into())
-                .finish(),
-        )
-        .with_padding(Padding::uniform(4.))
-        .with_background(background)
-        .finish()
+        Container::new(Text::new(label, font, 11.).with_color(text_color).finish())
+            .with_padding(Padding::uniform(4.))
+            .with_background(background)
+            .finish()
     })
     .on_click(move |ctx, _, position| {
         ctx.dispatch_typed_action(action(position));
@@ -537,6 +554,7 @@ fn render_entry_row(
             // repository destructive.
             top_row.add_child(render_header_button(
                 "Remove",
+                HeaderButtonRole::Danger,
                 remove_mouse.clone(),
                 {
                     let path = remove_path.clone();
@@ -775,10 +793,10 @@ fn repo_branch(
 ) -> Option<String> {
     let key = root.to_string_lossy().into_owned();
     let now = Instant::now();
-    if let Some((refreshed_at, cached)) = cache.borrow().get(&key) {
-        if now.duration_since(*refreshed_at) < BRANCH_CACHE_TTL {
-            return cached.clone();
-        }
+    if let Some((refreshed_at, cached)) = cache.borrow().get(&key)
+        && now.duration_since(*refreshed_at) < BRANCH_CACHE_TTL
+    {
+        return cached.clone();
     }
     let branch = read_git_head_branch(root);
     cache.borrow_mut().insert(key, (now, branch.clone()));
