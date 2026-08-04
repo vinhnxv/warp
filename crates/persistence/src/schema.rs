@@ -455,6 +455,7 @@ diesel::table! {
         left_panel_open -> Nullable<Bool>,
         vertical_tabs_panel_open -> Nullable<Bool>,
         selected_repo_root -> Nullable<Text>,
+        team_uid -> Nullable<Text>,
     }
 }
 
