@@ -29020,10 +29020,21 @@ impl Workspace {
                     // membership.
                     let use_vertical_tabs = FeatureFlag::VerticalTabs.is_enabled()
                         && *TabSettings::as_ref(ctx).use_vertical_tabs;
+                    // The section clamp applies to the placeholder reorder too:
+                    // it travels the source window's real tab order, so letting
+                    // it leave its repository's run would break the same
+                    // invariant an in-window drag must preserve. Hoisted once
+                    // per drag event — this walks the project registry.
+                    let entry_paths = self.repo_mode_entry_paths(ctx);
                     let new_index = if use_vertical_tabs {
-                        self.calculate_updated_tab_index_vertical(current_index, position, ctx)
+                        self.calculate_updated_tab_index_vertical(
+                            current_index,
+                            position,
+                            &entry_paths,
+                            ctx,
+                        )
                     } else {
-                        self.calculate_updated_tab_index(current_index, position, ctx)
+                        self.calculate_updated_tab_index(current_index, position, &entry_paths, ctx)
                     };
                     if new_index != current_index {
                         // Do not allow the placeholder to cross the pinned/unpinned
@@ -29174,6 +29185,12 @@ impl Workspace {
             FeatureFlag::VerticalTabs.is_enabled() && *TabSettings::as_ref(ctx).use_vertical_tabs;
         let groups_enabled = FeatureFlag::GroupedTabs.is_enabled();
 
+        // Hoisted once per drag event rather than per lookup: this walks the
+        // project registry, and both the reassignment guard below and the
+        // section-scoped neighbour search after it consult it. It sits outside
+        // the `groups_enabled` block because that search runs unconditionally.
+        let entry_paths = self.repo_mode_entry_paths(ctx);
+
         if groups_enabled {
             // Reassign membership when the dragged tab enters a different
             // expanded group. Collapsed groups are handled by the safety-net
@@ -29198,11 +29215,6 @@ impl Workspace {
             // This is not supported as pinned items can not leave the pinned area.
             let pinned_into_unpinned_group =
                 was_pinned && expanded_target.is_some() && !target_group_pinned;
-
-            // Hoisted once per drag event rather than per lookup: this walks the
-            // project registry, and the guard consults it for both sides of the
-            // drag.
-            let entry_paths = self.repo_mode_entry_paths(ctx);
 
             // Skipping reassignment deliberately falls through to the neighbour
             // swap below rather than returning: the tab still reorders inside
@@ -29268,9 +29280,9 @@ impl Workspace {
         }
 
         let new_index = if use_vertical_tabs {
-            self.calculate_updated_tab_index_vertical(current_index, position, ctx)
+            self.calculate_updated_tab_index_vertical(current_index, position, &entry_paths, ctx)
         } else {
-            self.calculate_updated_tab_index(current_index, position, ctx)
+            self.calculate_updated_tab_index(current_index, position, &entry_paths, ctx)
         };
 
         if new_index != current_index {
@@ -29393,6 +29405,48 @@ impl Workspace {
         }
     }
 
+    /// Nearest tab index in the same section as `current_index`, searching in
+    /// the given direction. `None` is the clamp: no same-section tab that way,
+    /// so the drag stops at the section edge (R2/R3).
+    ///
+    /// Foreign-section tabs are *skipped*, not stopped at. Stopping at the first
+    /// one would freeze loose reordering whenever a repository tab happens to
+    /// sit between two loose tabs in flat order; the absence of a same-section
+    /// tab in the direction of travel is what clamps, not the presence of a
+    /// foreign one.
+    ///
+    /// Pure over the tab list on purpose. Geometry stays in the callers, because
+    /// no test can populate the position cache they read, and this clamp has to
+    /// be exercisable. Pinning stays there too: this returns the neighbor
+    /// whatever its pin state, and the callers' existing
+    /// `is_tab_effectively_pinned` check refuses the swap — the two clamps
+    /// compose, a swap needs both.
+    ///
+    /// With either feature flag off every tab reads loose (see
+    /// `repo_mode_group_section`), so the first candidate always matches and the
+    /// result is the plain adjacent index — which is how those builds keep
+    /// today's behavior by construction rather than by a branch.
+    fn section_neighbor(
+        &self,
+        current_index: usize,
+        forward: bool,
+        entry_paths: &[PathBuf],
+    ) -> Option<usize> {
+        let section = self.repo_mode_tab_section(current_index, entry_paths);
+        let mut index = current_index;
+        loop {
+            index = if forward {
+                let next = index + 1;
+                (next < self.tabs.len()).then_some(next)?
+            } else {
+                index.checked_sub(1)?
+            };
+            if self.repo_mode_tab_section(index, entry_paths) == section {
+                return Some(index);
+            }
+        }
+    }
+
     /// Determines the appropriate index for a tab that is being dragged, based on its current
     /// index and drag position
     ///
@@ -29403,10 +29457,17 @@ impl Workspace {
     ///
     /// If the midpoint is not in either location, then we return the current index, as the tab has
     /// not moved out of its position
+    ///
+    /// "Surrounding" means the nearest tab in the dragged tab's own section (see
+    /// `section_neighbor`), not simply the adjacent one, so a drag clamps at its
+    /// section's edge. When that neighbor is non-adjacent the swap fires only
+    /// once the cursor passes its far edge — this axis compares against neighbor
+    /// edges rather than midpoints.
     fn calculate_updated_tab_index(
         &self,
         current_index: usize,
         drag_position: RectF,
+        entry_paths: &[PathBuf],
         ctx: &mut ViewContext<Self>,
     ) -> usize {
         let midpoint_drag_x = (drag_position.min_x() + drag_position.max_x()) / 2.;
@@ -29414,26 +29475,18 @@ impl Workspace {
         // Use `neighbor_drag_rect` (rather than reading `tab_position_id`
         // directly) so members of a collapsed group fall back to the group's
         // visible container rect instead of their stale last-expanded rect.
-        let maybe_left_tab = if current_index > 0 {
-            self.neighbor_drag_rect(current_index - 1, false, ctx)
-        } else {
-            None
-        };
-        if let Some(tab_position) = maybe_left_tab
+        if let Some(left_index) = self.section_neighbor(current_index, false, entry_paths)
+            && let Some(tab_position) = self.neighbor_drag_rect(left_index, false, ctx)
             && midpoint_drag_x < tab_position.max_x()
         {
-            return current_index - 1;
+            return left_index;
         }
 
-        let maybe_right_tab = if current_index < self.tabs.len() - 1 {
-            self.neighbor_drag_rect(current_index + 1, false, ctx)
-        } else {
-            None
-        };
-        if let Some(tab_position) = maybe_right_tab
+        if let Some(right_index) = self.section_neighbor(current_index, true, entry_paths)
+            && let Some(tab_position) = self.neighbor_drag_rect(right_index, false, ctx)
             && midpoint_drag_x > tab_position.min_x()
         {
-            return current_index + 1;
+            return right_index;
         }
 
         current_index
@@ -29443,35 +29496,34 @@ impl Workspace {
     ///
     /// Uses midpoint-of-neighbor thresholds rather than edge thresholds to prevent
     /// oscillation when groups have different heights.
+    ///
+    /// Section-scoped through the same `section_neighbor` as the horizontal
+    /// variant: the two bars are two views of one tab order, so clamping only
+    /// this one would let the other break the invariant it renders.
     fn calculate_updated_tab_index_vertical(
         &self,
         current_index: usize,
         drag_position: RectF,
+        entry_paths: &[PathBuf],
         ctx: &mut ViewContext<Self>,
     ) -> usize {
         let midpoint_drag_y = (drag_position.min_y() + drag_position.max_y()) / 2.;
 
-        let maybe_above_tab = if current_index > 0 {
-            self.neighbor_drag_rect(current_index - 1, true, ctx)
-        } else {
-            None
-        };
-        if let Some(tab_position) = maybe_above_tab {
+        if let Some(above_index) = self.section_neighbor(current_index, false, entry_paths)
+            && let Some(tab_position) = self.neighbor_drag_rect(above_index, true, ctx)
+        {
             let neighbor_midpoint_y = (tab_position.min_y() + tab_position.max_y()) / 2.;
             if midpoint_drag_y < neighbor_midpoint_y {
-                return current_index - 1;
+                return above_index;
             }
         }
 
-        let maybe_below_tab = if current_index < self.tabs.len() - 1 {
-            self.neighbor_drag_rect(current_index + 1, true, ctx)
-        } else {
-            None
-        };
-        if let Some(tab_position) = maybe_below_tab {
+        if let Some(below_index) = self.section_neighbor(current_index, true, entry_paths)
+            && let Some(tab_position) = self.neighbor_drag_rect(below_index, true, ctx)
+        {
             let neighbor_midpoint_y = (tab_position.min_y() + tab_position.max_y()) / 2.;
             if midpoint_drag_y > neighbor_midpoint_y {
-                return current_index + 1;
+                return below_index;
             }
         }
 

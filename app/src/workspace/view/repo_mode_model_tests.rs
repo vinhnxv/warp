@@ -1841,3 +1841,384 @@ fn test_drag_reassignment_is_unguarded_with_repo_mode_off() {
         });
     });
 }
+
+/// Registers `/repo/a` and hands back the two-tab-minimum fixture the section
+/// tests share: `roots[i]` binds tab `i` to that repository, `None` leaves it
+/// loose. Tab 0 already exists on a fresh workspace, so only the rest are added.
+fn bind_tabs(workspace: &mut Workspace, roots: &[Option<&str>], ctx: &mut ViewContext<Workspace>) {
+    while workspace.tabs.len() < roots.len() {
+        workspace.add_terminal_tab(false, ctx);
+    }
+    let mut group_ids: HashMap<String, TabGroupId> = HashMap::new();
+    for (index, root) in roots.iter().enumerate() {
+        let Some(root) = root else { continue };
+        let group_id = *group_ids.entry((*root).to_string()).or_insert_with(|| {
+            let mut group = TabGroup::new();
+            group.repo_root = Some((*root).to_string());
+            let id = group.id;
+            workspace.tab_groups.insert(id, group);
+            id
+        });
+        workspace.tabs[index].group_id = Some(group_id);
+    }
+}
+
+/// Every tab group still occupies one contiguous run of tab indices (R5).
+fn assert_groups_contiguous(workspace: &Workspace) {
+    let mut spans: HashMap<TabGroupId, (usize, usize, usize)> = HashMap::new();
+    for (index, tab) in workspace.tabs.iter().enumerate() {
+        let Some(group_id) = tab.group_id else {
+            continue;
+        };
+        let span = spans.entry(group_id).or_insert((index, index, 0));
+        span.0 = span.0.min(index);
+        span.1 = span.1.max(index);
+        span.2 += 1;
+    }
+    for (group_id, (first, last, count)) in spans {
+        assert_eq!(
+            last - first + 1,
+            count,
+            "group {group_id:?} spans {first}..={last} but has {count} members"
+        );
+    }
+}
+
+fn one_repo_projects() -> Vec<Project> {
+    let now = Utc::now().naive_utc();
+    vec![Project {
+        path: "/repo/a".to_string(),
+        added_ts: now,
+        last_opened_ts: Some(now),
+    }]
+}
+
+/// Covers AE1. Inside one repository's run, the neighbour on each axis is that
+/// repository's adjacent tab — an interior drag reorders exactly as before.
+#[test]
+fn test_section_neighbor_moves_within_a_repository_run() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = one_repo_projects();
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            // [A1, A2, A3], all bound to /repo/a.
+            bind_tabs(
+                workspace,
+                &[Some("/repo/a"), Some("/repo/a"), Some("/repo/a")],
+                ctx,
+            );
+            let entry_paths = workspace.repo_mode_entry_paths(ctx);
+
+            assert_eq!(
+                workspace.section_neighbor(2, false, &entry_paths),
+                Some(1),
+                "the neighbour above A3 is A2"
+            );
+            assert_eq!(
+                workspace.section_neighbor(0, true, &entry_paths),
+                Some(1),
+                "the neighbour below A1 is A2"
+            );
+        });
+    });
+}
+
+/// Covers AE2 / R2 / R3. At each end of the repository's run there is no
+/// same-section tab left in that direction, and the absent neighbour is the
+/// clamp: the drag stops at the strip's edge instead of leaving it.
+#[test]
+fn test_section_neighbor_clamps_at_the_repository_strip_edges() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = one_repo_projects();
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            // [L0, A1, A2, A3, L4]. The repository's run is bounded by loose
+            // tabs rather than by the list ends, so its edges are clamped by
+            // the *section*, not by the bounds guard that was always there.
+            bind_tabs(
+                workspace,
+                &[
+                    None,
+                    Some("/repo/a"),
+                    Some("/repo/a"),
+                    Some("/repo/a"),
+                    None,
+                ],
+                ctx,
+            );
+            let entry_paths = workspace.repo_mode_entry_paths(ctx);
+
+            assert_eq!(
+                workspace.section_neighbor(1, false, &entry_paths),
+                None,
+                "nothing above A1 inside the repository, though a loose tab sits there"
+            );
+            assert_eq!(
+                workspace.section_neighbor(3, true, &entry_paths),
+                None,
+                "nothing below A3 inside the repository, though a loose tab sits there"
+            );
+            // And the list ends still clamp, as they always did.
+            assert_eq!(workspace.section_neighbor(0, false, &entry_paths), None);
+            assert_eq!(workspace.section_neighbor(4, true, &entry_paths), None);
+        });
+    });
+}
+
+/// Covers AE3 / KTD3. The search *skips* foreign-section tabs rather than
+/// stopping at them: two loose tabs separated by a repository tab in flat order
+/// still reorder against each other, which stopping at the first foreign tab
+/// would have frozen.
+#[test]
+fn test_section_neighbor_skips_a_foreign_tab_between_two_loose_ones() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = one_repo_projects();
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            // [L0, A1, L2]
+            bind_tabs(workspace, &[None, Some("/repo/a"), None], ctx);
+            let entry_paths = workspace.repo_mode_entry_paths(ctx);
+
+            assert_eq!(
+                workspace.section_neighbor(0, true, &entry_paths),
+                Some(2),
+                "L0's neighbour below is L2, past the repository tab between them"
+            );
+            assert_eq!(
+                workspace.section_neighbor(2, false, &entry_paths),
+                Some(0),
+                "and symmetrically upward"
+            );
+        });
+    });
+}
+
+/// Covers AE4. A repository whose run is a single tab has no same-section
+/// neighbour in either direction, so that tab cannot be dragged anywhere.
+#[test]
+fn test_section_neighbor_is_absent_for_a_lone_repository_tab() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = one_repo_projects();
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            bind_tabs(workspace, &[None, Some("/repo/a"), None], ctx);
+            let entry_paths = workspace.repo_mode_entry_paths(ctx);
+
+            assert_eq!(workspace.section_neighbor(1, false, &entry_paths), None);
+            assert_eq!(workspace.section_neighbor(1, true, &entry_paths), None);
+        });
+    });
+}
+
+/// Covers R5. Only same-section tabs ever swap, so every swap the neighbour
+/// search authorises leaves each repository's tabs one contiguous run —
+/// including a loose swap that reaches *across* a repository's run.
+#[test]
+fn test_section_scoped_swaps_keep_every_group_contiguous() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = one_repo_projects();
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            // [L0, A1, A2, L3]
+            bind_tabs(
+                workspace,
+                &[None, Some("/repo/a"), Some("/repo/a"), None],
+                ctx,
+            );
+            let entry_paths = workspace.repo_mode_entry_paths(ctx);
+            assert_groups_contiguous(workspace);
+
+            // The loose tab at 0 reaches its next loose tab across the run.
+            let across = workspace
+                .section_neighbor(0, true, &entry_paths)
+                .expect("L0 has a loose neighbour below");
+            assert_eq!(across, 3);
+            workspace.tabs.swap(0, across);
+            assert_groups_contiguous(workspace);
+
+            // And the repository's own interior swap keeps it contiguous too.
+            let inside = workspace
+                .section_neighbor(1, true, &entry_paths)
+                .expect("A1 has a same-repository neighbour below");
+            assert_eq!(inside, 2);
+            workspace.tabs.swap(1, inside);
+            assert_groups_contiguous(workspace);
+        });
+    });
+}
+
+/// Covers R7. With nothing repo-bound in the window every tab is loose, so the
+/// neighbour is always the plain adjacent index — the pre-change result, by
+/// construction rather than by a branch.
+#[test]
+fn test_section_neighbor_is_the_adjacent_index_with_no_repo_bound_group() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = one_repo_projects();
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            bind_tabs(workspace, &[None, None, None, None], ctx);
+            // One user-created group, which is not a repository section.
+            let user_group = TabGroup::new();
+            let user_group_id = user_group.id;
+            workspace.tab_groups.insert(user_group_id, user_group);
+            workspace.tabs[1].group_id = Some(user_group_id);
+
+            let entry_paths = workspace.repo_mode_entry_paths(ctx);
+            assert_adjacent_neighbors_everywhere(workspace, &entry_paths);
+        });
+    });
+}
+
+/// Covers R7. Session restore copies `repo_root` unconditionally, so a repo
+/// mode *off* build can be holding one. It must not clamp: every neighbour is
+/// still the adjacent index.
+#[test]
+fn test_section_neighbor_is_the_adjacent_index_with_repo_mode_off() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(false);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            bind_tabs(workspace, &[None, Some("/repo/a"), None, None], ctx);
+            // Hand it a registry that *does* contain the root, so the flag gate
+            // is the only thing that can keep this unclamped.
+            let entry_paths = vec![PathBuf::from("/repo/a")];
+            assert_adjacent_neighbors_everywhere(workspace, &entry_paths);
+        });
+    });
+}
+
+/// Covers R7. The neighbour search runs *outside* the drag path's
+/// `groups_enabled` branch, so the accessor's second flag gate is the only
+/// thing protecting a grouped-tabs-off build from a restored `repo_root`.
+#[test]
+fn test_section_neighbor_is_the_adjacent_index_with_grouped_tabs_off() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(false);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            bind_tabs(workspace, &[None, Some("/repo/a"), None, None], ctx);
+            let entry_paths = vec![PathBuf::from("/repo/a")];
+            assert_adjacent_neighbors_everywhere(workspace, &entry_paths);
+        });
+    });
+}
+
+/// Every tab's neighbour is its plain adjacent index, bounded by the tab list —
+/// exactly what the hardcoded `current_index ± 1` produced before this existed.
+fn assert_adjacent_neighbors_everywhere(workspace: &Workspace, entry_paths: &[PathBuf]) {
+    let last = workspace.tabs.len() - 1;
+    for index in 0..workspace.tabs.len() {
+        assert_eq!(
+            workspace.section_neighbor(index, false, entry_paths),
+            index.checked_sub(1),
+            "tab {index} should see its adjacent predecessor"
+        );
+        assert_eq!(
+            workspace.section_neighbor(index, true, entry_paths),
+            (index < last).then_some(index + 1),
+            "tab {index} should see its adjacent successor"
+        );
+    }
+}
+
+/// Covers R8 / AE6. On the horizontal tab bar a repo-bound tab is reachable
+/// past a loose tab in flat order, and must still refuse to swap with it: the
+/// search resolves no neighbour in that direction, so no swap can fire.
+#[test]
+fn test_a_repo_bound_tab_resolves_no_neighbor_past_a_loose_tab() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = one_repo_projects();
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            // [L0, A1, A2]
+            bind_tabs(workspace, &[None, Some("/repo/a"), Some("/repo/a")], ctx);
+            let entry_paths = workspace.repo_mode_entry_paths(ctx);
+
+            assert_eq!(
+                workspace.section_neighbor(1, false, &entry_paths),
+                None,
+                "A1 cannot swap up past the loose tab beside it"
+            );
+            assert_eq!(
+                workspace.section_neighbor(1, true, &entry_paths),
+                Some(2),
+                "but it still reorders inside its own repository"
+            );
+            assert_eq!(
+                workspace.section_neighbor(0, true, &entry_paths),
+                None,
+                "and the loose tab has no loose tab below to swap with"
+            );
+        });
+    });
+}
+
+/// The pinned clamp and the section clamp compose (KTD4): the neighbour search
+/// is pure over sections and returns a pinned neighbour like any other. Refusing
+/// that swap is the caller's existing `is_tab_effectively_pinned` check, which
+/// runs against exactly the index resolved here.
+#[test]
+fn test_section_neighbor_leaves_the_pinned_refusal_to_the_caller() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let _pinned_tabs_guard = FeatureFlag::PinnedTabs.override_enabled(true);
+    let projects = one_repo_projects();
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            bind_tabs(workspace, &[Some("/repo/a"), Some("/repo/a")], ctx);
+            workspace.tabs[0].pinned = true;
+
+            let entry_paths = workspace.repo_mode_entry_paths(ctx);
+            let neighbor = workspace.section_neighbor(1, false, &entry_paths);
+            assert_eq!(
+                neighbor,
+                Some(0),
+                "same section, so the neighbour resolves regardless of pin state"
+            );
+
+            let neighbor = neighbor.expect("resolved above");
+            assert_ne!(
+                workspace.is_tab_effectively_pinned(&workspace.tabs[1]),
+                workspace.is_tab_effectively_pinned(&workspace.tabs[neighbor]),
+                "and the caller's pinned check is what refuses this swap"
+            );
+        });
+    });
+}
