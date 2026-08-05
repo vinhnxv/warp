@@ -1147,6 +1147,59 @@ impl Workspace {
         (by_entry, loose)
     }
 
+    /// Registered entry paths, for the pure section accessors below. Hoist this
+    /// once per drag event rather than calling it per lookup — it walks the
+    /// project registry. `repo_mode_entries` already short-circuits to empty
+    /// when `RepoMode` is off, so a flag-off build pays nothing.
+    pub(super) fn repo_mode_entry_paths(&self, ctx: &AppContext) -> Vec<PathBuf> {
+        self.repo_mode_entries(ctx)
+            .into_iter()
+            .map(|e| e.path)
+            .collect()
+    }
+
+    /// The section a tab group belongs to: `Some(root)` when the group is bound
+    /// to a still-registered repository entry, `None` (loose, i.e. "Other
+    /// tabs") otherwise. One rule for every mode — repo mode renders the
+    /// selected repository's tabs flattened, so there is no rendered container
+    /// to ask, and the section has to come from the tab list itself.
+    ///
+    /// Ownership is resolved through `repo_mode_bound_tab_owner`, the same test
+    /// `repo_mode_tab_partition` applies, so a root that has left the registry
+    /// (removed in another window) reads loose here exactly as it renders loose
+    /// there.
+    ///
+    /// Both flag gates are load-bearing, not defensive. Session restore copies
+    /// `repo_root` unconditionally (unlike `pinned`, which is flag-gated), so a
+    /// build with either flag off can be holding a group that carries a root it
+    /// never displays. `RepoMode` off must behave exactly as before this
+    /// existed; `GroupedTabs` off has no sections at all, and without that gate
+    /// a restored `repo_root` would clamp reordering in a grouped-tabs-off
+    /// build via callers that do not sit behind a `groups_enabled` check.
+    pub(super) fn repo_mode_group_section(
+        &self,
+        group_id: TabGroupId,
+        entry_paths: &[PathBuf],
+    ) -> Option<PathBuf> {
+        if !Self::repo_mode_enabled() || !FeatureFlag::GroupedTabs.is_enabled() {
+            return None;
+        }
+        let bound_root = PathBuf::from(self.tab_groups.get(&group_id)?.repo_root.as_deref()?);
+        repo_mode_bound_tab_owner(&bound_root, entry_paths)
+    }
+
+    /// The section of the tab at `tab_index`. Loose (`None`) when it has no
+    /// group, its group carries no repo root, that root is not a registered
+    /// entry, or either feature flag is off — see `repo_mode_group_section`.
+    pub(super) fn repo_mode_tab_section(
+        &self,
+        tab_index: usize,
+        entry_paths: &[PathBuf],
+    ) -> Option<PathBuf> {
+        let group_id = self.tabs.get(tab_index)?.group_id?;
+        self.repo_mode_group_section(group_id, entry_paths)
+    }
+
     /// Tab indices in the group bound to `root`, in tab order; empty when no
     /// group is bound to it.
     ///

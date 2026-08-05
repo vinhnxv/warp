@@ -1491,3 +1491,353 @@ fn test_a_late_success_does_not_close_a_form_reopened_for_another_host() {
         });
     });
 }
+
+/// Section identity per KTD2: a tab whose group is bound to a *registered*
+/// repository reports that root; a tab in a user-created group carries no
+/// `repo_root` and so is loose, exactly as `repo_mode_tab_partition` files it.
+#[test]
+fn test_section_accessor_reads_the_bound_repo_root() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let now = Utc::now().naive_utc();
+    let projects = vec![Project {
+        path: "/repo/a".to_string(),
+        added_ts: now,
+        last_opened_ts: Some(now),
+    }];
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            // Tabs: [loose, repo-bound, user-grouped]
+            workspace.add_terminal_tab(false, ctx);
+            workspace.add_terminal_tab(false, ctx);
+
+            let mut bound = TabGroup::new();
+            bound.repo_root = Some("/repo/a".to_string());
+            let bound_id = bound.id;
+            workspace.tab_groups.insert(bound_id, bound);
+            let user_group = TabGroup::new();
+            let user_group_id = user_group.id;
+            workspace.tab_groups.insert(user_group_id, user_group);
+
+            workspace.tabs[1].group_id = Some(bound_id);
+            workspace.tabs[2].group_id = Some(user_group_id);
+
+            let entry_paths = workspace.repo_mode_entry_paths(ctx);
+            assert_eq!(
+                workspace.repo_mode_group_section(bound_id, &entry_paths),
+                Some(PathBuf::from("/repo/a"))
+            );
+            assert_eq!(
+                workspace.repo_mode_tab_section(1, &entry_paths),
+                Some(PathBuf::from("/repo/a"))
+            );
+            assert_eq!(
+                workspace.repo_mode_group_section(user_group_id, &entry_paths),
+                None,
+                "a user-created group is not a repository section"
+            );
+            assert_eq!(workspace.repo_mode_tab_section(2, &entry_paths), None);
+            assert_eq!(
+                workspace.repo_mode_tab_section(0, &entry_paths),
+                None,
+                "and a tab with no group at all is loose"
+            );
+        });
+    });
+}
+
+/// With no group carrying a `repo_root`, every tab is loose — nothing in the
+/// window is repo-bound, so drag has nothing to clamp.
+#[test]
+fn test_section_accessor_is_loose_when_no_group_is_repo_bound() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let now = Utc::now().naive_utc();
+    let projects = vec![Project {
+        path: "/repo/a".to_string(),
+        added_ts: now,
+        last_opened_ts: Some(now),
+    }];
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+
+            let user_group = TabGroup::new();
+            let user_group_id = user_group.id;
+            workspace.tab_groups.insert(user_group_id, user_group);
+            workspace.tabs[1].group_id = Some(user_group_id);
+
+            let entry_paths = workspace.repo_mode_entry_paths(ctx);
+            for index in 0..workspace.tabs.len() {
+                assert_eq!(workspace.repo_mode_tab_section(index, &entry_paths), None);
+            }
+        });
+    });
+}
+
+/// A bound root that has left the registry (removed in another window) reads
+/// loose — the same ownership test `repo_mode_tab_partition` applies, so the
+/// section a drag sees always matches the section that renders.
+#[test]
+fn test_section_accessor_is_loose_for_an_unregistered_bound_root() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let now = Utc::now().naive_utc();
+    let projects = vec![Project {
+        path: "/repo/a".to_string(),
+        added_ts: now,
+        last_opened_ts: Some(now),
+    }];
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+
+            let mut stale = TabGroup::new();
+            stale.repo_root = Some("/repo/gone".to_string());
+            let stale_id = stale.id;
+            workspace.tab_groups.insert(stale_id, stale);
+            workspace.tabs[1].group_id = Some(stale_id);
+
+            let entry_paths = workspace.repo_mode_entry_paths(ctx);
+            assert!(
+                entry_paths.contains(&PathBuf::from("/repo/a")),
+                "the registry is non-empty; the bound root just is not in it"
+            );
+            assert_eq!(
+                workspace.repo_mode_group_section(stale_id, &entry_paths),
+                None
+            );
+            assert_eq!(workspace.repo_mode_tab_section(1, &entry_paths), None);
+
+            // And it matches where the display partition puts that tab.
+            let (_, loose) = workspace.repo_mode_tab_partition(&entry_paths);
+            assert!(loose.contains(&1));
+        });
+    });
+}
+
+/// Covers R7. With repo mode off, a `repo_root` copied in by session restore
+/// (which is not flag-gated) must not create a section — no build without repo
+/// mode may start clamping drags.
+#[test]
+fn test_section_accessor_is_loose_with_repo_mode_off() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(false);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+
+            let mut restored = TabGroup::new();
+            restored.repo_root = Some("/repo/a".to_string());
+            let restored_id = restored.id;
+            workspace.tab_groups.insert(restored_id, restored);
+            workspace.tabs[1].group_id = Some(restored_id);
+
+            // Hand it a registry that *does* contain the root, so the flag gate
+            // is the only thing that can make this loose.
+            let entry_paths = vec![PathBuf::from("/repo/a")];
+            assert_eq!(
+                workspace.repo_mode_group_section(restored_id, &entry_paths),
+                None
+            );
+            assert_eq!(workspace.repo_mode_tab_section(1, &entry_paths), None);
+        });
+    });
+}
+
+/// The second gate of KTD2: grouped tabs off means there are no sections at
+/// all, so a restored `repo_root` cannot clamp anything in that build either.
+#[test]
+fn test_section_accessor_is_loose_with_grouped_tabs_off() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(false);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+
+            let mut bound = TabGroup::new();
+            bound.repo_root = Some("/repo/a".to_string());
+            let bound_id = bound.id;
+            workspace.tab_groups.insert(bound_id, bound);
+            workspace.tabs[1].group_id = Some(bound_id);
+
+            let entry_paths = vec![PathBuf::from("/repo/a")];
+            assert_eq!(
+                workspace.repo_mode_group_section(bound_id, &entry_paths),
+                None
+            );
+            assert_eq!(workspace.repo_mode_tab_section(1, &entry_paths), None);
+        });
+    });
+}
+
+/// Covers AE1 / R1. A repo-bound tab dragged where no group resolves (the
+/// flattened repo strip registers no rectangle) must not be unbound: the guard
+/// fires on the source side, the call site skips reassignment, and the drag
+/// falls through to the neighbour swap with the binding intact.
+#[test]
+fn test_repo_bound_source_blocks_reassignment_when_no_target_resolves() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let now = Utc::now().naive_utc();
+    let projects = vec![Project {
+        path: "/repo/a".to_string(),
+        added_ts: now,
+        last_opened_ts: Some(now),
+    }];
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+            workspace.add_terminal_tab(false, ctx);
+
+            let mut bound = TabGroup::new();
+            bound.repo_root = Some("/repo/a".to_string());
+            let bound_id = bound.id;
+            workspace.tab_groups.insert(bound_id, bound);
+            workspace.tabs[1].group_id = Some(bound_id);
+            workspace.tabs[2].group_id = Some(bound_id);
+
+            let entry_paths = workspace.repo_mode_entry_paths(ctx);
+            assert!(
+                workspace.repo_bound_drag_blocks_reassignment(1, None, &entry_paths),
+                "a repo-bound tab is never unbound by a drag that resolves no group"
+            );
+            // Nothing about the guard mutates membership; the call site simply
+            // never reaches `assign_tab_to_group`.
+            assert_eq!(workspace.tabs[1].group_id, Some(bound_id));
+
+            // Reordering inside its own repo group is the same skip: the source
+            // is bound, so the drag falls through to the neighbour swap.
+            assert!(workspace.repo_bound_drag_blocks_reassignment(1, Some(bound_id), &entry_paths));
+        });
+    });
+}
+
+/// Covers AE3 / AE7 / R4 / R9. A loose tab dragged over a repo-bound group is
+/// clamped to "Other tabs": drag never *creates* a repository binding (KD3),
+/// including on the horizontal bar where that group does render a container.
+#[test]
+fn test_repo_bound_target_blocks_a_loose_tab_from_joining() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let now = Utc::now().naive_utc();
+    let projects = vec![Project {
+        path: "/repo/a".to_string(),
+        added_ts: now,
+        last_opened_ts: Some(now),
+    }];
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+
+            let mut bound = TabGroup::new();
+            bound.repo_root = Some("/repo/a".to_string());
+            let bound_id = bound.id;
+            workspace.tab_groups.insert(bound_id, bound);
+            workspace.tabs[1].group_id = Some(bound_id);
+
+            let entry_paths = workspace.repo_mode_entry_paths(ctx);
+            assert_eq!(
+                workspace.repo_mode_tab_section(0, &entry_paths),
+                None,
+                "tab 0 is the loose one being dragged"
+            );
+            assert!(
+                workspace.repo_bound_drag_blocks_reassignment(0, Some(bound_id), &entry_paths),
+                "a loose tab must not acquire a repository binding by drag"
+            );
+            assert_eq!(workspace.tabs[0].group_id, None);
+        });
+    });
+}
+
+/// The guard is scoped to repo-bound sections only: inside "Other tabs", a
+/// loose tab dragged into a user-created group still joins it, exactly as
+/// before this change.
+#[test]
+fn test_a_user_created_group_still_accepts_a_dragged_loose_tab() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let now = Utc::now().naive_utc();
+    let projects = vec![Project {
+        path: "/repo/a".to_string(),
+        added_ts: now,
+        last_opened_ts: Some(now),
+    }];
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+
+            let user_group = TabGroup::new();
+            let user_group_id = user_group.id;
+            workspace.tab_groups.insert(user_group_id, user_group);
+            workspace.tabs[1].group_id = Some(user_group_id);
+
+            let entry_paths = workspace.repo_mode_entry_paths(ctx);
+            assert!(!workspace.repo_bound_drag_blocks_reassignment(
+                0,
+                Some(user_group_id),
+                &entry_paths
+            ));
+            // And dragging back out of it is equally unguarded.
+            assert!(!workspace.repo_bound_drag_blocks_reassignment(1, None, &entry_paths));
+        });
+    });
+}
+
+/// Covers R7. In a repo-mode-off build restored from a repo-mode session, the
+/// group still carries a `repo_root` (session restore copies it unconditionally,
+/// unlike `pinned`). The guard must stay quiet, so a tab dragged into that group
+/// joins it exactly as it does today.
+#[test]
+fn test_drag_reassignment_is_unguarded_with_repo_mode_off() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(false);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+
+            let mut restored = TabGroup::new();
+            restored.repo_root = Some("/repo/a".to_string());
+            let restored_id = restored.id;
+            workspace.tab_groups.insert(restored_id, restored);
+            workspace.tabs[1].group_id = Some(restored_id);
+
+            // Even handed a registry containing that root, both sides read loose.
+            let entry_paths = vec![PathBuf::from("/repo/a")];
+            assert!(!workspace.repo_bound_drag_blocks_reassignment(
+                0,
+                Some(restored_id),
+                &entry_paths
+            ));
+            assert!(!workspace.repo_bound_drag_blocks_reassignment(1, None, &entry_paths));
+        });
+    });
+}

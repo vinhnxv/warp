@@ -28904,6 +28904,36 @@ impl Workspace {
         });
     }
 
+    /// True when a drag must not change group membership because either side of
+    /// it is repo-bound: repo-bound groups neither gain nor lose members through
+    /// drag. A bound tab keeps its repository however far it is dragged (repo
+    /// mode renders its strip flattened, so the target lookup finds no group and
+    /// would otherwise read the drag as "left every group" and unbind it), and a
+    /// loose tab never acquires a repository by being dragged over one — binding
+    /// is established elsewhere and stays static.
+    ///
+    /// Pure over the tab list and the already-resolved target group: geometry
+    /// stays in the caller, since no test can populate the position cache that
+    /// the target lookup reads, and this predicate has to be testable.
+    ///
+    /// Both sides route through the flag-gated section accessors rather than
+    /// testing `repo_root` directly — session restore copies that field into a
+    /// repo-mode-*off* build, where a bare test would start blocking a drag that
+    /// works today.
+    fn repo_bound_drag_blocks_reassignment(
+        &self,
+        dragged_index: usize,
+        target_group: Option<TabGroupId>,
+        entry_paths: &[PathBuf],
+    ) -> bool {
+        let source_is_repo_bound = self
+            .repo_mode_tab_section(dragged_index, entry_paths)
+            .is_some();
+        let target_is_repo_bound = target_group
+            .is_some_and(|gid| self.repo_mode_group_section(gid, entry_paths).is_some());
+        source_is_repo_bound || target_is_repo_bound
+    }
+
     /// Handles a tab drag event from the `Draggable` element. Dispatches to
     /// one of three modes: forward to an in-progress cross-window drag,
     /// initiate a new cross-window drag when the drag leaves the tab bar
@@ -29169,7 +29199,22 @@ impl Workspace {
             let pinned_into_unpinned_group =
                 was_pinned && expanded_target.is_some() && !target_group_pinned;
 
-            if expanded_target != source_group && !pinned_into_unpinned_group {
+            // Hoisted once per drag event rather than per lookup: this walks the
+            // project registry, and the guard consults it for both sides of the
+            // drag.
+            let entry_paths = self.repo_mode_entry_paths(ctx);
+
+            // Skipping reassignment deliberately falls through to the neighbour
+            // swap below rather than returning: the tab still reorders inside
+            // its own section, it just keeps the group it had.
+            if expanded_target != source_group
+                && !pinned_into_unpinned_group
+                && !self.repo_bound_drag_blocks_reassignment(
+                    current_index,
+                    expanded_target,
+                    &entry_paths,
+                )
+            {
                 // Check if a tab is being dragged out of a pinned group.
                 // If the tab is currently pinned, that means the user is
                 // repositioning it within the pinned area, and passed over
