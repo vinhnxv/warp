@@ -732,11 +732,7 @@ impl Workspace {
         // Focus the MRU tab shown under this repo (bound tabs only, per the
         // display partition); with no such tab, open a fresh one at the entry
         // root — never absorb a loose tab that merely sits in this directory.
-        let entry_paths: Vec<PathBuf> = self
-            .repo_mode_entries(ctx)
-            .into_iter()
-            .map(|e| e.path)
-            .collect();
+        let entry_paths = self.repo_mode_entry_paths(ctx);
         let (mut by_entry, _) = self.repo_mode_tab_partition(&entry_paths);
         let members = by_entry.remove(&path_buf).unwrap_or_default();
         if members.is_empty() {
@@ -1147,10 +1143,10 @@ impl Workspace {
         (by_entry, loose)
     }
 
-    /// Registered entry paths, for the pure section accessors below. Hoist this
-    /// once per drag event rather than calling it per lookup — it walks the
-    /// project registry. `repo_mode_entries` already short-circuits to empty
-    /// when `RepoMode` is off, so a flag-off build pays nothing.
+    /// Registered entry paths. Walks the project registry, so hoist it once per
+    /// drag event rather than calling it per lookup. `repo_mode_entries` already
+    /// short-circuits to empty when `RepoMode` is off, so a flag-off build pays
+    /// nothing.
     pub(super) fn repo_mode_entry_paths(&self, ctx: &AppContext) -> Vec<PathBuf> {
         self.repo_mode_entries(ctx)
             .into_iter()
@@ -1241,11 +1237,7 @@ impl Workspace {
             return None;
         }
         let selected = PathBuf::from(self.selected_repo_root.as_deref()?);
-        let entry_paths: Vec<PathBuf> = self
-            .repo_mode_entries(app)
-            .into_iter()
-            .map(|e| e.path)
-            .collect();
+        let entry_paths = self.repo_mode_entry_paths(app);
         // If the selected root is no longer registered (e.g. removed in another
         // window), behave as "All" instead of stranding this window with an
         // empty strip and no in-tree way back.

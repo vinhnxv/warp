@@ -29023,9 +29023,13 @@ impl Workspace {
                     // The section clamp applies to the placeholder reorder too:
                     // it travels the source window's real tab order, so letting
                     // it leave its repository's run would break the same
-                    // invariant an in-window drag must preserve. Hoisted once
-                    // per drag event — this walks the project registry.
-                    let entry_paths = self.repo_mode_entry_paths(ctx);
+                    // invariant an in-window drag must preserve. Grouped tabs
+                    // off means no sections at all, so skip the walk.
+                    let entry_paths = if FeatureFlag::GroupedTabs.is_enabled() {
+                        self.repo_mode_entry_paths(ctx)
+                    } else {
+                        Vec::new()
+                    };
                     let new_index = if use_vertical_tabs {
                         self.calculate_updated_tab_index_vertical(
                             current_index,
@@ -29185,11 +29189,14 @@ impl Workspace {
             FeatureFlag::VerticalTabs.is_enabled() && *TabSettings::as_ref(ctx).use_vertical_tabs;
         let groups_enabled = FeatureFlag::GroupedTabs.is_enabled();
 
-        // Hoisted once per drag event rather than per lookup: this walks the
-        // project registry, and both the reassignment guard below and the
-        // section-scoped neighbour search after it consult it. It sits outside
-        // the `groups_enabled` block because that search runs unconditionally.
-        let entry_paths = self.repo_mode_entry_paths(ctx);
+        // Outside the `groups_enabled` block below because the section-scoped
+        // neighbour search runs unconditionally. With grouped tabs off there are
+        // no sections at all, so skip the walk.
+        let entry_paths = if groups_enabled {
+            self.repo_mode_entry_paths(ctx)
+        } else {
+            Vec::new()
+        };
 
         if groups_enabled {
             // Reassign membership when the dragged tab enters a different
@@ -29433,17 +29440,12 @@ impl Workspace {
         entry_paths: &[PathBuf],
     ) -> Option<usize> {
         let section = self.repo_mode_tab_section(current_index, entry_paths);
-        let mut index = current_index;
-        loop {
-            index = if forward {
-                let next = index + 1;
-                (next < self.tabs.len()).then_some(next)?
-            } else {
-                index.checked_sub(1)?
-            };
-            if self.repo_mode_tab_section(index, entry_paths) == section {
-                return Some(index);
-            }
+        let same_section =
+            |index: &usize| self.repo_mode_tab_section(*index, entry_paths) == section;
+        if forward {
+            (current_index + 1..self.tabs.len()).find(same_section)
+        } else {
+            (0..current_index).rev().find(same_section)
         }
     }
 

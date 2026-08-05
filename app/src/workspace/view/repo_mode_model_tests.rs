@@ -4,6 +4,7 @@ use warpui::{App, EntityId, TypedActionView as _};
 
 use super::*;
 use crate::persistence::model::Project;
+use crate::workspace::view::non_contiguous_groups;
 use crate::workspace::view::tests::{initialize_app, mock_workspace};
 
 fn register_projects_model(app: &mut App, projects: Vec<Project>) {
@@ -1499,12 +1500,7 @@ fn test_a_late_success_does_not_close_a_form_reopened_for_another_host() {
 fn test_section_accessor_reads_the_bound_repo_root() {
     let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
     let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
-    let now = Utc::now().naive_utc();
-    let projects = vec![Project {
-        path: "/repo/a".to_string(),
-        added_ts: now,
-        last_opened_ts: Some(now),
-    }];
+    let projects = one_repo_projects();
     App::test((), |mut app| async move {
         initialize_app(&mut app);
         register_projects_model(&mut app, projects);
@@ -1555,12 +1551,7 @@ fn test_section_accessor_reads_the_bound_repo_root() {
 fn test_section_accessor_is_loose_when_no_group_is_repo_bound() {
     let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
     let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
-    let now = Utc::now().naive_utc();
-    let projects = vec![Project {
-        path: "/repo/a".to_string(),
-        added_ts: now,
-        last_opened_ts: Some(now),
-    }];
+    let projects = one_repo_projects();
     App::test((), |mut app| async move {
         initialize_app(&mut app);
         register_projects_model(&mut app, projects);
@@ -1588,24 +1579,14 @@ fn test_section_accessor_is_loose_when_no_group_is_repo_bound() {
 fn test_section_accessor_is_loose_for_an_unregistered_bound_root() {
     let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
     let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
-    let now = Utc::now().naive_utc();
-    let projects = vec![Project {
-        path: "/repo/a".to_string(),
-        added_ts: now,
-        last_opened_ts: Some(now),
-    }];
+    let projects = one_repo_projects();
     App::test((), |mut app| async move {
         initialize_app(&mut app);
         register_projects_model(&mut app, projects);
         let workspace = mock_workspace(&mut app);
         workspace.update(&mut app, |workspace, ctx| {
-            workspace.add_terminal_tab(false, ctx);
-
-            let mut stale = TabGroup::new();
-            stale.repo_root = Some("/repo/gone".to_string());
-            let stale_id = stale.id;
-            workspace.tab_groups.insert(stale_id, stale);
-            workspace.tabs[1].group_id = Some(stale_id);
+            let group_ids = bind_tabs(workspace, &[None, Some("/repo/gone")], ctx);
+            let stale_id = group_ids["/repo/gone"];
 
             let entry_paths = workspace.repo_mode_entry_paths(ctx);
             assert!(
@@ -1637,13 +1618,8 @@ fn test_section_accessor_is_loose_with_repo_mode_off() {
         register_projects_model(&mut app, Vec::new());
         let workspace = mock_workspace(&mut app);
         workspace.update(&mut app, |workspace, ctx| {
-            workspace.add_terminal_tab(false, ctx);
-
-            let mut restored = TabGroup::new();
-            restored.repo_root = Some("/repo/a".to_string());
-            let restored_id = restored.id;
-            workspace.tab_groups.insert(restored_id, restored);
-            workspace.tabs[1].group_id = Some(restored_id);
+            let group_ids = bind_tabs(workspace, &[None, Some("/repo/a")], ctx);
+            let restored_id = group_ids["/repo/a"];
 
             // Hand it a registry that *does* contain the root, so the flag gate
             // is the only thing that can make this loose.
@@ -1668,13 +1644,8 @@ fn test_section_accessor_is_loose_with_grouped_tabs_off() {
         register_projects_model(&mut app, Vec::new());
         let workspace = mock_workspace(&mut app);
         workspace.update(&mut app, |workspace, ctx| {
-            workspace.add_terminal_tab(false, ctx);
-
-            let mut bound = TabGroup::new();
-            bound.repo_root = Some("/repo/a".to_string());
-            let bound_id = bound.id;
-            workspace.tab_groups.insert(bound_id, bound);
-            workspace.tabs[1].group_id = Some(bound_id);
+            let group_ids = bind_tabs(workspace, &[None, Some("/repo/a")], ctx);
+            let bound_id = group_ids["/repo/a"];
 
             let entry_paths = vec![PathBuf::from("/repo/a")];
             assert_eq!(
@@ -1694,26 +1665,14 @@ fn test_section_accessor_is_loose_with_grouped_tabs_off() {
 fn test_repo_bound_source_blocks_reassignment_when_no_target_resolves() {
     let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
     let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
-    let now = Utc::now().naive_utc();
-    let projects = vec![Project {
-        path: "/repo/a".to_string(),
-        added_ts: now,
-        last_opened_ts: Some(now),
-    }];
+    let projects = one_repo_projects();
     App::test((), |mut app| async move {
         initialize_app(&mut app);
         register_projects_model(&mut app, projects);
         let workspace = mock_workspace(&mut app);
         workspace.update(&mut app, |workspace, ctx| {
-            workspace.add_terminal_tab(false, ctx);
-            workspace.add_terminal_tab(false, ctx);
-
-            let mut bound = TabGroup::new();
-            bound.repo_root = Some("/repo/a".to_string());
-            let bound_id = bound.id;
-            workspace.tab_groups.insert(bound_id, bound);
-            workspace.tabs[1].group_id = Some(bound_id);
-            workspace.tabs[2].group_id = Some(bound_id);
+            let group_ids = bind_tabs(workspace, &[None, Some("/repo/a"), Some("/repo/a")], ctx);
+            let bound_id = group_ids["/repo/a"];
 
             let entry_paths = workspace.repo_mode_entry_paths(ctx);
             assert!(
@@ -1738,24 +1697,14 @@ fn test_repo_bound_source_blocks_reassignment_when_no_target_resolves() {
 fn test_repo_bound_target_blocks_a_loose_tab_from_joining() {
     let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
     let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
-    let now = Utc::now().naive_utc();
-    let projects = vec![Project {
-        path: "/repo/a".to_string(),
-        added_ts: now,
-        last_opened_ts: Some(now),
-    }];
+    let projects = one_repo_projects();
     App::test((), |mut app| async move {
         initialize_app(&mut app);
         register_projects_model(&mut app, projects);
         let workspace = mock_workspace(&mut app);
         workspace.update(&mut app, |workspace, ctx| {
-            workspace.add_terminal_tab(false, ctx);
-
-            let mut bound = TabGroup::new();
-            bound.repo_root = Some("/repo/a".to_string());
-            let bound_id = bound.id;
-            workspace.tab_groups.insert(bound_id, bound);
-            workspace.tabs[1].group_id = Some(bound_id);
+            let group_ids = bind_tabs(workspace, &[None, Some("/repo/a")], ctx);
+            let bound_id = group_ids["/repo/a"];
 
             let entry_paths = workspace.repo_mode_entry_paths(ctx);
             assert_eq!(
@@ -1779,12 +1728,7 @@ fn test_repo_bound_target_blocks_a_loose_tab_from_joining() {
 fn test_a_user_created_group_still_accepts_a_dragged_loose_tab() {
     let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
     let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
-    let now = Utc::now().naive_utc();
-    let projects = vec![Project {
-        path: "/repo/a".to_string(),
-        added_ts: now,
-        last_opened_ts: Some(now),
-    }];
+    let projects = one_repo_projects();
     App::test((), |mut app| async move {
         initialize_app(&mut app);
         register_projects_model(&mut app, projects);
@@ -1822,13 +1766,8 @@ fn test_drag_reassignment_is_unguarded_with_repo_mode_off() {
         register_projects_model(&mut app, Vec::new());
         let workspace = mock_workspace(&mut app);
         workspace.update(&mut app, |workspace, ctx| {
-            workspace.add_terminal_tab(false, ctx);
-
-            let mut restored = TabGroup::new();
-            restored.repo_root = Some("/repo/a".to_string());
-            let restored_id = restored.id;
-            workspace.tab_groups.insert(restored_id, restored);
-            workspace.tabs[1].group_id = Some(restored_id);
+            let group_ids = bind_tabs(workspace, &[None, Some("/repo/a")], ctx);
+            let restored_id = group_ids["/repo/a"];
 
             // Even handed a registry containing that root, both sides read loose.
             let entry_paths = vec![PathBuf::from("/repo/a")];
@@ -1842,10 +1781,18 @@ fn test_drag_reassignment_is_unguarded_with_repo_mode_off() {
     });
 }
 
-/// Registers `/repo/a` and hands back the two-tab-minimum fixture the section
-/// tests share: `roots[i]` binds tab `i` to that repository, `None` leaves it
+/// Hands back the two-tab-minimum fixture the section tests share: `roots[i]`
+/// puts tab `i` in a group bound to that repository root, `None` leaves it
 /// loose. Tab 0 already exists on a fresh workspace, so only the rest are added.
-fn bind_tabs(workspace: &mut Workspace, roots: &[Option<&str>], ctx: &mut ViewContext<Workspace>) {
+/// Whether a root is *registered* is the caller's business — a test can bind to
+/// one the registry never had.
+///
+/// Returns the group created per root, for tests that need to name one.
+fn bind_tabs(
+    workspace: &mut Workspace,
+    roots: &[Option<&str>],
+    ctx: &mut ViewContext<Workspace>,
+) -> HashMap<String, TabGroupId> {
     while workspace.tabs.len() < roots.len() {
         workspace.add_terminal_tab(false, ctx);
     }
@@ -1861,27 +1808,15 @@ fn bind_tabs(workspace: &mut Workspace, roots: &[Option<&str>], ctx: &mut ViewCo
         });
         workspace.tabs[index].group_id = Some(group_id);
     }
+    group_ids
 }
 
 /// Every tab group still occupies one contiguous run of tab indices (R5).
 fn assert_groups_contiguous(workspace: &Workspace) {
-    let mut spans: HashMap<TabGroupId, (usize, usize, usize)> = HashMap::new();
-    for (index, tab) in workspace.tabs.iter().enumerate() {
-        let Some(group_id) = tab.group_id else {
-            continue;
-        };
-        let span = spans.entry(group_id).or_insert((index, index, 0));
-        span.0 = span.0.min(index);
-        span.1 = span.1.max(index);
-        span.2 += 1;
-    }
-    for (group_id, (first, last, count)) in spans {
-        assert_eq!(
-            last - first + 1,
-            count,
-            "group {group_id:?} spans {first}..={last} but has {count} members"
-        );
-    }
+    let group_ids: Vec<Option<TabGroupId>> =
+        workspace.tabs.iter().map(|tab| tab.group_id).collect();
+    let broken = non_contiguous_groups(&group_ids);
+    assert!(broken.is_empty(), "non-contiguous groups: {broken:?}");
 }
 
 fn one_repo_projects() -> Vec<Project> {
@@ -2234,6 +2169,10 @@ fn test_section_neighbor_leaves_the_pinned_refusal_to_the_caller() {
 /// The pinned clamp the caller applies between the two is deliberately left
 /// out: it is orthogonal to sections and is covered on its own above.
 ///
+/// Membership goes through `assign_tab_to_group` rather than writing `group_id`
+/// directly, so a drag that is *not* refused prunes the group it emptied — the
+/// step that takes the "Move to group" route away.
+///
 /// Returns the index the dragged tab ended on. An unchanged index means the
 /// section clamp refused the move.
 fn drag_step(
@@ -2242,11 +2181,10 @@ fn drag_step(
     forward: bool,
     target_group: Option<TabGroupId>,
     entry_paths: &[PathBuf],
+    ctx: &mut ViewContext<Workspace>,
 ) -> usize {
-    if target_group != workspace.tabs[index].group_id
-        && !workspace.repo_bound_drag_blocks_reassignment(index, target_group, entry_paths)
-    {
-        workspace.tabs[index].group_id = target_group;
+    if !workspace.repo_bound_drag_blocks_reassignment(index, target_group, entry_paths) {
+        workspace.assign_tab_to_group(index, target_group, ctx);
     }
     let Some(neighbor) = workspace.section_neighbor(index, forward, entry_paths) else {
         return index;
@@ -2340,7 +2278,7 @@ fn test_dragging_inside_a_repository_reorders_within_it() {
 
             // Drag A3 up. Repo mode renders the strip flattened, so the
             // geometry lookup resolves no target group.
-            let landed = drag_step(workspace, 3, false, None, &entry_paths);
+            let landed = drag_step(workspace, 3, false, None, &entry_paths, ctx);
             assert_eq!(landed, 2, "A3 moved one slot up inside its repository");
 
             assert_eq!(
@@ -2392,12 +2330,12 @@ fn test_dragging_past_the_repository_edge_moves_nothing_and_keeps_the_binding() 
 
             // Up past the top of the run, then down past the bottom of it.
             assert_eq!(
-                drag_step(workspace, 1, false, None, &entry_paths),
+                drag_step(workspace, 1, false, None, &entry_paths, ctx),
                 1,
                 "A1 has no same-repository tab above it, so nothing moves"
             );
             assert_eq!(
-                drag_step(workspace, 3, true, None, &entry_paths),
+                drag_step(workspace, 3, true, None, &entry_paths, ctx),
                 3,
                 "and A3 has none below it"
             );
@@ -2443,7 +2381,7 @@ fn test_a_loose_tab_dragged_over_a_repository_stays_loose() {
             // Dragged upward over the repository's run. On the horizontal bar
             // that group *does* render a container, so hand the guard the
             // group the lookup would have found there.
-            let landed = drag_step(workspace, 4, false, Some(repo_group), &entry_paths);
+            let landed = drag_step(workspace, 4, false, Some(repo_group), &entry_paths, ctx);
             assert_eq!(landed, 0, "it reordered against the other loose tab");
 
             assert_eq!(
@@ -2494,7 +2432,7 @@ fn test_dragging_a_repositorys_only_tab_leaves_its_group_intact() {
 
             for forward in [false, true] {
                 assert_eq!(
-                    drag_step(workspace, 1, forward, None, &entry_paths),
+                    drag_step(workspace, 1, forward, None, &entry_paths, ctx),
                     1,
                     "a lone repository tab has nowhere to go (forward={forward})"
                 );
