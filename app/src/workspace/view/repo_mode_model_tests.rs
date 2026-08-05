@@ -1,6 +1,6 @@
 use chrono::{Duration, Utc};
 use repo_mode::{RemoteProbeOutcome, RemoteProbeState, format_remote_key};
-use warpui::{App, TypedActionView as _};
+use warpui::{App, EntityId, TypedActionView as _};
 
 use super::*;
 use crate::persistence::model::Project;
@@ -2219,6 +2219,310 @@ fn test_section_neighbor_leaves_the_pinned_refusal_to_the_caller() {
                 workspace.is_tab_effectively_pinned(&workspace.tabs[neighbor]),
                 "and the caller's pinned check is what refuses this swap"
             );
+        });
+    });
+}
+
+/// One simulated drag step, at the seam a test can reach. The real path
+/// resolves the hovered group from geometry, consults
+/// `repo_bound_drag_blocks_reassignment` before touching membership, then swaps
+/// with the section neighbour — so this replays those three moves in order.
+/// `target_group` stands in for what the geometry lookup returned; `None` is
+/// what the *flattened* repository strip hands back, since it registers no
+/// rectangle, and that empty answer is the whole bug.
+///
+/// The pinned clamp the caller applies between the two is deliberately left
+/// out: it is orthogonal to sections and is covered on its own above.
+///
+/// Returns the index the dragged tab ended on. An unchanged index means the
+/// section clamp refused the move.
+fn drag_step(
+    workspace: &mut Workspace,
+    index: usize,
+    forward: bool,
+    target_group: Option<TabGroupId>,
+    entry_paths: &[PathBuf],
+) -> usize {
+    if target_group != workspace.tabs[index].group_id
+        && !workspace.repo_bound_drag_blocks_reassignment(index, target_group, entry_paths)
+    {
+        workspace.tabs[index].group_id = target_group;
+    }
+    let Some(neighbor) = workspace.section_neighbor(index, forward, entry_paths) else {
+        return index;
+    };
+    workspace.tabs.swap(neighbor, index);
+    neighbor
+}
+
+/// The heading `repo_mode_tab_partition` files the tab at `index` under:
+/// `Some(root)` for a repository entry, `None` for "Other tabs". Asserting
+/// through the partition rather than through the decision functions is the
+/// point of these tests — it is what the user actually sees.
+fn partitioned_section(
+    workspace: &Workspace,
+    index: usize,
+    entry_paths: &[PathBuf],
+) -> Option<PathBuf> {
+    let (by_entry, loose) = workspace.repo_mode_tab_partition(entry_paths);
+    let under_entry = by_entry
+        .iter()
+        .find(|(_, indices)| indices.contains(&index))
+        .map(|(root, _)| root.clone());
+    assert_eq!(
+        under_entry.is_none(),
+        loose.contains(&index),
+        "tab {index} must land in exactly one of the entry lists or the loose list"
+    );
+    under_entry
+}
+
+/// Tab indices filed under `root`, in tab order.
+fn entry_indices(workspace: &Workspace, root: &str, entry_paths: &[PathBuf]) -> Vec<usize> {
+    let (by_entry, _) = workspace.repo_mode_tab_partition(entry_paths);
+    by_entry
+        .get(&PathBuf::from(root))
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Identities of the tabs at `indices`, so a reorder is observable: the
+/// partition returns *indices*, which an interior swap leaves alone.
+fn tab_ids(workspace: &Workspace, indices: &[usize]) -> Vec<EntityId> {
+    indices
+        .iter()
+        .map(|index| workspace.tabs[*index].pane_group.id())
+        .collect()
+}
+
+/// `[L0, A1, A2, A3, L4]`: one registered repository holding three tabs, with a
+/// loose tab on each side of its run. Tab 0 is the default tab a fresh
+/// workspace already has.
+fn repo_run_fixture(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace>) {
+    bind_tabs(
+        workspace,
+        &[
+            None,
+            Some("/repo/a"),
+            Some("/repo/a"),
+            Some("/repo/a"),
+            None,
+        ],
+        ctx,
+    );
+}
+
+/// Covers AE1 / R1 / R5. The reported gesture, end to end: dragging a tab
+/// upward inside its repository's strip reorders it *within* that strip. It
+/// keeps its binding, the repository still owns the same three slots, the loose
+/// list is untouched, and every group is still one contiguous run.
+///
+/// Before the fix this drag ejected the tab into "Other tabs": the flattened
+/// strip registers no rectangle, the target lookup returned `None`, and the
+/// reassignment path read that as "dragged out of every group".
+#[test]
+fn test_dragging_inside_a_repository_reorders_within_it() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = one_repo_projects();
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            repo_run_fixture(workspace, ctx);
+            let entry_paths = workspace.repo_mode_entry_paths(ctx);
+            let repo_group = workspace.tabs[3].group_id.expect("A3 is bound");
+            let [a2, a3] = tab_ids(workspace, &[2, 3])[..] else {
+                unreachable!("two ids requested")
+            };
+            let loose_ids = tab_ids(workspace, &[0, 4]);
+
+            // Drag A3 up. Repo mode renders the strip flattened, so the
+            // geometry lookup resolves no target group.
+            let landed = drag_step(workspace, 3, false, None, &entry_paths);
+            assert_eq!(landed, 2, "A3 moved one slot up inside its repository");
+
+            assert_eq!(
+                partitioned_section(workspace, landed, &entry_paths),
+                Some(PathBuf::from("/repo/a")),
+                "and is still filed under the repository it was dragged inside"
+            );
+            assert_eq!(
+                workspace.tabs[landed].group_id,
+                Some(repo_group),
+                "with the same group binding it started with"
+            );
+            assert_eq!(
+                entry_indices(workspace, "/repo/a", &entry_paths),
+                vec![1, 2, 3],
+                "the repository still owns the same run of slots"
+            );
+            assert_eq!(
+                tab_ids(workspace, &[2, 3]),
+                vec![a3, a2],
+                "but the two tabs inside it have swapped places"
+            );
+            let (_, loose) = workspace.repo_mode_tab_partition(&entry_paths);
+            assert_eq!(loose, vec![0, 4], "the loose list is untouched");
+            assert_eq!(tab_ids(workspace, &[0, 4]), loose_ids);
+            assert_groups_contiguous(workspace);
+        });
+    });
+}
+
+/// Covers AE2 / R1 / R5. A drag that would carry the tab *out* of its
+/// repository's run resolves no move at all — and the refusal leaves the tab
+/// where it was, still under its repository, rather than unbinding it. The
+/// clamp and the binding guard are the same gesture from the user's side.
+#[test]
+fn test_dragging_past_the_repository_edge_moves_nothing_and_keeps_the_binding() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = one_repo_projects();
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            repo_run_fixture(workspace, ctx);
+            let entry_paths = workspace.repo_mode_entry_paths(ctx);
+            let repo_group = workspace.tabs[1].group_id.expect("A1 is bound");
+            let ids_before = tab_ids(workspace, &[0, 1, 2, 3, 4]);
+
+            // Up past the top of the run, then down past the bottom of it.
+            assert_eq!(
+                drag_step(workspace, 1, false, None, &entry_paths),
+                1,
+                "A1 has no same-repository tab above it, so nothing moves"
+            );
+            assert_eq!(
+                drag_step(workspace, 3, true, None, &entry_paths),
+                3,
+                "and A3 has none below it"
+            );
+
+            assert_eq!(
+                tab_ids(workspace, &[0, 1, 2, 3, 4]),
+                ids_before,
+                "the tab order is exactly as it was"
+            );
+            for index in [1usize, 2, 3] {
+                assert_eq!(
+                    partitioned_section(workspace, index, &entry_paths),
+                    Some(PathBuf::from("/repo/a")),
+                    "tab {index} is still filed under its repository"
+                );
+                assert_eq!(workspace.tabs[index].group_id, Some(repo_group));
+            }
+            assert_groups_contiguous(workspace);
+        });
+    });
+}
+
+/// Covers AE3 / R4 / R5. A tab in "Other tabs" dragged toward — and past — a
+/// repository's run never acquires that repository. It reorders against the
+/// other loose tab and stays in the loose list; drag is not a route into a
+/// repository binding.
+#[test]
+fn test_a_loose_tab_dragged_over_a_repository_stays_loose() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = one_repo_projects();
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            repo_run_fixture(workspace, ctx);
+            let entry_paths = workspace.repo_mode_entry_paths(ctx);
+            let repo_group = workspace.tabs[1].group_id.expect("A1 is bound");
+            let repo_ids_before = tab_ids(workspace, &[1, 2, 3]);
+            let dragged = workspace.tabs[4].pane_group.id();
+
+            // Dragged upward over the repository's run. On the horizontal bar
+            // that group *does* render a container, so hand the guard the
+            // group the lookup would have found there.
+            let landed = drag_step(workspace, 4, false, Some(repo_group), &entry_paths);
+            assert_eq!(landed, 0, "it reordered against the other loose tab");
+
+            assert_eq!(
+                workspace.tabs[landed].pane_group.id(),
+                dragged,
+                "the tab that moved is the loose one"
+            );
+            assert_eq!(
+                workspace.tabs[landed].group_id, None,
+                "and it acquired no repository binding on the way"
+            );
+            assert_eq!(
+                partitioned_section(workspace, landed, &entry_paths),
+                None,
+                "so it is still under \"Other tabs\""
+            );
+            assert_eq!(
+                entry_indices(workspace, "/repo/a", &entry_paths),
+                vec![1, 2, 3],
+                "and the repository's own tabs are exactly where they were"
+            );
+            assert_eq!(tab_ids(workspace, &[1, 2, 3]), repo_ids_before);
+            assert_groups_contiguous(workspace);
+        });
+    });
+}
+
+/// Covers AE4 / R1. The stranding case: a repository holding a *single* tab.
+/// Dragged either way, the group must survive with that tab still in it —
+/// "Move to group" is only offered while the repository's group still has a
+/// member, so a drag that emptied it left the tab in "Other tabs" with no
+/// in-product route back.
+#[test]
+fn test_dragging_a_repositorys_only_tab_leaves_its_group_intact() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = one_repo_projects();
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            // [L0, A1, L2] — the repository's whole run is one tab.
+            bind_tabs(workspace, &[None, Some("/repo/a"), None], ctx);
+            let entry_paths = workspace.repo_mode_entry_paths(ctx);
+            let repo_group = workspace.tabs[1].group_id.expect("A1 is bound");
+            let dragged = workspace.tabs[1].pane_group.id();
+
+            for forward in [false, true] {
+                assert_eq!(
+                    drag_step(workspace, 1, forward, None, &entry_paths),
+                    1,
+                    "a lone repository tab has nowhere to go (forward={forward})"
+                );
+                assert_eq!(
+                    workspace.tabs[1].pane_group.id(),
+                    dragged,
+                    "and it is still the tab sitting there"
+                );
+                assert_eq!(
+                    workspace.tabs[1].group_id,
+                    Some(repo_group),
+                    "still a member of its repository's group"
+                );
+                assert_eq!(
+                    workspace
+                        .tab_groups
+                        .get(&repo_group)
+                        .and_then(|group| group.repo_root.as_deref()),
+                    Some("/repo/a"),
+                    "which still exists and is still bound to the repository"
+                );
+                assert_eq!(
+                    entry_indices(workspace, "/repo/a", &entry_paths),
+                    vec![1],
+                    "so the entry still lists it — the way back stays reachable"
+                );
+            }
+            assert_groups_contiguous(workspace);
         });
     });
 }
