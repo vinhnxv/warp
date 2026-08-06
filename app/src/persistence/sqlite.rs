@@ -709,6 +709,9 @@ fn handle_model_event(event: ModelEvent, connection: &mut SqliteConnection) -> a
         ModelEvent::DeleteProject { path } => {
             delete_project(connection, &path).context("error deleting project")
         }
+        ModelEvent::ClearProjectManualOrder => {
+            clear_project_manual_order(connection).context("error clearing project manual order")
+        }
         ModelEvent::UpsertWorkspace { workspace } => {
             save_workspace(connection, *workspace).context("error upserting workspace")
         }
@@ -1653,6 +1656,22 @@ fn get_all_projects(conn: &mut SqliteConnection) -> Result<Vec<Project>, diesel:
         .load_iter::<Project, DefaultLoadingMode>(conn)?
         .filter_map(|item| item.ok())
         .collect_vec())
+}
+
+/// Drops the manual position from every project row.
+///
+/// This cannot go through [`save_project`]: `Project` derives `AsChangeset`
+/// without `#[diesel(treat_none_as_null = true)]`, so diesel omits `None`
+/// fields from the `DO UPDATE SET` clause and the stale position would survive
+/// into the next launch. Writing the NULL directly is the opt-in.
+fn clear_project_manual_order(conn: &mut SqliteConnection) -> Result<()> {
+    use schema::projects::dsl::*;
+
+    diesel::update(projects)
+        .set(manual_position.eq(None::<i32>))
+        .execute(conn)?;
+
+    Ok(())
 }
 
 fn delete_project(conn: &mut SqliteConnection, project_path: &str) -> Result<()> {

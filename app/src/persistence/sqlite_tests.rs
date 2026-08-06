@@ -14,7 +14,8 @@ use warp_graphql::scalars::time::ServerTimestamp;
 use super::{
     app_database_file_path, database_file_path_for_current_scope, database_file_path_for_scope,
     decode_path, deduplicate_events, encode_path, get_all_codebase_index_metadata,
-    read_sqlite_data, save_app_state, save_codebase_index_metadata, setup_database, start_writer,
+    get_all_projects, handle_model_event, read_sqlite_data, save_app_state,
+    save_codebase_index_metadata, save_project, setup_database, start_writer,
 };
 use crate::app_state::{
     AppState, CodePaneSnapShot, CodePaneTabSnapshot, LeafContents, LeafSnapshot, PaneNodeSnapshot,
@@ -24,7 +25,7 @@ use crate::auth::UserUid;
 use crate::cloud_object::{CloudObjectPermissions, Owner};
 use crate::code::editor_management::CodeSource;
 use crate::notebooks::{CloudNotebook, CloudNotebookModel};
-use crate::persistence::model::ObjectPermissions;
+use crate::persistence::model::{ObjectPermissions, Project};
 use crate::persistence::{
     BlockCompleted, ModelEvent, PersistedDataScope, PersistenceScope, StartedCommandMetadata,
 };
@@ -1161,5 +1162,49 @@ fn test_sqlite_drops_too_small_bounds_on_read() {
     assert!(
         restored.windows[0].bounds.is_none(),
         "tiny persisted bounds must be discarded on read so users recover from a corrupt DB"
+    );
+}
+
+/// Covers R8. Clearing the manual order has to reach the database, not just
+/// the in-memory registry, or the order comes back on the next launch. The
+/// first half of this test pins *why* `ClearProjectManualOrder` exists:
+/// `Project` derives `AsChangeset` without `treat_none_as_null`, so the upsert
+/// path silently leaves the stale position behind.
+#[test]
+fn clearing_projects_manual_order_writes_null_through_to_sqlite() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let database_path = tempdir.path().join("warp.sqlite");
+    let mut conn = setup_database(&database_path).expect("database should initialize");
+
+    let now = Utc::now().naive_utc();
+    let positioned = Project {
+        path: "/repo/a".to_string(),
+        added_ts: now,
+        last_opened_ts: Some(now),
+        manual_position: Some(0),
+    };
+    save_project(&mut conn, positioned.clone()).expect("project should save");
+
+    save_project(
+        &mut conn,
+        Project {
+            manual_position: None,
+            ..positioned
+        },
+    )
+    .expect("project should save");
+    assert_eq!(
+        get_all_projects(&mut conn).expect("projects should load")[0].manual_position,
+        Some(0),
+        "the upsert path skips None fields, so it cannot clear a manual position"
+    );
+
+    handle_model_event(ModelEvent::ClearProjectManualOrder, &mut conn)
+        .expect("manual order should clear");
+
+    assert_eq!(
+        get_all_projects(&mut conn).expect("projects should load")[0].manual_position,
+        None,
+        "a cleared manual order must not survive a database round-trip"
     );
 }
