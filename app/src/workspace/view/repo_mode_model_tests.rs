@@ -991,6 +991,252 @@ fn test_recency_order_settles_at_launch() {
     });
 }
 
+/// Registry rows whose recency order is the argument order: the first path is
+/// the most recently used, each later one a day older. Callers pass paths that
+/// are *not* in alphabetical order, so an assertion on the rendered list tells
+/// recency apart from the display-name tiebreaker.
+fn projects_by_recency(paths: &[&str]) -> Vec<Project> {
+    let now = Utc::now().naive_utc();
+    paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let used = now - Duration::days(index as i64);
+            Project {
+                path: (*path).to_string(),
+                added_ts: used,
+                last_opened_ts: Some(used),
+                manual_position: None,
+            }
+        })
+        .collect()
+}
+
+/// The order the Repositories section renders, as registry keys.
+fn rendered_order(workspace: &Workspace, ctx: &AppContext) -> Vec<String> {
+    workspace
+        .repo_mode_entries(ctx)
+        .into_iter()
+        .map(|entry| entry.path.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Hand the registry over to a manual order, as a completed drag does.
+fn apply_manual_order(paths: &[&str], ctx: &mut ViewContext<Workspace>) {
+    let ordered: Vec<PathBuf> = paths.iter().map(|path| PathBuf::from(*path)).collect();
+    ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+        projects.set_manual_order(ordered, ctx);
+    });
+}
+
+/// Covers AE2/R3: with no manual order on the registry the section orders by
+/// recency exactly as it did before manual ordering existed.
+#[test]
+fn test_section_orders_by_recency_without_a_manual_order() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = projects_by_recency(&["/repo/c", "/repo/a", "/repo/b"]);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/c", "/repo/a", "/repo/b"]
+            );
+        });
+    });
+}
+
+/// Covers AE1/R2/R6: once the registry carries a manual order it owns the list
+/// — a window drawing for the first time renders that order, not recency.
+#[test]
+fn test_manual_order_replaces_recency_for_the_section() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = projects_by_recency(&["/repo/c", "/repo/a", "/repo/b"]);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            // Another window's drag. This window has not drawn its list yet, so
+            // it adopts the order rather than pinning recency.
+            apply_manual_order(&["/repo/a", "/repo/b", "/repo/c"], ctx);
+
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/a", "/repo/b", "/repo/c"]
+            );
+        });
+    });
+}
+
+/// Covers AE3/R4: a repository registered while a manual order is in effect
+/// carries no position, so it appends at the end — even though its recency is
+/// the newest in the registry.
+#[test]
+fn test_a_repository_added_under_a_manual_order_renders_last() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = projects_by_recency(&["/repo/c", "/repo/a", "/repo/b"]);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            apply_manual_order(&["/repo/a", "/repo/b", "/repo/c"], ctx);
+            ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+                projects.upsert_project(PathBuf::from("/repo/d"), ctx);
+            });
+
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/a", "/repo/b", "/repo/c", "/repo/d"]
+            );
+        });
+    });
+}
+
+/// Covers AE4/R7: a window that has already drawn its list keeps that order for
+/// the rest of its session. A manual order another window writes afterwards is
+/// adopted at the next launch, not under the user's cursor.
+#[test]
+fn test_a_window_that_already_drew_its_list_ignores_a_later_manual_order() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = projects_by_recency(&["/repo/c", "/repo/a", "/repo/b"]);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/c", "/repo/a", "/repo/b"],
+                "the first draw pins recency"
+            );
+
+            apply_manual_order(&["/repo/a", "/repo/b", "/repo/c"], ctx);
+
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/c", "/repo/a", "/repo/b"],
+                "the pinned order survives the handover"
+            );
+        });
+    });
+}
+
+/// Covers AE5/R9: recency keeps being recorded under a manual order — it is
+/// what Reset order restores to — but it moves no row.
+#[test]
+fn test_selecting_under_a_manual_order_bumps_recency_without_moving_rows() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let dir_a = tempfile::tempdir().expect("tempdir");
+    let dir_b = tempfile::tempdir().expect("tempdir");
+    let dir_c = tempfile::tempdir().expect("tempdir");
+    let root_a = dunce::canonicalize(dir_a.path()).expect("canonicalize");
+    let root_b = dunce::canonicalize(dir_b.path()).expect("canonicalize");
+    let root_c = dunce::canonicalize(dir_c.path()).expect("canonicalize");
+    let key_a = root_a.to_string_lossy().into_owned();
+    let key_b = root_b.to_string_lossy().into_owned();
+    let key_c = root_c.to_string_lossy().into_owned();
+    // Recency runs a, b, c; the manual order is its reverse.
+    let projects = projects_by_recency(&[&key_a, &key_b, &key_c]);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            apply_manual_order(&[&key_c, &key_b, &key_a], ctx);
+            let before = Utc::now().naive_utc();
+
+            workspace.select_repo_mode_entry(&root_a, ctx);
+            workspace.select_repo_mode_entry(&root_b, ctx);
+
+            let bumped = ProjectManagementModel::handle(ctx).read(ctx, |projects, _| {
+                projects
+                    .all_projects()
+                    .filter(|project| project.last_opened_ts.is_some_and(|used| used >= before))
+                    .map(|project| project.path.clone())
+                    .collect::<HashSet<String>>()
+            });
+            assert_eq!(
+                bumped,
+                HashSet::from([key_a.clone(), key_b.clone()]),
+                "both selections are recorded for the next launch"
+            );
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                [key_c.as_str(), key_b.as_str(), key_a.as_str()],
+                "and neither one moves a row"
+            );
+        });
+    });
+}
+
+/// Covers AE7/R5: removing a repository takes its position with it, so adding
+/// it back appends at the end rather than resurfacing mid-list.
+#[test]
+fn test_removing_and_re_adding_a_repository_renders_it_last() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = projects_by_recency(&["/repo/c", "/repo/a", "/repo/b"]);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            apply_manual_order(&["/repo/a", "/repo/b", "/repo/c"], ctx);
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/a", "/repo/b", "/repo/c"]
+            );
+
+            workspace.remove_repo_mode_entry(Path::new("/repo/b"), ctx);
+            assert_eq!(rendered_order(workspace, ctx), ["/repo/a", "/repo/c"]);
+
+            ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+                projects.upsert_project(PathBuf::from("/repo/b"), ctx);
+            });
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/a", "/repo/c", "/repo/b"]
+            );
+        });
+    });
+}
+
+/// A remote row whose first probe has not landed is projected into the list and
+/// is deliberately never in the registry, so it is never in the manual order
+/// either. It stays at the top where its `now` timestamp puts it: a
+/// "Connecting…" row at the bottom of a long list can sit below the fold with
+/// nothing to scroll it into view.
+#[test]
+fn test_a_pending_remote_row_stays_above_the_manual_order() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let key = probe_target("/srv/app").key();
+    let projects = projects_by_recency(&["/repo/c", "/repo/a", "/repo/b"]);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            apply_manual_order(&["/repo/a", "/repo/b", "/repo/c"], ctx);
+            workspace.restart_remote_probe(&key);
+
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                [key.as_str(), "/repo/a", "/repo/b", "/repo/c"]
+            );
+        });
+    });
+}
+
 /// Covers R14/KTD8: a remote entry gets the same group binding a local one
 /// does — one group keyed by the entry's registry key (here the remote key),
 /// with the opened tab as its member. That binding is what makes selecting the

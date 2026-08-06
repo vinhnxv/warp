@@ -109,7 +109,6 @@ impl ProjectManagementModel {
     /// read — this accessor is what provides it. The unpositioned tail keeps
     /// the registry's own default (most recently used first, path as a
     /// tiebreaker) so the read is deterministic rather than hash-ordered.
-    #[allow(dead_code, reason = "TODO: the repo-mode view wires this up next")]
     pub fn projects_in_manual_order(&self) -> Vec<&Project> {
         let mut ordered: Vec<&Project> = self.projects.values().collect();
         ordered.sort_by(|left, right| {

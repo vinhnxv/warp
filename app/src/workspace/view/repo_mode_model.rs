@@ -52,7 +52,8 @@ use crate::terminal::warpify::settings::WarpifySettings;
 use crate::workspace::tab_group::{TabGroup, TabGroupId};
 use crate::workspace::{TabContextMenuAnchor, WorkspaceAction, WorkspaceRegistry};
 
-/// Snapshot of a registry entry for UI rendering, ordered by recency at launch.
+/// Snapshot of a registry entry for UI rendering, ordered at launch by the
+/// manual order when there is one and by recency when there is not.
 #[derive(Clone, Debug)]
 pub struct RepoModeListEntry {
     pub path: PathBuf,
@@ -110,26 +111,40 @@ impl Workspace {
         FeatureFlag::RepoMode.is_enabled()
     }
 
-    /// Ordered registry list captured for the section (recency: last_opened then added).
+    /// Ordered registry list captured for the section: the manual order when
+    /// one exists, otherwise recency (last_opened then added).
     pub(super) fn repo_mode_entries(&self, ctx: &AppContext) -> Vec<RepoModeListEntry> {
         if !Self::repo_mode_enabled() {
             return Vec::new();
         }
         // Read the registry rows first (no filesystem work under the model
         // read-lock), then classify kind/liveness through the TTL cache below.
-        let mut projects: Vec<(PathBuf, Option<NaiveDateTime>, NaiveDateTime)> =
-            ProjectManagementModel::handle(ctx).read(ctx, |projects, _| {
-                projects
-                    .all_projects()
-                    .map(|project| {
-                        (
-                            PathBuf::from(&project.path),
-                            project.last_opened_ts,
-                            project.added_ts,
-                        )
-                    })
-                    .collect()
-            });
+        // The manual order, if the user has ever set one, is read in the same
+        // pass so the list is resolved against one snapshot of the registry.
+        let (mut projects, manual_order): (
+            Vec<(PathBuf, Option<NaiveDateTime>, NaiveDateTime)>,
+            Vec<String>,
+        ) = ProjectManagementModel::handle(ctx).read(ctx, |projects, _| {
+            let rows = projects
+                .all_projects()
+                .map(|project| {
+                    (
+                        PathBuf::from(&project.path),
+                        project.last_opened_ts,
+                        project.added_ts,
+                    )
+                })
+                .collect();
+            // Positioned rows lead `projects_in_manual_order`, so the first
+            // unpositioned one ends the manual order.
+            let manual_order = projects
+                .projects_in_manual_order()
+                .into_iter()
+                .take_while(|project| project.manual_position.is_some())
+                .map(|project| project.path.clone())
+                .collect();
+            (rows, manual_order)
+        });
 
         // A remote key whose first probe has not succeeded yet is not in the
         // registry — the registry means "verified" (R9). Project it into the
@@ -139,7 +154,7 @@ impl Workspace {
             .iter()
             .map(|(path, _, _)| path.to_string_lossy().into_owned())
             .collect();
-        let unverified: Vec<String> = self
+        let unverified: HashSet<String> = self
             .repo_mode_remote_probes
             .borrow()
             .keys()
@@ -150,7 +165,7 @@ impl Workspace {
             let added = chrono::Utc::now().naive_utc();
             projects.extend(
                 unverified
-                    .into_iter()
+                    .iter()
                     .map(|key| (PathBuf::from(key), Some(added), added)),
             );
         }
@@ -199,6 +214,29 @@ impl Workspace {
                 .then(b.added_ts.cmp(&a.added_ts))
                 .then(a.display_name.cmp(&b.display_name))
         });
+
+        // R2: once a manual order exists it owns the list, and recency stops
+        // reordering it. Registry rows the order does not name keep their
+        // recency order at the end — this sort is stable, so that survives —
+        // which is what appends a newly added repository (R4).
+        //
+        // A projected pending-remote row is deliberately never in the registry
+        // and so is never in the manual order. It stays at the top, where the
+        // `now` timestamp above put it, rather than dropping into that tail: a
+        // "Connecting…" row at the bottom of a long list can sit below the fold
+        // with nothing to scroll it into view.
+        if !manual_order.is_empty() {
+            entries.sort_by_key(|entry| {
+                let key = entry.path.to_string_lossy();
+                if unverified.contains(&*key) {
+                    return 0;
+                }
+                manual_order
+                    .iter()
+                    .position(|ordered| *ordered == key)
+                    .map_or(usize::MAX, |position| position + 1)
+            });
+        }
 
         // R3: order settles at launch. Capture the recency order on first use;
         // later renders keep that order (selection bumps last_opened_ts for the
