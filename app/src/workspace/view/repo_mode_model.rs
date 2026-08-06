@@ -1499,6 +1499,44 @@ fn repo_mode_bound_tab_owner(bound_root: &Path, entry_paths: &[PathBuf]) -> Opti
         .cloned()
 }
 
+/// The repository row `dragged_path` would swap with when it travels one step
+/// in `forward`'s direction, as an index into the rendered order
+/// (`repo_mode_entry_paths`). `None` is the clamp: the drag stays put.
+///
+/// Pure over the path list on purpose, and the same division of labour
+/// `section_neighbor` uses for tabs. Geometry stays in the caller, which
+/// resolves this index's rect and compares midpoints before committing the
+/// swap — no test can populate the position cache that read goes through, and
+/// this clamp has to be exercisable.
+///
+/// R11 falls out of the return type rather than out of a check: the result is
+/// always an index into the Repositories list or nothing at all, so "Other
+/// tabs" — which sits below that list and is not in it — can never be named as
+/// a swap target, and no drag can push a row past the end of the list into it.
+///
+/// A `dragged_path` that is not in the list clamps rather than panics. A drag
+/// outlives a frame, and another window can unregister the repository under it
+/// mid-drag.
+#[allow(
+    dead_code,
+    reason = "TODO: the drag handler wires this up in the next unit"
+)]
+pub(super) fn repo_mode_row_neighbor(
+    entry_paths: &[PathBuf],
+    dragged_path: &Path,
+    forward: bool,
+) -> Option<usize> {
+    let current_index = entry_paths
+        .iter()
+        .position(|path| path.as_path() == dragged_path)?;
+    if forward {
+        let below = current_index + 1;
+        (below < entry_paths.len()).then_some(below)
+    } else {
+        current_index.checked_sub(1)
+    }
+}
+
 #[cfg(test)]
 #[path = "repo_mode_model_tests.rs"]
 mod tests;

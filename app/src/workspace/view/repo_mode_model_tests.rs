@@ -1237,6 +1237,93 @@ fn test_a_pending_remote_row_stays_above_the_manual_order() {
     });
 }
 
+/// A three-row list, in the order the section renders it.
+fn ordered_rows(paths: &[&str]) -> Vec<PathBuf> {
+    paths.iter().map(PathBuf::from).collect()
+}
+
+/// Covers R10. From the middle of the list each direction resolves to the
+/// adjacent row, which is the pair the caller swaps once the midpoints cross.
+#[test]
+fn test_row_neighbor_moves_within_the_repository_list() {
+    let rows = ordered_rows(&["/repo/a", "/repo/b", "/repo/c"]);
+
+    assert_eq!(
+        repo_mode_row_neighbor(&rows, Path::new("/repo/b"), false),
+        Some(0)
+    );
+    assert_eq!(
+        repo_mode_row_neighbor(&rows, Path::new("/repo/b"), true),
+        Some(2)
+    );
+}
+
+/// Covers R11. The ends of the Repositories list clamp: there is no index
+/// above the first row and none below the last, so no drag can reach past the
+/// list into "Other tabs" below it.
+#[test]
+fn test_row_neighbor_clamps_at_the_list_ends() {
+    let rows = ordered_rows(&["/repo/a", "/repo/b", "/repo/c"]);
+
+    assert_eq!(
+        repo_mode_row_neighbor(&rows, Path::new("/repo/a"), false),
+        None,
+        "nothing above the first row"
+    );
+    assert_eq!(
+        repo_mode_row_neighbor(&rows, Path::new("/repo/c"), true),
+        None,
+        "nothing below the last row — 'Other tabs' is not a swap target"
+    );
+    // And the inward directions from those same ends still resolve, so the
+    // clamp is per-direction rather than "an end row cannot move".
+    assert_eq!(
+        repo_mode_row_neighbor(&rows, Path::new("/repo/a"), true),
+        Some(1)
+    );
+    assert_eq!(
+        repo_mode_row_neighbor(&rows, Path::new("/repo/c"), false),
+        Some(1)
+    );
+}
+
+/// A single registered repository is both the first and the last row, so it
+/// has nowhere to go in either direction.
+#[test]
+fn test_row_neighbor_is_absent_for_a_single_row_list() {
+    let rows = ordered_rows(&["/repo/a"]);
+
+    assert_eq!(
+        repo_mode_row_neighbor(&rows, Path::new("/repo/a"), false),
+        None
+    );
+    assert_eq!(
+        repo_mode_row_neighbor(&rows, Path::new("/repo/a"), true),
+        None
+    );
+}
+
+/// A drag can outlive its row: another window can remove the repository
+/// mid-drag, and the empty list is the same case. Both clamp rather than
+/// panic.
+#[test]
+fn test_row_neighbor_is_absent_for_an_unlisted_path() {
+    let rows = ordered_rows(&["/repo/a", "/repo/b"]);
+
+    assert_eq!(
+        repo_mode_row_neighbor(&rows, Path::new("/repo/gone"), false),
+        None
+    );
+    assert_eq!(
+        repo_mode_row_neighbor(&rows, Path::new("/repo/gone"), true),
+        None
+    );
+    assert_eq!(
+        repo_mode_row_neighbor(&[], Path::new("/repo/a"), true),
+        None
+    );
+}
+
 /// Covers R14/KTD8: a remote entry gets the same group binding a local one
 /// does — one group keyed by the entry's registry key (here the remote key),
 /// with the opened tab as its member. That binding is what makes selecting the
