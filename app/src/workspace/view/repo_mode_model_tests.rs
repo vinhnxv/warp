@@ -58,11 +58,13 @@ fn test_selection_filters_visible_tabs_to_group() {
             path: "/repo/a".to_string(),
             added_ts: now,
             last_opened_ts: Some(now),
+            manual_position: None,
         },
         Project {
             path: "/repo/b".to_string(),
             added_ts: now,
             last_opened_ts: Some(now),
+            manual_position: None,
         },
     ];
     App::test((), |mut app| async move {
@@ -647,6 +649,7 @@ fn test_probe_success_resolves_the_row_onto_the_expanded_path() {
         path: pending_key.clone(),
         added_ts: now,
         last_opened_ts: Some(now),
+        manual_position: None,
     }];
     App::test((), |mut app| async move {
         initialize_app(&mut app);
@@ -756,6 +759,7 @@ fn test_reprobe_failure_keeps_the_entry_and_marks_it_unreachable() {
         path: key.clone(),
         added_ts: now,
         last_opened_ts: Some(now),
+        manual_position: None,
     }];
     App::test((), |mut app| async move {
         initialize_app(&mut app);
@@ -836,16 +840,19 @@ fn test_remote_and_local_entries_with_same_path_coexist() {
             path: "/srv/app".to_string(),
             added_ts: now,
             last_opened_ts: Some(now),
+            manual_position: None,
         },
         Project {
             path: key_a.clone(),
             added_ts: now,
             last_opened_ts: Some(now),
+            manual_position: None,
         },
         Project {
             path: key_b.clone(),
             added_ts: now,
             last_opened_ts: Some(now),
+            manual_position: None,
         },
     ];
     App::test((), |mut app| async move {
@@ -880,6 +887,7 @@ fn test_remove_remote_entry_drops_it_from_listing_and_registry() {
         path: key.clone(),
         added_ts: now,
         last_opened_ts: Some(now),
+        manual_position: None,
     }];
     App::test((), |mut app| async move {
         initialize_app(&mut app);
@@ -908,6 +916,7 @@ fn test_unparseable_remote_key_is_marked_dead() {
         path: "ssh://not-a-valid-key".to_string(),
         added_ts: now,
         last_opened_ts: Some(now),
+        manual_position: None,
     }];
     App::test((), |mut app| async move {
         initialize_app(&mut app);
@@ -939,11 +948,13 @@ fn test_recency_order_settles_at_launch() {
             path: root_a.to_string_lossy().into_owned(),
             added_ts: now - Duration::days(2),
             last_opened_ts: Some(now - Duration::days(2)),
+            manual_position: None,
         },
         Project {
             path: root_b.to_string_lossy().into_owned(),
             added_ts: now - Duration::days(1),
             last_opened_ts: Some(now - Duration::days(1)),
+            manual_position: None,
         },
     ];
     App::test((), |mut app| async move {
@@ -1177,6 +1188,7 @@ fn test_a_failed_re_add_leaves_the_existing_entry_intact() {
         path: key.clone(),
         added_ts: now,
         last_opened_ts: Some(now),
+        manual_position: None,
     }];
     App::test((), |mut app| async move {
         initialize_app(&mut app);
@@ -1232,6 +1244,7 @@ fn test_repeated_selection_runs_one_probe_at_a_time() {
         path: key.clone(),
         added_ts: now,
         last_opened_ts: Some(now),
+        manual_position: None,
     }];
     App::test((), |mut app| async move {
         initialize_app(&mut app);
@@ -1302,6 +1315,7 @@ fn test_an_out_of_order_probe_result_does_not_overwrite_the_newer_one() {
         path: key.clone(),
         added_ts: now,
         last_opened_ts: Some(now),
+        manual_position: None,
     }];
     App::test((), |mut app| async move {
         initialize_app(&mut app);
@@ -1359,6 +1373,7 @@ fn test_a_probe_success_for_a_removed_key_registers_nothing() {
         path: key.clone(),
         added_ts: now,
         last_opened_ts: Some(now),
+        manual_position: None,
     }];
     App::test((), |mut app| async move {
         initialize_app(&mut app);
@@ -1402,6 +1417,7 @@ fn test_a_persisted_but_never_verified_row_renders_unresolved() {
         path: key.clone(),
         added_ts: now,
         last_opened_ts: Some(now),
+        manual_position: None,
     }];
     App::test((), |mut app| async move {
         initialize_app(&mut app);
@@ -1825,6 +1841,7 @@ fn one_repo_projects() -> Vec<Project> {
         path: "/repo/a".to_string(),
         added_ts: now,
         last_opened_ts: Some(now),
+        manual_position: None,
     }]
 }
 

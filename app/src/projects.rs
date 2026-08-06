@@ -79,6 +79,7 @@ impl ProjectManagementModel {
                 path: path.to_string_lossy().to_string(),
                 added_ts: now,
                 last_opened_ts: Some(now),
+                manual_position: None,
             };
             self.projects.insert(path.clone(), project.clone());
             project

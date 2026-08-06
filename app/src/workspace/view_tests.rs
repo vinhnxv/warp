@@ -4037,6 +4037,7 @@ fn test_restore_keeps_loose_tabs_out_of_the_selected_repo_group() {
                     path: "/repo/a".to_string(),
                     added_ts: now,
                     last_opened_ts: Some(now),
+                    manual_position: None,
                 }],
                 None,
                 ctx,

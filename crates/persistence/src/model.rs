@@ -227,6 +227,10 @@ pub struct Project {
     pub path: String,
     pub added_ts: NaiveDateTime,
     pub last_opened_ts: Option<NaiveDateTime>,
+    /// User-defined position in the repo-mode Repositories list. `None` means
+    /// the repository has no manual position and falls back to the default
+    /// ordering.
+    pub manual_position: Option<i32>,
 }
 
 impl Project {
