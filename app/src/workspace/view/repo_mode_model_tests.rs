@@ -1324,6 +1324,590 @@ fn test_row_neighbor_is_absent_for_an_unlisted_path() {
     );
 }
 
+/// The manual order the registry is holding, as registry keys.
+fn stored_manual_order(ctx: &AppContext) -> Vec<String> {
+    ProjectManagementModel::handle(ctx).read(ctx, |projects, _| {
+        projects
+            .projects_in_manual_order()
+            .into_iter()
+            .take_while(|project| project.manual_position.is_some())
+            .map(|project| project.path.clone())
+            .collect()
+    })
+}
+
+/// Every stored `(path, position)` pair, so a test can assert an existing
+/// manual order came through a drag byte-identical.
+fn stored_positions(ctx: &AppContext) -> Vec<(String, Option<i32>)> {
+    let mut positions: Vec<(String, Option<i32>)> =
+        ProjectManagementModel::handle(ctx).read(ctx, |projects, _| {
+            projects
+                .all_projects()
+                .map(|project| (project.path.clone(), project.manual_position))
+                .collect()
+        });
+    positions.sort();
+    positions
+}
+
+/// A row rect at `top`, in the sidebar's one-column geometry.
+fn row_rect(top: f32) -> RectF {
+    RectF::new(vec2f(0., top), vec2f(200., ROW_HEIGHT))
+}
+
+const ROW_HEIGHT: f32 = 40.;
+/// Height of the selected repository's tab block, which R15 folds away for the
+/// duration of a drag — and therefore the distance every row below it moves.
+const TAB_BLOCK_HEIGHT: f32 = 100.;
+
+/// Covers AE5/R8. Reset clears every stored position *and* drops the session
+/// pin, so the acting window re-sorts by recency on its next render rather than
+/// waiting for a relaunch — the pin is re-applied last in `repo_mode_entries`,
+/// so clearing only the registry would leave the window showing the manual
+/// order it was already pinned to.
+#[test]
+fn test_reset_returns_the_section_to_recency_without_a_relaunch() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = projects_by_recency(&["/repo/c", "/repo/a", "/repo/b"]);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            apply_manual_order(&["/repo/a", "/repo/b", "/repo/c"], ctx);
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/a", "/repo/b", "/repo/c"],
+                "the window is pinned to the manual order before the reset"
+            );
+
+            // Through the action, so the arm that routes it is exercised too.
+            workspace.handle_action(&WorkspaceAction::ResetRepoModeOrder, ctx);
+
+            assert_eq!(
+                stored_manual_order(ctx),
+                Vec::<String>::new(),
+                "every manual position is cleared"
+            );
+            assert!(
+                workspace.repo_mode_launch_order.borrow().is_none(),
+                "and so is the session pin, or this window would keep rendering the old order"
+            );
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/c", "/repo/a", "/repo/b"],
+                "the section is back to recency in this window, with no relaunch"
+            );
+        });
+    });
+}
+
+/// Covers AE1's immediacy half / R1. The drag's mutable list is the session
+/// pin, so a swap shows up on the very next `repo_mode_entries` call. Nothing
+/// is persisted until the drop.
+#[test]
+fn test_a_drag_move_reorders_the_rendered_entries_immediately() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = projects_by_recency(&["/repo/c", "/repo/a", "/repo/b"]);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/c", "/repo/a", "/repo/b"]
+            );
+
+            assert!(
+                workspace.swap_repo_mode_pinned_rows(Path::new("/repo/a"), Path::new("/repo/c"))
+            );
+
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/a", "/repo/c", "/repo/b"],
+                "the acting window moves on the next render, without a relaunch"
+            );
+            assert_eq!(
+                stored_manual_order(ctx),
+                Vec::<String>::new(),
+                "and a move in flight persists nothing — that is the drop's job"
+            );
+        });
+    });
+}
+
+/// Covers AE10/R16. Jostling a row past the 5px drag threshold and releasing it
+/// where it started must not hand the whole list over to a manual order, and
+/// must not disturb one that already exists.
+#[test]
+fn test_a_drag_that_ends_where_it_started_writes_nothing() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = projects_by_recency(&["/repo/c", "/repo/a", "/repo/b"]);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            // No manual order at all: the drag must not create one.
+            let _ = rendered_order(workspace, ctx);
+            workspace.start_repo_mode_entry_drag(Path::new("/repo/a"), row_rect(0.), ctx);
+            workspace.drop_repo_mode_entry(Path::new("/repo/a"), ctx);
+            assert_eq!(stored_manual_order(ctx), Vec::<String>::new());
+
+            // And an order that already exists comes through untouched.
+            apply_manual_order(&["/repo/b", "/repo/c", "/repo/a"], ctx);
+            let before = stored_positions(ctx);
+            workspace.start_repo_mode_entry_drag(Path::new("/repo/a"), row_rect(0.), ctx);
+            workspace.drop_repo_mode_entry(Path::new("/repo/a"), ctx);
+            assert_eq!(stored_positions(ctx), before);
+        });
+    });
+}
+
+/// Covers R16's harder half: a drag that passes several neighbours and comes
+/// back to its starting index has moved nothing, so it writes nothing. A flag
+/// set by the first successful swap answers "did a swap fire?", which this drag
+/// also satisfies — the pin at drag start is what answers the question R16
+/// actually asks.
+#[test]
+fn test_a_there_and_back_drag_writes_nothing() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = projects_by_recency(&["/repo/a", "/repo/b", "/repo/c"]);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let _ = rendered_order(workspace, ctx);
+            workspace.start_repo_mode_entry_drag(Path::new("/repo/a"), row_rect(0.), ctx);
+
+            // Down past both neighbours, then back up past both.
+            for neighbor in ["/repo/b", "/repo/c", "/repo/c", "/repo/b"] {
+                assert!(
+                    workspace.swap_repo_mode_pinned_rows(Path::new("/repo/a"), Path::new(neighbor))
+                );
+            }
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/a", "/repo/b", "/repo/c"],
+                "the row is back at the index it started from"
+            );
+
+            workspace.drop_repo_mode_entry(Path::new("/repo/a"), ctx);
+            assert_eq!(
+                stored_manual_order(ctx),
+                Vec::<String>::new(),
+                "four swaps fired and the list did not change, so nothing is written"
+            );
+        });
+    });
+}
+
+/// Covers KTD7b. The drop merges the dragged row into the order the registry is
+/// holding *now*, rather than writing this window's pin over it.
+///
+/// The two differ in more than the dragged row here, which is the situation
+/// KTD6 guarantees: a second window's pin is still the order it captured before
+/// the first window's drags. Writing the whole pin would make the shared order
+/// last-writer-wins across every row, discarding another window's arrangement
+/// invisibly until the next relaunch.
+#[test]
+fn test_a_drop_merges_only_the_dragged_row_into_the_stored_order() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = projects_by_recency(&["/repo/a", "/repo/b", "/repo/c", "/repo/d"]);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            // This window pins recency first, so its pin never adopts what the
+            // other window writes next (R7).
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/a", "/repo/b", "/repo/c", "/repo/d"]
+            );
+            apply_manual_order(&["/repo/d", "/repo/c", "/repo/b", "/repo/a"], ctx);
+
+            // One row dragged up one place in this window.
+            workspace.start_repo_mode_entry_drag(Path::new("/repo/c"), row_rect(0.), ctx);
+            assert!(
+                workspace.swap_repo_mode_pinned_rows(Path::new("/repo/c"), Path::new("/repo/b"))
+            );
+            workspace.drop_repo_mode_entry(Path::new("/repo/c"), ctx);
+
+            assert_eq!(
+                stored_manual_order(ctx),
+                ["/repo/d", "/repo/b", "/repo/a", "/repo/c"],
+                "only the dragged row moved; d, b and a keep their relative order"
+            );
+        });
+    });
+}
+
+/// Covers R8's discoverability half. "Reset order" is a list-level action in a
+/// per-row menu, and it appears only once there is an order to reset — before
+/// the first drag it would read as a control that does nothing.
+#[test]
+fn test_reset_order_is_absent_from_the_menu_until_an_order_exists() {
+    let path = Path::new("/repo/a");
+
+    let without = repo_mode_entry_menu_entries(path, false);
+    assert_eq!(without.len(), 1);
+    assert_eq!(
+        without[0].as_ref().expect("an item").0,
+        "Remove from Repositories"
+    );
+
+    let with = repo_mode_entry_menu_entries(path, true);
+    assert_eq!(with.len(), 3);
+    assert!(
+        with[1].is_none(),
+        "a separator splits removal from the reset"
+    );
+    let (label, action) = with[2].as_ref().expect("an item");
+    assert_eq!(*label, "Reset order");
+    assert!(matches!(action, WorkspaceAction::ResetRepoModeOrder));
+}
+
+/// A drag outlives a frame, so the repository under it can be unregistered by
+/// another window before the release lands. The write skips the unknown key
+/// rather than resurrecting it, and every surviving repository keeps its
+/// order.
+#[test]
+fn test_a_drop_for_an_unregistered_path_leaves_the_order_unchanged() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = projects_by_recency(&["/repo/a", "/repo/b", "/repo/c"]);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            apply_manual_order(&["/repo/a", "/repo/b", "/repo/c"], ctx);
+            let _ = rendered_order(workspace, ctx);
+
+            // Removed through the registry alone, as another window's removal
+            // reaches this one: this window's pin still carries the key.
+            ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+                projects.remove_project(PathBuf::from("/repo/b"), ctx);
+            });
+
+            workspace.start_repo_mode_entry_drag(Path::new("/repo/b"), row_rect(0.), ctx);
+            assert!(
+                workspace.swap_repo_mode_pinned_rows(Path::new("/repo/b"), Path::new("/repo/a"))
+            );
+            workspace.drop_repo_mode_entry(Path::new("/repo/b"), ctx);
+
+            assert_eq!(
+                stored_manual_order(ctx),
+                ["/repo/a", "/repo/c"],
+                "the unknown key is skipped and the survivors keep their order"
+            );
+        });
+    });
+}
+
+/// Covers the split in the exhaustive save-state match. The per-frame drag
+/// variants must not serialize the whole app state on every mouse-move frame;
+/// the two terminal ones change workspace state worth persisting.
+#[test]
+fn test_the_drag_variants_are_classified_per_frame_and_the_drop_is_not() {
+    let path = PathBuf::from("/repo/a");
+    let rect = row_rect(0.);
+
+    assert!(
+        !WorkspaceAction::DragRepoModeEntry {
+            path: path.clone(),
+            row_position: rect,
+        }
+        .should_save_app_state_on_action(),
+        "a per-frame drag move must not serialize the app state"
+    );
+    assert!(
+        WorkspaceAction::DropRepoModeEntry(path).should_save_app_state_on_action(),
+        "the release commits an order, like DropTab"
+    );
+}
+
+/// Every variant this unit adds is placed explicitly in
+/// `should_save_app_state_on_action`. The wildcard arm is deliberately absent,
+/// so a missing arm is a compile error rather than a silent default — this
+/// pins the classification each one was given.
+#[test]
+fn test_every_new_drag_action_is_placed_in_the_save_state_match() {
+    let path = PathBuf::from("/repo/a");
+    let rect = row_rect(0.);
+    let classifications = [
+        (
+            WorkspaceAction::StartRepoModeEntryDrag {
+                path: path.clone(),
+                row_position: rect,
+            },
+            false,
+        ),
+        (
+            WorkspaceAction::DragRepoModeEntry {
+                path: path.clone(),
+                row_position: rect,
+            },
+            false,
+        ),
+        (WorkspaceAction::DropRepoModeEntry(path), true),
+        (WorkspaceAction::ResetRepoModeOrder, true),
+    ];
+    for (action, expected) in classifications {
+        assert_eq!(
+            action.should_save_app_state_on_action(),
+            expected,
+            "{action:?} is classified as {expected}"
+        );
+    }
+}
+
+/// Covers AE12/R18. `ClippedScrollable` does not cull — it paints its whole
+/// child inside a clip layer — so a row scrolled out of view publishes a
+/// perfectly fresh rect. Only the explicit viewport test stops the drag
+/// swapping with a row the user cannot see.
+#[test]
+fn test_a_neighbor_outside_the_viewport_is_not_a_swap_target() {
+    let rows = ordered_rows(&["/repo/a", "/repo/b", "/repo/c"]);
+    // The tree shows rows from y=100 down; /repo/a is scrolled off the top, and
+    // /repo/b — the topmost visible row — has been dragged up over the edge.
+    let viewport = RectF::new(vec2f(0., 100.), vec2f(200., 200.));
+    let above_off_screen = row_rect(40.);
+    let dragged = row_rect(30.);
+
+    assert_eq!(
+        repo_mode_row_swap_target(
+            &rows,
+            Path::new("/repo/b"),
+            dragged,
+            Some(viewport),
+            Some(above_off_screen),
+            None,
+        ),
+        None,
+        "a row scrolled out of view is not a swap target, the same as the end of the list"
+    );
+
+    // The same neighbour, on screen, swaps at the same cursor position.
+    let above_on_screen = row_rect(100.);
+    assert_eq!(
+        repo_mode_row_swap_target(
+            &rows,
+            Path::new("/repo/b"),
+            dragged,
+            Some(viewport),
+            Some(above_on_screen),
+            None,
+        ),
+        Some(0)
+    );
+}
+
+/// KTD8b's other half: a neighbour with no rect at all is a row that stopped
+/// being painted mid-drag — removed by another window, or a pending remote key
+/// that resolved onto a different one. It clamps rather than panicking.
+#[test]
+fn test_a_neighbor_with_no_rect_is_not_a_swap_target() {
+    let rows = ordered_rows(&["/repo/a", "/repo/b", "/repo/c"]);
+    let viewport = RectF::new(vec2f(0., 0.), vec2f(200., 400.));
+
+    assert_eq!(
+        repo_mode_row_swap_target(
+            &rows,
+            Path::new("/repo/b"),
+            row_rect(0.),
+            Some(viewport),
+            None,
+            None,
+        ),
+        None
+    );
+    // And a viewport that has not been published yet clamps everything: those
+    // rects belong to a tree nobody painted.
+    assert_eq!(
+        repo_mode_row_swap_target(
+            &rows,
+            Path::new("/repo/b"),
+            row_rect(0.),
+            None,
+            Some(row_rect(40.)),
+            None,
+        ),
+        None
+    );
+}
+
+/// The same clamp through the handler rather than the pure function: a test
+/// cannot populate the position cache, so every rect the drag reads is absent
+/// here — which is exactly the state a drag is in when the tree has stopped
+/// being painted. It must leave the list alone rather than panicking on a
+/// missing rect.
+#[test]
+fn test_a_drag_move_with_no_rects_at_all_leaves_the_list_alone() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = projects_by_recency(&["/repo/a", "/repo/b", "/repo/c"]);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let before = rendered_order(workspace, ctx);
+            workspace.handle_action(
+                &WorkspaceAction::StartRepoModeEntryDrag {
+                    path: PathBuf::from("/repo/b"),
+                    row_position: row_rect(ROW_HEIGHT),
+                },
+                ctx,
+            );
+            for step in 1..=20 {
+                workspace.handle_action(
+                    &WorkspaceAction::DragRepoModeEntry {
+                        path: PathBuf::from("/repo/b"),
+                        row_position: row_rect(ROW_HEIGHT - step as f32 * 4.),
+                    },
+                    ctx,
+                );
+            }
+            workspace.handle_action(
+                &WorkspaceAction::DropRepoModeEntry(PathBuf::from("/repo/b")),
+                ctx,
+            );
+
+            assert_eq!(rendered_order(workspace, ctx), before);
+            assert_eq!(stored_manual_order(ctx), Vec::<String>::new());
+        });
+    });
+}
+
+/// The first swap offset, in whole pixels, for a drag of `dragged` that travels
+/// `direction` (1 down, -1 up). `slot` is the row's laid-out slot as the
+/// position cache reports it once the frame with the folded-away tab block has
+/// been painted; `start` is the rect `Draggable` reported at the threshold,
+/// which stays in pre-collapse coordinates for the life of the drag.
+fn first_swap_offset(
+    rows: &[PathBuf],
+    dragged: &Path,
+    start: RectF,
+    slot: RectF,
+    above: Option<RectF>,
+    below: Option<RectF>,
+    direction: f32,
+) -> Option<usize> {
+    let viewport = RectF::new(vec2f(0., -1000.), vec2f(200., 2000.));
+    let mut drag = RepoModeRowDrag::new(dragged.to_path_buf(), start, None);
+    (0..400).find(|step| {
+        let reported = RectF::new(
+            start.origin() + vec2f(0., direction * *step as f32),
+            start.size(),
+        );
+        let anchored = drag.anchored(reported, Some(slot));
+        repo_mode_row_swap_target(rows, dragged, anchored, Some(viewport), above, below).is_some()
+    })
+}
+
+/// Covers AE13/R19. The dragged row is below a selected repository's tab block,
+/// which folds away the instant the drag starts: every row under it moves up by
+/// the block's height, while `Draggable` keeps reporting a rect anchored to the
+/// pre-collapse layout. Uncorrected, that rect alone is already past the row
+/// below it and the collapse fires a swap the user never asked for.
+#[test]
+fn test_the_anchor_correction_absorbs_the_tab_block_collapse() {
+    let rows = ordered_rows(&["/repo/a", "/repo/b", "/repo/c"]);
+    let viewport = RectF::new(vec2f(0., 0.), vec2f(200., 400.));
+    // /repo/a is selected, so its tabs sit between it and /repo/b.
+    let start = row_rect(ROW_HEIGHT + TAB_BLOCK_HEIGHT);
+    let slot_after_collapse = row_rect(ROW_HEIGHT);
+    let below_after_collapse = row_rect(ROW_HEIGHT * 2.);
+    // The pointer has barely moved — one frame past the 5px threshold.
+    let reported = RectF::new(start.origin() + vec2f(0., 5.), start.size());
+
+    let mut drag = RepoModeRowDrag::new(PathBuf::from("/repo/b"), start, None);
+    let anchored = drag.anchored(reported, Some(slot_after_collapse));
+    assert_eq!(
+        repo_mode_row_swap_target(
+            &rows,
+            Path::new("/repo/b"),
+            anchored,
+            Some(viewport),
+            None,
+            Some(below_after_collapse),
+        ),
+        None,
+        "the collapse alone must not move a row"
+    );
+
+    // Without the correction the very same frame swaps, which is the drift the
+    // anchor exists to remove.
+    assert_eq!(
+        repo_mode_row_swap_target(
+            &rows,
+            Path::new("/repo/b"),
+            reported,
+            Some(viewport),
+            None,
+            Some(below_after_collapse),
+        ),
+        Some(2)
+    );
+}
+
+/// Covers KTD9. The correction is defined by the dragged row's *own* observed
+/// shift, so it is exactly zero whenever nothing folded away — and a drag then
+/// swaps at the same pointer distance as one that did collapse a tab block. All
+/// three no-collapse cases are the same case at this seam, and all three are
+/// covered: no repository selected, a selected repository with no open tabs,
+/// and a row dragged from above the tab block.
+#[test]
+fn test_the_anchor_correction_is_zero_when_nothing_folds_away() {
+    let rows = ordered_rows(&["/repo/a", "/repo/b", "/repo/c"]);
+
+    // The collapsed case: /repo/b starts a tab block's height lower than the
+    // slot it occupies once the block is gone.
+    let collapsed = first_swap_offset(
+        &rows,
+        Path::new("/repo/b"),
+        row_rect(ROW_HEIGHT + TAB_BLOCK_HEIGHT),
+        row_rect(ROW_HEIGHT),
+        None,
+        Some(row_rect(ROW_HEIGHT * 2.)),
+        1.,
+    );
+    assert!(collapsed.is_some(), "the drag does eventually swap");
+
+    // No repository selected, so there is no tab block to fold: the row's slot
+    // is where the drag started. Same for a selected repository with no open
+    // tabs, whose block is empty, and for a row dragged from *above* the
+    // block, which does not move when the block goes.
+    for start_top in [
+        ROW_HEIGHT,                    // no repository selected
+        ROW_HEIGHT,                    // selected repository, no open tabs
+        ROW_HEIGHT + TAB_BLOCK_HEIGHT, // dragged from above the block
+    ] {
+        let no_collapse = first_swap_offset(
+            &rows,
+            Path::new("/repo/b"),
+            row_rect(start_top),
+            row_rect(start_top),
+            None,
+            Some(row_rect(start_top + ROW_HEIGHT)),
+            1.,
+        );
+        assert_eq!(
+            no_collapse, collapsed,
+            "a drag with nothing to fold away swaps at the same pointer distance"
+        );
+    }
+}
+
 /// Covers R14/KTD8: a remote entry gets the same group binding a local one
 /// does — one group keyed by the entry's registry key (here the remote key),
 /// with the opened tab as its member. That binding is what makes selecting the

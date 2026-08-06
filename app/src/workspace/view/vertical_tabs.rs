@@ -1659,6 +1659,20 @@ fn render_new_tab_button(
     .finish()
 }
 
+/// Save-position id for the *visible* window of the scrolling tree — the
+/// clamp a repository-row drag stops at (R18).
+///
+/// Saved outside the `ClippedScrollable` rather than around the tree column:
+/// the column is painted at `origin - scroll_start` at its full content height,
+/// so wrapping it would publish content bounds, not the window they are seen
+/// through. `ClippedScrollable` does not cull — it opens a clip layer and
+/// paints its whole child — so a row scrolled out of view still publishes a
+/// perfectly fresh rect, and this is what tells the drag that rect is off
+/// screen.
+pub(super) fn repo_tree_viewport_position_id() -> String {
+    "vertical_tabs:repo_tree_viewport".to_string()
+}
+
 fn render_vertical_tabs_panel(
     state: &VerticalTabsPanelState,
     workspace: &Workspace,
@@ -1686,6 +1700,17 @@ fn render_vertical_tabs_panel(
     )
     .with_overlayed_scrollbar()
     .finish();
+
+    // Publish the viewport a repository-row drag clamps at. Per-frame, so a
+    // rect cannot outlive the panel closing and reopening at another size, and
+    // gated so the non-repo-mode path is untouched.
+    let scrollable_groups = if Workspace::repo_mode_enabled() {
+        SavePosition::new(scrollable_groups, &repo_tree_viewport_position_id())
+            .for_single_frame()
+            .finish()
+    } else {
+        scrollable_groups
+    };
 
     let mut panel_content = Flex::column()
         .with_main_axis_size(MainAxisSize::Max)

@@ -1,6 +1,8 @@
+use pathfinder_geometry::rect::RectF;
 use repo_mode::{RemoteProbeFailure, RemoteProbeState, RemoteTarget};
 
 use super::*;
+use crate::workspace::view::repo_mode_model::repo_mode_row_swap_target;
 
 fn remote(probe: RemoteProbeState) -> RemoteListEntry {
     RemoteListEntry {
@@ -114,22 +116,201 @@ fn a_dead_rows_body_click_never_removes_the_entry() {
     let path = Path::new("/repo/gone");
 
     assert!(
-        repo_row_click_action(true, false, path).is_none(),
+        repo_row_click_action(false, true, false, path).is_none(),
         "a left-click on a dead row's body must not remove the registry entry"
     );
     assert!(
-        repo_row_click_action(true, true, path).is_none(),
+        repo_row_click_action(false, true, true, path).is_none(),
         "and that holds whether or not the dead row is the selected one"
     );
 
     // A live row still selects and deselects.
     assert!(matches!(
-        repo_row_click_action(false, false, path),
+        repo_row_click_action(false, false, false, path),
         Some(WorkspaceAction::SelectRepoModeEntry(ref p)) if p == path
     ));
     assert!(matches!(
-        repo_row_click_action(false, true, path),
+        repo_row_click_action(false, false, true, path),
         Some(WorkspaceAction::SelectRepoModeAll)
+    ));
+}
+
+/// A registry row, as `repo_mode_entries` hands it to the sidebar.
+fn list_entry(path: &str, probe: Option<RemoteProbeState>, is_dead: bool) -> RepoModeListEntry {
+    let now = chrono::Utc::now().naive_utc();
+    RepoModeListEntry {
+        path: PathBuf::from(path),
+        display_name: path.to_string(),
+        kind: RepoEntryKind::Folder,
+        is_dead,
+        last_opened_ts: Some(now),
+        added_ts: now,
+        remote: probe.map(remote),
+    }
+}
+
+/// Covers AE9/R14. A remote row whose first probe has not resolved cannot be
+/// picked up: its registry key is still provisional, so an order written
+/// against it would name a repository that is about to stop existing. A
+/// resolved row and a dead one are draggable on the same terms as any other
+/// (R12) — a dead row's key is settled, only its path is unreachable.
+#[test]
+fn a_pending_remote_row_is_the_only_row_that_cannot_be_dragged() {
+    assert!(!repo_row_is_draggable(&list_entry(
+        "ssh://vinh@10.0.0.7/srv/app",
+        Some(RemoteProbeState::Pending),
+        false
+    )));
+    assert!(repo_row_is_draggable(&list_entry(
+        "ssh://vinh@10.0.0.7/srv/app",
+        Some(RemoteProbeState::Resolved {
+            kind: RepoEntryKind::Repo,
+            branch: Some("main".to_string()),
+        }),
+        false
+    )));
+    assert!(repo_row_is_draggable(&list_entry(
+        "ssh://vinh@10.0.0.7/srv/app",
+        Some(RemoteProbeState::Failed {
+            reason: RemoteProbeFailure::Unreachable,
+        }),
+        false
+    )));
+    assert!(repo_row_is_draggable(&list_entry("/repo/gone", None, true)));
+    assert!(repo_row_is_draggable(&list_entry("/repo/a", None, false)));
+}
+
+/// A pending remote row still publishes a position id, even though it cannot be
+/// dragged. A row with no published rect is invisible to the neighbour lookup,
+/// so an unwrapped pending row would clamp every drag that had to cross it —
+/// and a pending row sorts to the *top* of the list, where it would sit between
+/// the first row and every row below it.
+#[test]
+fn a_pending_remote_row_still_publishes_a_position() {
+    let entries = [
+        list_entry(
+            "ssh://vinh@10.0.0.7/srv/app",
+            Some(RemoteProbeState::Pending),
+            false,
+        ),
+        list_entry("/repo/a", None, false),
+        list_entry("/repo/b", None, false),
+    ];
+    let ids: Vec<String> = entries
+        .iter()
+        .map(|entry| repo_row_position_id(&entry.path))
+        .collect();
+    assert_eq!(ids.len(), 3);
+    assert!(
+        ids.iter().all(|id| !id.is_empty()),
+        "every row publishes a rect, draggable or not"
+    );
+    assert_eq!(
+        ids.iter().collect::<HashSet<_>>().len(),
+        3,
+        "and the ids are per-row, so one row's rect cannot answer for another"
+    );
+
+    // With the pending row at index 0, the row below it still resolves it as a
+    // reachable swap target rather than clamping there. The pending row sits at
+    // y=0..40; /repo/a has been dragged up past its midpoint.
+    let paths: Vec<PathBuf> = entries.iter().map(|entry| entry.path.clone()).collect();
+    let viewport = RectF::new(vec2f(0., 0.), vec2f(200., 400.));
+    assert_eq!(
+        repo_mode_row_swap_target(
+            &paths,
+            Path::new("/repo/a"),
+            RectF::new(vec2f(0., -5.), vec2f(200., 40.)),
+            Some(viewport),
+            Some(RectF::new(vec2f(0., 0.), vec2f(200., 40.))),
+            None,
+        ),
+        Some(0)
+    );
+}
+
+/// Per-entry drag state is dropped with the rest of a row's state when its
+/// entry leaves the registry, and kept for one that has not.
+#[test]
+fn prune_to_drops_drag_state_for_a_departed_entry() {
+    let state = RepoSidebarState::default();
+    for key in ["/repo/a", "/repo/b"] {
+        state
+            .entry_drags
+            .borrow_mut()
+            .insert(key.to_string(), DraggableState::default());
+    }
+
+    let live: HashSet<String> = ["/repo/a".to_string()].into_iter().collect();
+    state.prune_to(&live);
+
+    assert_eq!(
+        state
+            .entry_drags
+            .borrow()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["/repo/a".to_string()]
+    );
+}
+
+/// Covers AE6/R15. The selected repository's tab block folds away for the
+/// duration of any repository-row drag, so every row in the list is the same
+/// height and the drag's midpoint rule applies unchanged.
+///
+/// Visibility is derived from the drag state map rather than restored by the
+/// drop handler (KTD11): `DraggableState` returns to not-dragging on mouse-up
+/// on every path, so no terminal path can leave those tabs invisible.
+#[test]
+fn the_tab_block_folds_away_while_a_repository_row_is_dragged() {
+    let state = RepoSidebarState::default();
+    let dragged = DraggableState::default();
+    state
+        .entry_drags
+        .borrow_mut()
+        .insert("/repo/a".to_string(), dragged.clone());
+    state
+        .entry_drags
+        .borrow_mut()
+        .insert("/repo/b".to_string(), DraggableState::default());
+
+    assert!(!state.any_entry_drag_active());
+    assert!(
+        repo_tab_block_visible(true, state.any_entry_drag_active()),
+        "the selected repository shows its tabs when nothing is being dragged"
+    );
+
+    dragged.set_dragging(vec2f(0., 0.), vec2f(0., 0.));
+
+    assert!(state.any_entry_drag_active());
+    assert!(
+        !repo_tab_block_visible(true, state.any_entry_drag_active()),
+        "and hides them while *any* row is dragged, not just its own"
+    );
+    // An unselected row has no tab block either way.
+    assert!(!repo_tab_block_visible(false, false));
+}
+
+/// Covers AE8/R13. Selecting a repository spawns a terminal, and for a remote
+/// entry an SSH session, so a row that crossed the drag threshold must dispatch
+/// nothing at all. A press and release below the threshold still selects, as it
+/// does today.
+#[test]
+fn a_row_that_crossed_the_drag_threshold_dispatches_no_selection() {
+    let path = Path::new("/repo/a");
+
+    assert!(
+        repo_row_click_action(true, false, false, path).is_none(),
+        "no selection and no session spawn while the row is being dragged"
+    );
+    assert!(
+        repo_row_click_action(true, false, true, path).is_none(),
+        "and no deselection either"
+    );
+    assert!(matches!(
+        repo_row_click_action(false, false, false, path),
+        Some(WorkspaceAction::SelectRepoModeEntry(ref p)) if p == path
     ));
 }
 

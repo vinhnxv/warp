@@ -287,6 +287,27 @@ pub enum WorkspaceAction {
     /// (clears the selection so the tab neither joins a repo group nor starts
     /// at an entry root).
     NewRepoModeLooseTab,
+    /// Repo mode: a repository row's drag crossed the threshold. Keyed by
+    /// registry path rather than list index (KTD4), and carrying the row's rect
+    /// at that moment — the anchor the drag re-bases on once the selected
+    /// repository's tab block folds away (R19).
+    StartRepoModeEntryDrag {
+        path: PathBuf,
+        row_position: RectF,
+    },
+    /// Repo mode: the dragged repository row moved. `row_position` is the rect
+    /// `Draggable` reports for the row this frame.
+    DragRepoModeEntry {
+        path: PathBuf,
+        row_position: RectF,
+    },
+    /// Repo mode: the dragged repository row was released, committing the order
+    /// the list is showing. Release is the only terminal state — a repository
+    /// drag has no cancel (R17).
+    DropRepoModeEntry(PathBuf),
+    /// Repo mode: discard the manual order and give the Repositories list back
+    /// to recency ordering (R8). List-level, so it names no repository.
+    ResetRepoModeOrder,
     AddDefaultTab,
     AddTerminalTab {
         hide_homepage: bool,
@@ -1035,6 +1056,8 @@ impl WorkspaceAction {
             | ToggleRepoModeEntryMenu { .. }
             | SelectRepoModePicker
             | NewRepoModeLooseTab
+            | DropRepoModeEntry(_)
+            | ResetRepoModeOrder
             | ToggleTabColor { .. }
             | ToggleTabGroupColor { .. }
             | AddDefaultTab
@@ -1134,6 +1157,10 @@ impl WorkspaceAction {
             | OpenInExplorer { .. }
             | DragTab { .. }
             | StartTabDrag
+            // Per-frame drag actions: serializing the whole app state on every
+            // mouse-move frame of every drag is what the `false` arm is for.
+            | StartRepoModeEntryDrag { .. }
+            | DragRepoModeEntry { .. }
             | DragGroup { .. }
             | StartGroupDrag(_)
             | ToggleLeftPanel

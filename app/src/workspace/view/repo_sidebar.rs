@@ -20,9 +20,10 @@ use warp_core::ui::Icon as WarpIcon;
 use warp_core::ui::theme::color::internal_colors;
 use warp_core::ui::theme::{AnsiColorIdentifier, Fill as ThemeFill};
 use warpui::elements::{
-    ChildAnchor, ConstrainedBox, Container, CrossAxisAlignment, Element, Empty, Expanded, Flex,
-    Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning, Padding,
-    ParentAnchor, ParentElement, ParentOffsetBounds, Shrinkable, Stack, Text,
+    ChildAnchor, ConstrainedBox, Container, CrossAxisAlignment, DragAxis, Draggable,
+    DraggableState, Element, Empty, Expanded, Flex, Hoverable, MainAxisAlignment, MainAxisSize,
+    MouseStateHandle, OffsetPositioning, Padding, ParentAnchor, ParentElement, ParentOffsetBounds,
+    SavePosition, Shrinkable, Stack, Text,
 };
 use warpui::ui_components::components::UiComponent;
 use warpui::{AppContext, SingletonEntity};
@@ -53,6 +54,13 @@ pub(super) struct RepoSidebarState {
     /// Hover state for the "+ New" button on the "Other tabs" section header.
     pub new_terminal_button: MouseStateHandle,
     pub entry_rows: RefCell<HashMap<String, MouseStateHandle>>,
+    /// Per-row drag state, keyed by registry path like every other map here.
+    ///
+    /// Also what R15 reads: the selected repository's tab block is hidden while
+    /// any row here reports a drag. `DraggableState` returns to not-dragging on
+    /// mouse-up on every path, so deriving visibility from the map means no
+    /// terminal path can leave those tabs invisible (KTD11).
+    pub entry_drags: RefCell<HashMap<String, DraggableState>>,
     /// Hover state for the clickable PR badge on each repo row.
     pub pr_badges: RefCell<HashMap<String, MouseStateHandle>>,
     /// Hover state for the "Remove" button on each dead repo row.
@@ -73,6 +81,9 @@ impl RepoSidebarState {
         self.entry_rows
             .borrow_mut()
             .retain(|key, _| live_keys.contains(key));
+        self.entry_drags
+            .borrow_mut()
+            .retain(|key, _| live_keys.contains(key));
         self.pr_badges
             .borrow_mut()
             .retain(|key, _| live_keys.contains(key));
@@ -83,6 +94,49 @@ impl RepoSidebarState {
             .borrow_mut()
             .retain(|key, _| live_keys.contains(key));
     }
+
+    /// Whether any repository row is mid-drag (R15/KTD11).
+    fn any_entry_drag_active(&self) -> bool {
+        self.entry_drags
+            .borrow()
+            .values()
+            .any(|drag| drag.is_dragging())
+    }
+}
+
+/// Save-position id for a repository row's full rect, read by the drag to
+/// resolve its neighbours' positions and its own laid-out slot.
+///
+/// Keyed by registry path (KTD4) rather than list index: the index-keyed tab
+/// path carries a documented staleness hazard it has to rescan to recover
+/// from, and repo mode already uses the path as identity everywhere else.
+pub(super) fn repo_row_position_id(path: &Path) -> String {
+    format!("repo_mode:row:{}", path.to_string_lossy())
+}
+
+/// Whether a repository row can be picked up.
+///
+/// R14: a remote row whose first probe has not resolved is not draggable. Its
+/// registry key is still provisional — the host can expand the path into a
+/// different key — so an order written against it would name a repository that
+/// is about to stop existing. A dead row is draggable on the same terms as any
+/// other (R12): its key is settled, only its path is unreachable.
+pub(super) fn repo_row_is_draggable(entry: &RepoModeListEntry) -> bool {
+    !matches!(
+        entry.remote.as_ref().map(|remote| &remote.probe),
+        Some(RemoteProbeState::Pending)
+    )
+}
+
+/// Whether the selected repository's tab block renders this frame.
+///
+/// R15: it folds away for the duration of any repository-row drag, so every row
+/// in the list is the same height and the drag's midpoint rule applies
+/// unchanged. With the block in place two consecutive rows are separated by an
+/// arbitrarily tall region and the dragged row reads as stuck until the cursor
+/// has crossed all of it.
+pub(super) fn repo_tab_block_visible(is_selected: bool, any_entry_drag_active: bool) -> bool {
+    is_selected && !any_entry_drag_active
 }
 
 /// Fixed "Repositories" header (with + Add) rendered above the scrolling tree.
@@ -193,6 +247,9 @@ pub(super) fn render_repo_tree(
     // Registry keys seen this frame, so per-entry state for removed entries can
     // be dropped rather than accumulating for the window's lifetime.
     let mut live_keys: HashSet<String> = HashSet::new();
+    // Read once for the whole tree: every row's tab block answers to the same
+    // "is a repository being dragged" question (R15).
+    let entry_drag_active = sidebar.any_entry_drag_active();
 
     for entry in entries {
         let key = entry.path.to_string_lossy().into_owned();
@@ -210,6 +267,12 @@ pub(super) fn render_repo_tree(
             .clone();
         let remove_mouse = sidebar
             .remove_buttons
+            .borrow_mut()
+            .entry(key.clone())
+            .or_default()
+            .clone();
+        let drag_state = sidebar
+            .entry_drags
             .borrow_mut()
             .entry(key.clone())
             .or_default()
@@ -243,17 +306,28 @@ pub(super) fn render_repo_tree(
             badges.pull_request_url = None;
         }
 
-        let members = is_selected.then(|| by_entry.get(&entry.path).cloned().unwrap_or_default());
+        let members = repo_tab_block_visible(is_selected, entry_drag_active)
+            .then(|| by_entry.get(&entry.path).cloned().unwrap_or_default());
 
-        column = column.with_child(render_entry_row(
+        let is_draggable = repo_row_is_draggable(&entry);
+        let path = entry.path.clone();
+        let row = render_entry_row(
             entry,
             remote_state,
             branch,
             badges,
             mouse,
+            drag_state.clone(),
             pr_badge_mouse,
             remove_mouse,
             is_selected,
+            appearance,
+        );
+        column = column.with_child(wrap_entry_row_for_drag(
+            row,
+            &path,
+            is_draggable,
+            drag_state,
             appearance,
         ));
 
@@ -389,16 +463,97 @@ fn render_empty_state(app_appearance: &Appearance) -> Box<dyn Element> {
     .finish()
 }
 
+/// The tab path's wrapping order, minus the drop target (KTD10): the row's
+/// `SavePosition` outermost, then the placeholder that fills the hole the drag
+/// overlay leaves behind, then the `Draggable` itself.
+///
+/// `SavePosition` stays outside the `Draggable` so it keeps publishing the
+/// row's laid-out *slot* while the overlay follows the cursor — that slot is
+/// what the neighbour lookup and the anchor correction both read. It is
+/// per-frame (KTD8b) because the indefinite cache is never cleared, so a row
+/// that stops being painted mid-drag would go on answering the lookup at a rect
+/// nothing occupies.
+///
+/// A pending remote row (R14) skips only the `Draggable`. It keeps its
+/// `SavePosition`: a row with no published rect is invisible to the neighbour
+/// lookup, so an unwrapped pending row would clamp every drag that has to cross
+/// it.
+///
+/// Repository rows get no `DropTarget` at all. Nothing here reads drop-target
+/// data — the swap is resolved from the row rect — and reusing the vertical
+/// tabs' pane data to fill the parameter would make every repository row a
+/// valid pane-header drop target.
+fn wrap_entry_row_for_drag(
+    row: Box<dyn Element>,
+    path: &Path,
+    is_draggable: bool,
+    drag_state: DraggableState,
+    app_appearance: &Appearance,
+) -> Box<dyn Element> {
+    let row = if is_draggable {
+        let start_path = path.to_path_buf();
+        let drag_path = path.to_path_buf();
+        let drop_path = path.to_path_buf();
+        Draggable::new(drag_state.clone(), row)
+            .with_drag_axis(DragAxis::VerticalOnly)
+            .on_drag_start(move |ctx, _, row_position| {
+                ctx.dispatch_typed_action(WorkspaceAction::StartRepoModeEntryDrag {
+                    path: start_path.clone(),
+                    row_position,
+                });
+            })
+            .on_drag(move |ctx, _, row_position, _| {
+                ctx.dispatch_typed_action(WorkspaceAction::DragRepoModeEntry {
+                    path: drag_path.clone(),
+                    row_position,
+                });
+            })
+            .on_drop(move |ctx, _, _, _| {
+                ctx.dispatch_typed_action(WorkspaceAction::DropRepoModeEntry(drop_path.clone()));
+            })
+            .finish()
+    } else {
+        row
+    };
+
+    let row = if drag_state.is_dragging() {
+        Container::new(row)
+            .with_background(internal_colors::fg_overlay_1(app_appearance.theme()))
+            .finish()
+    } else {
+        row
+    };
+
+    SavePosition::new(row, &repo_row_position_id(path))
+        .for_single_frame()
+        .finish()
+}
+
 /// What a left-click on a repo row's body does, or `None` for no action.
 ///
-/// A pure function so the one property that matters can be asserted directly:
-/// **the row body is never destructive.** It used to dispatch
+/// A pure function so the two properties that matter can be asserted directly.
+///
+/// **The row body is never destructive.** It used to dispatch
 /// `RemoveRepoModeEntry` for a dead entry, so a single unmodified left-click
 /// anywhere on the row permanently dropped the registry entry — no
 /// confirmation, no undo — and a repo on a briefly-unavailable network mount
 /// reads as dead. Removal now belongs to the row's own "Remove" button.
-fn repo_row_click_action(is_dead: bool, is_selected: bool, path: &Path) -> Option<WorkspaceAction> {
-    if is_dead {
+///
+/// **A drag never selects the repository it moves (R13).** Selecting spawns a
+/// terminal, and for a remote entry an SSH session, so a row that crossed the
+/// drag threshold must dispatch nothing. `Draggable` already suppresses every
+/// child event for the life of a drag; stating the rule here is what makes it
+/// testable, and what keeps a press the child recorded before the threshold was
+/// crossed from completing into a click afterwards.
+fn repo_row_click_action(
+    is_dragging: bool,
+    is_dead: bool,
+    is_selected: bool,
+    path: &Path,
+) -> Option<WorkspaceAction> {
+    if is_dragging {
+        None
+    } else if is_dead {
         // A dead entry cannot be opened, and must not be removed from here.
         // Right-click still opens the row's context menu.
         None
@@ -417,6 +572,7 @@ fn render_entry_row(
     branch: Option<String>,
     badges: RepoModeEntryBadges,
     mouse: MouseStateHandle,
+    drag_state: DraggableState,
     pr_badge_mouse: MouseStateHandle,
     remove_mouse: MouseStateHandle,
     is_selected: bool,
@@ -658,7 +814,9 @@ fn render_entry_row(
         }
     })
     .on_click(move |ctx, _, _| {
-        if let Some(action) = repo_row_click_action(is_dead, is_selected, &path) {
+        if let Some(action) =
+            repo_row_click_action(drag_state.is_dragging(), is_dead, is_selected, &path)
+        {
             ctx.dispatch_typed_action(action);
         }
     })

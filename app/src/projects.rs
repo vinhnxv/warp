@@ -127,7 +127,6 @@ impl ProjectManagementModel {
     /// zero. Paths that are not in the registry are skipped, so a stale order
     /// from another window cannot resurrect a removed repository. Registry
     /// entries the caller leaves out keep whatever position they already had.
-    #[allow(dead_code, reason = "TODO: the repo-mode view wires this up next")]
     pub fn set_manual_order(&mut self, ordered_paths: Vec<PathBuf>, ctx: &mut ModelContext<Self>) {
         let mut repositioned = Vec::new();
         let mut next_position = 0;
@@ -149,7 +148,6 @@ impl ProjectManagementModel {
 
     /// Discard the manual order and give the list back to its default
     /// ordering.
-    #[allow(dead_code, reason = "TODO: the repo-mode view wires this up next")]
     pub fn clear_manual_order(&mut self, ctx: &mut ModelContext<Self>) {
         let cleared: Vec<PathBuf> = self
             .projects

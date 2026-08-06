@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use chrono::NaiveDateTime;
 use instant::Instant;
+use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::{Vector2F, vec2f};
 use repo_mode::{
     RemoteProbeFailure, RemoteProbeOutcome, RemoteProbeState, RemoteTarget, RepoEntryKind,
@@ -39,9 +40,11 @@ const REMOTE_PROBE_TIMEOUT: Duration = Duration::from_secs(12);
 const REMOTE_PROBE_CONNECT_TIMEOUT_SECS: u64 = 8;
 
 use super::Workspace;
+use super::repo_sidebar::repo_row_position_id;
+use super::vertical_tabs::repo_tree_viewport_position_id;
 use crate::context_chips::display_chip::GitLineChanges;
 use crate::features::FeatureFlag;
-use crate::menu::MenuItemFields;
+use crate::menu::{MenuItem, MenuItemFields};
 use crate::pane_group::{NewTerminalOptions, PanesLayout};
 use crate::projects::ProjectManagementModel;
 use crate::terminal::TerminalView;
@@ -51,6 +54,9 @@ use crate::terminal::model::session::{BootstrapSessionType, SessionsEvent};
 use crate::terminal::warpify::settings::WarpifySettings;
 use crate::workspace::tab_group::{TabGroup, TabGroupId};
 use crate::workspace::{TabContextMenuAnchor, WorkspaceAction, WorkspaceRegistry};
+
+/// One registry row as the ordering pass reads it: key, last-opened, added.
+type RegistryRow = (PathBuf, Option<NaiveDateTime>, NaiveDateTime);
 
 /// Snapshot of a registry entry for UI rendering, ordered at launch by the
 /// manual order when there is one and by recency when there is not.
@@ -121,30 +127,28 @@ impl Workspace {
         // read-lock), then classify kind/liveness through the TTL cache below.
         // The manual order, if the user has ever set one, is read in the same
         // pass so the list is resolved against one snapshot of the registry.
-        let (mut projects, manual_order): (
-            Vec<(PathBuf, Option<NaiveDateTime>, NaiveDateTime)>,
-            Vec<String>,
-        ) = ProjectManagementModel::handle(ctx).read(ctx, |projects, _| {
-            let rows = projects
-                .all_projects()
-                .map(|project| {
-                    (
-                        PathBuf::from(&project.path),
-                        project.last_opened_ts,
-                        project.added_ts,
-                    )
-                })
-                .collect();
-            // Positioned rows lead `projects_in_manual_order`, so the first
-            // unpositioned one ends the manual order.
-            let manual_order = projects
-                .projects_in_manual_order()
-                .into_iter()
-                .take_while(|project| project.manual_position.is_some())
-                .map(|project| project.path.clone())
-                .collect();
-            (rows, manual_order)
-        });
+        let (mut projects, manual_order): (Vec<RegistryRow>, Vec<String>) =
+            ProjectManagementModel::handle(ctx).read(ctx, |projects, _| {
+                let rows = projects
+                    .all_projects()
+                    .map(|project| {
+                        (
+                            PathBuf::from(&project.path),
+                            project.last_opened_ts,
+                            project.added_ts,
+                        )
+                    })
+                    .collect();
+                // Positioned rows lead `projects_in_manual_order`, so the first
+                // unpositioned one ends the manual order.
+                let manual_order = projects
+                    .projects_in_manual_order()
+                    .into_iter()
+                    .take_while(|project| project.manual_position.is_some())
+                    .map(|project| project.path.clone())
+                    .collect();
+                (rows, manual_order)
+            });
 
         // A remote key whose first probe has not succeeded yet is not in the
         // registry — the registry means "verified" (R9). Project it into the
@@ -656,6 +660,182 @@ impl Workspace {
         ctx.notify();
     }
 
+    /// A repository row's drag crossed the threshold (R1).
+    ///
+    /// Nothing is written here. The drag records what it will need at its two
+    /// later steps: the row's rect before the tab block folds away, which is
+    /// the anchor the midpoint comparison re-bases on (KTD9/R19), and the
+    /// session pin as it stands right now, which is the only thing that can
+    /// answer R16's "did the row end up back where it started?".
+    ///
+    /// The path arrives straight off the rendered row, so it is already the
+    /// registry key — deliberately not re-canonicalized, which would stat the
+    /// filesystem on a pointer path.
+    pub(super) fn start_repo_mode_entry_drag(
+        &mut self,
+        path: &Path,
+        row_position: RectF,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if !Self::repo_mode_enabled() {
+            return;
+        }
+        self.repo_mode_row_drag = Some(RepoModeRowDrag::new(
+            path.to_path_buf(),
+            row_position,
+            self.repo_mode_launch_order.borrow().clone(),
+        ));
+        // R15: the tab block has to be gone before the first swap is decided,
+        // so the rows the drag measures against are the ones the user sees.
+        ctx.notify();
+    }
+
+    /// One frame of a repository-row drag: swap the dragged row with the
+    /// neighbour it has passed, if any.
+    ///
+    /// The swap lands in this window's session pin — the fourth
+    /// pin-maintenance point (KTD7) — because `repo_mode_entries` re-applies
+    /// that pin last, so a window that has drawn its list renders the pin and
+    /// nothing else. Writing only the registry would leave R1's "renders in the
+    /// new order immediately" invisible until the next relaunch.
+    ///
+    /// Every rect comes from the same position cache: the dragged row's own
+    /// laid-out slot, its neighbours' slots, and the tree viewport. Notably
+    /// *not* through `neighbor_drag_rect`, whose every branch is keyed to the
+    /// tab list — it would compare this row against a tab's rect and swap at
+    /// arbitrary thresholds.
+    pub(super) fn drag_repo_mode_entry(
+        &mut self,
+        path: &Path,
+        row_position: RectF,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if !Self::repo_mode_enabled() {
+            return;
+        }
+        let slot_rect = ctx.element_position_by_id(repo_row_position_id(path));
+        let Some(dragged_rect) = self
+            .repo_mode_row_drag
+            .as_mut()
+            .filter(|drag| drag.path == path)
+            .map(|drag| drag.anchored(row_position, slot_rect))
+        else {
+            // A move with no matching start: this window never saw the
+            // drag-start, or a previous drag never reached its drop. Re-anchor
+            // on this frame rather than correcting by another drag's geometry.
+            self.repo_mode_row_drag = Some(RepoModeRowDrag::new(
+                path.to_path_buf(),
+                row_position,
+                self.repo_mode_launch_order.borrow().clone(),
+            ));
+            return;
+        };
+
+        let entry_paths = self.repo_mode_entry_paths(ctx);
+        let neighbor_rect = |forward: bool| {
+            repo_mode_row_neighbor(&entry_paths, path, forward)
+                .and_then(|index| entry_paths.get(index))
+                .and_then(|neighbor| ctx.element_position_by_id(repo_row_position_id(neighbor)))
+        };
+        let target = repo_mode_row_swap_target(
+            &entry_paths,
+            path,
+            dragged_rect,
+            ctx.element_position_by_id(repo_tree_viewport_position_id()),
+            neighbor_rect(false),
+            neighbor_rect(true),
+        );
+        let Some(neighbor) = target.and_then(|index| entry_paths.get(index)) else {
+            return;
+        };
+        if self.swap_repo_mode_pinned_rows(path, neighbor) {
+            // A swap moves the dragged row's slot for a reason that is not the
+            // tab block, so the anchor must be settled by now — freeze it so a
+            // later frame cannot mistake a swap for the collapse.
+            if let Some(drag) = self.repo_mode_row_drag.as_mut() {
+                drag.freeze_anchor();
+            }
+            ctx.notify();
+        }
+    }
+
+    /// Swap two repository rows inside this window's session pin. Returns
+    /// whether the pin actually changed.
+    ///
+    /// Guarded rather than assuming the pin is populated, like the three
+    /// existing pin-maintenance sites: nothing forces a render between the
+    /// window opening and the first drag event.
+    pub(super) fn swap_repo_mode_pinned_rows(&self, dragged: &Path, neighbor: &Path) -> bool {
+        let dragged = dragged.to_string_lossy();
+        let neighbor = neighbor.to_string_lossy();
+        let mut swapped = false;
+        if let Some(order) = self.repo_mode_launch_order.borrow_mut().as_mut()
+            && let Some(from) = order.iter().position(|key| key.as_str() == &*dragged)
+            && let Some(to) = order.iter().position(|key| key.as_str() == &*neighbor)
+        {
+            order.swap(from, to);
+            swapped = true;
+        }
+        swapped
+    }
+
+    /// The dragged repository row was released (R17): whatever the list is
+    /// showing is what gets written, from wherever the pointer happens to be.
+    ///
+    /// Writes nothing when the pin is byte-identical to the one captured at
+    /// drag start (R16) — that covers the there-and-back drag a "did a swap
+    /// fire" flag would report as a move.
+    pub(super) fn drop_repo_mode_entry(&mut self, path: &Path, ctx: &mut ViewContext<Self>) {
+        if !Self::repo_mode_enabled() {
+            return;
+        }
+        let drag = self.repo_mode_row_drag.take();
+        let Some(drag) = drag.filter(|drag| drag.path == path) else {
+            return;
+        };
+        let Some(pin) = self.repo_mode_launch_order.borrow().clone() else {
+            return;
+        };
+        if drag.pin_at_start.as_deref() == Some(pin.as_slice()) {
+            return;
+        }
+        let key = path.to_string_lossy();
+        let Some(pin_index) = pin.iter().position(|pinned| pinned.as_str() == &*key) else {
+            return;
+        };
+
+        let stored: Vec<PathBuf> = ProjectManagementModel::handle(ctx).read(ctx, |projects, _| {
+            projects
+                .projects_in_manual_order()
+                .into_iter()
+                .take_while(|project| project.manual_position.is_some())
+                .map(|project| PathBuf::from(&project.path))
+                .collect()
+        });
+        let merged = merge_dragged_row(stored, &pin, pin_index);
+        ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+            projects.set_manual_order(merged, ctx);
+        });
+        ctx.notify();
+    }
+
+    /// Give the list back to recency (R8).
+    ///
+    /// Both halves are needed: clearing the stored positions is what survives a
+    /// relaunch, and dropping the session pin is what lets this window re-sort
+    /// without one — `repo_mode_entries` renders the pin and nothing else once
+    /// it has captured a pin.
+    pub(super) fn reset_repo_mode_order(&mut self, ctx: &mut ViewContext<Self>) {
+        if !Self::repo_mode_enabled() {
+            return;
+        }
+        self.repo_mode_launch_order.replace(None);
+        ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+            projects.clear_manual_order(ctx);
+        });
+        ctx.notify();
+    }
+
     /// Cut a registry key loose from everything in this window that points at
     /// it: its bound group, the selection, and the pinned launch order.
     ///
@@ -1013,11 +1193,21 @@ impl Workspace {
             ctx.notify();
             return;
         }
-        let items = vec![
-            MenuItemFields::new("Remove from Repositories")
-                .with_on_select_action(WorkspaceAction::RemoveRepoModeEntry(path.to_path_buf()))
-                .into_item(),
-        ];
+        let has_manual_order = ProjectManagementModel::handle(ctx).read(ctx, |projects, _| {
+            projects
+                .all_projects()
+                .any(|project| project.manual_position.is_some())
+        });
+        let items: Vec<MenuItem<WorkspaceAction>> =
+            repo_mode_entry_menu_entries(path, has_manual_order)
+                .into_iter()
+                .map(|entry| match entry {
+                    Some((label, action)) => MenuItemFields::new(label)
+                        .with_on_select_action(action)
+                        .into_item(),
+                    None => MenuItem::Separator,
+                })
+                .collect();
         ctx.update_view(&self.tab_right_click_menu, |menu, view_ctx| {
             menu.set_items(items, view_ctx);
         });
@@ -1517,10 +1707,6 @@ fn repo_mode_bound_tab_owner(bound_root: &Path, entry_paths: &[PathBuf]) -> Opti
 /// A `dragged_path` that is not in the list clamps rather than panics. A drag
 /// outlives a frame, and another window can unregister the repository under it
 /// mid-drag.
-#[allow(
-    dead_code,
-    reason = "TODO: the drag handler wires this up in the next unit"
-)]
 pub(super) fn repo_mode_row_neighbor(
     entry_paths: &[PathBuf],
     dragged_path: &Path,
@@ -1534,6 +1720,189 @@ pub(super) fn repo_mode_row_neighbor(
         (below < entry_paths.len()).then_some(below)
     } else {
         current_index.checked_sub(1)
+    }
+}
+
+/// The row the dragged repository should swap with this frame, as an index into
+/// the rendered order, or `None` for "stay put".
+///
+/// Midpoints rather than edges, like the vertical tab variant
+/// (`calculate_updated_tab_index_vertical`): with the tab block folded away for
+/// the duration of the drag (R15) every row is the same height, so a midpoint
+/// comparison cannot oscillate.
+///
+/// Three things all read as the same clamp, deliberately:
+/// - no neighbour in that direction — the end of the list (R11);
+/// - a neighbour with no rect at all, which is a row that stopped being painted
+///   mid-drag (KTD8b) rather than one that moved;
+/// - a neighbour whose rect does not intersect `viewport` (KTD8/R18).
+///
+/// That last one needs its own test because `ClippedScrollable` does not cull:
+/// it paints its whole child inside a clip layer, so a row scrolled out of view
+/// keeps publishing a perfectly fresh rect that would otherwise be a legal swap
+/// target. A `viewport` of `None` clamps everything — it means the tree was not
+/// painted, and swapping against rects from an unpainted tree is exactly what
+/// there is no way to make safe.
+pub(super) fn repo_mode_row_swap_target(
+    entry_paths: &[PathBuf],
+    dragged_path: &Path,
+    dragged_rect: RectF,
+    viewport: Option<RectF>,
+    above_rect: Option<RectF>,
+    below_rect: Option<RectF>,
+) -> Option<usize> {
+    let dragged_midpoint = (dragged_rect.min_y() + dragged_rect.max_y()) / 2.;
+    let on_screen = |rect: Option<RectF>| {
+        rect.filter(|rect| viewport.is_some_and(|viewport| viewport.intersects(*rect)))
+    };
+
+    if let Some(above_index) = repo_mode_row_neighbor(entry_paths, dragged_path, false)
+        && let Some(rect) = on_screen(above_rect)
+        && dragged_midpoint < (rect.min_y() + rect.max_y()) / 2.
+    {
+        return Some(above_index);
+    }
+    if let Some(below_index) = repo_mode_row_neighbor(entry_paths, dragged_path, true)
+        && let Some(rect) = on_screen(below_rect)
+        && dragged_midpoint > (rect.min_y() + rect.max_y()) / 2.
+    {
+        return Some(below_index);
+    }
+    None
+}
+
+/// Where the dragged row lands in the order the registry is holding.
+///
+/// The first drag hands the whole list over: with nothing stored, the session
+/// pin *is* the order the user is looking at. Every drag after that moves only
+/// the dragged row (KTD7b) and leaves every other stored position in its
+/// existing relative order — writing the whole pin instead would make the
+/// shared order last-writer-wins across every row, so a ten-repository
+/// arrangement made in one window would be discarded by a one-row drag in
+/// another, invisibly until the next relaunch.
+///
+/// The pin and the stored order are not index-aligned: the pin keeps keys for
+/// repositories that have left the registry and gains keys the stored order
+/// never had. The dragged row is therefore re-inserted after the nearest
+/// preceding pin entry the stored order also knows, rather than at the pin's
+/// raw index.
+fn merge_dragged_row(stored: Vec<PathBuf>, pin: &[String], pin_index: usize) -> Vec<PathBuf> {
+    let dragged = PathBuf::from(pin[pin_index].as_str());
+    if stored.is_empty() {
+        return pin.iter().map(|key| PathBuf::from(key.as_str())).collect();
+    }
+
+    let mut merged = stored;
+    merged.retain(|path| *path != dragged);
+    let insert_at = pin[..pin_index]
+        .iter()
+        .rev()
+        .find_map(|preceding| {
+            let preceding = Path::new(preceding.as_str());
+            merged.iter().position(|path| path.as_path() == preceding)
+        })
+        .map_or(0, |index| index + 1);
+    merged.insert(insert_at, dragged);
+    merged
+}
+
+/// Rows of a repository row's context menu, in order; `None` is a separator.
+///
+/// "Reset order" is a list-level action living in a per-row menu, which is the
+/// cheapest surface that already exists. It appears only once a manual order
+/// exists — before the first drag there is nothing to reset, and an always-on
+/// item would read as a control that does nothing.
+fn repo_mode_entry_menu_entries(
+    path: &Path,
+    has_manual_order: bool,
+) -> Vec<Option<(&'static str, WorkspaceAction)>> {
+    let mut entries = vec![Some((
+        "Remove from Repositories",
+        WorkspaceAction::RemoveRepoModeEntry(path.to_path_buf()),
+    ))];
+    if has_manual_order {
+        entries.push(None);
+        entries.push(Some(("Reset order", WorkspaceAction::ResetRepoModeOrder)));
+    }
+    entries
+}
+
+/// A repository-row drag in flight.
+///
+/// Two things have to survive from the threshold crossing to the release. The
+/// anchor, because `Draggable` freezes the cursor offset at mouse-down and
+/// never recomputes it, so the rect it reports stays in pre-collapse
+/// coordinates while every row below the tab block has moved up (KTD9/R19). And
+/// the session pin as it was at drag start, because R16 asks whether the row
+/// ended up back where it began — which a "did a swap fire" flag cannot answer:
+/// a drag that goes down three rows and back up three sets that flag and has
+/// moved nothing.
+pub(super) struct RepoModeRowDrag {
+    /// Registry key of the row being dragged.
+    pub(super) path: PathBuf,
+    /// The row's rect when the drag crossed the threshold — the last reading
+    /// taken before the tab block can fold away.
+    start_rect: RectF,
+    /// How far the drag-start rect sits from where the row's slot actually is,
+    /// captured once on the first frame that slot moves and subtracted from
+    /// every reported rect afterwards.
+    anchor_delta: Option<Vector2F>,
+    /// The session pin at drag start (R16).
+    pin_at_start: Option<Vec<String>>,
+}
+
+impl RepoModeRowDrag {
+    fn new(path: PathBuf, start_rect: RectF, pin_at_start: Option<Vec<String>>) -> Self {
+        Self {
+            path,
+            start_rect,
+            anchor_delta: None,
+            pin_at_start,
+        }
+    }
+
+    /// The reported rect, moved into the coordinates the neighbour rects are in.
+    ///
+    /// `slot_rect` is the dragged row's own laid-out slot, read from the same
+    /// position cache as those neighbours (the row's `SavePosition` wraps its
+    /// `Draggable`, so it keeps publishing the slot while the overlay follows
+    /// the cursor). Before any swap fires, a difference between that slot and
+    /// the drag-start rect is the tab block collapsing and nothing else.
+    ///
+    /// Two properties make this the definition rather than "the first move
+    /// frame after the collapse". It yields exactly zero in the three cases
+    /// where nothing folds away — no repository selected, a selected repository
+    /// with no open tabs, and a row dragged from above the tab block — so the
+    /// correction never turns into an accumulated pointer offset. And it does
+    /// not depend on detecting which frame the collapse landed on: `on_drag_start`
+    /// and `on_drag` arrive on separate mouse events with no guaranteed render
+    /// between them, so a rule keyed to the first move frame can capture
+    /// pre-collapse geometry and stay skewed by the block's height for the rest
+    /// of the drag. Until the slot moves, the neighbour rects have not moved
+    /// either, so an uncorrected comparison is the consistent one.
+    fn anchored(&mut self, reported: RectF, slot_rect: Option<RectF>) -> RectF {
+        let delta = match self.anchor_delta {
+            Some(delta) => delta,
+            None => {
+                let Some(slot) = slot_rect else {
+                    return reported;
+                };
+                let delta = self.start_rect.origin() - slot.origin();
+                if delta == Vector2F::zero() {
+                    return reported;
+                }
+                self.anchor_delta = Some(delta);
+                delta
+            }
+        };
+        RectF::new(reported.origin() - delta, reported.size())
+    }
+
+    /// Settle the anchor at whatever it is now. Called once a swap has fired,
+    /// after which the dragged row's slot moves for a reason that is not the
+    /// tab block and can no longer be read as one.
+    fn freeze_anchor(&mut self) {
+        self.anchor_delta.get_or_insert(Vector2F::zero());
     }
 }
 

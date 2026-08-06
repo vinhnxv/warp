@@ -1243,6 +1243,13 @@ pub struct Workspace {
     /// Repositories-section order captured on first render after launch (R3:
     /// order settles at launch; entries added later append at the end).
     repo_mode_launch_order: RefCell<Option<Vec<String>>>,
+    /// The repository-row drag in flight, if any: the anchor the midpoint
+    /// comparison re-bases on once the tab block folds away (R19), and the
+    /// session pin as it was at drag start, which is what tells a drag that
+    /// ended where it began from one that moved a row (R16). Replaced at every
+    /// drag start, so a drag whose release never arrived cannot skew the next
+    /// one.
+    repo_mode_row_drag: Option<repo_mode_model::RepoModeRowDrag>,
     /// Cached (kind, is_dead) filesystem probes per repo root, refreshed at most
     /// every `REPO_FS_CACHE_TTL`, so `repo_mode_entries` does not stat every
     /// registered path on each render.
@@ -3676,6 +3683,7 @@ impl Workspace {
             vertical_tabs_panel_open: false,
             selected_repo_root: None,
             repo_mode_launch_order: RefCell::new(None),
+            repo_mode_row_drag: None,
             repo_mode_fs_cache: RefCell::new(HashMap::new()),
             repo_mode_remote_probes: RefCell::new(HashMap::new()),
             repo_mode_probe_generation: Cell::new(0),
@@ -24515,6 +24523,14 @@ impl TypedActionView for Workspace {
             }
             SelectRepoModePicker => self.open_repo_mode_picker_menu(ctx),
             NewRepoModeLooseTab => self.new_repo_mode_loose_tab(ctx),
+            StartRepoModeEntryDrag { path, row_position } => {
+                self.start_repo_mode_entry_drag(path, *row_position, ctx)
+            }
+            DragRepoModeEntry { path, row_position } => {
+                self.drag_repo_mode_entry(path, *row_position, ctx)
+            }
+            DropRepoModeEntry(path) => self.drop_repo_mode_entry(path, ctx),
+            ResetRepoModeOrder => self.reset_repo_mode_order(ctx),
             AddDefaultTab => {
                 let effective_mode = AISettings::as_ref(ctx).default_session_mode(ctx);
                 match effective_mode {
