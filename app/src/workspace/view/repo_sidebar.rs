@@ -583,7 +583,9 @@ fn repo_row_click_action(
         // Clicking the expanded repo collapses it (deselect).
         Some(WorkspaceAction::SelectRepoModeAll)
     } else {
-        Some(WorkspaceAction::SelectRepoModeEntry(path.to_path_buf()))
+        Some(WorkspaceAction::SelectRepoModeEntry(RepoRegistryKey(
+            path.to_path_buf(),
+        )))
     }
 }
 
@@ -736,7 +738,7 @@ fn render_entry_row(
                 remove_mouse.clone(),
                 {
                     let path = remove_path.clone();
-                    move |_| WorkspaceAction::RemoveRepoModeEntry(path.clone())
+                    move |_| WorkspaceAction::RemoveRepoModeEntry(RepoRegistryKey(path.clone()))
                 },
                 app_appearance,
             ));
@@ -844,7 +846,7 @@ fn render_entry_row(
     })
     .on_right_click(move |ctx, _, position| {
         ctx.dispatch_typed_action(WorkspaceAction::ToggleRepoModeEntryMenu {
-            path: path_for_menu.clone(),
+            path: RepoRegistryKey(path_for_menu.clone()),
             position,
         });
     })

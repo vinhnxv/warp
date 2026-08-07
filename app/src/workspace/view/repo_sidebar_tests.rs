@@ -127,7 +127,7 @@ fn a_dead_rows_body_click_never_removes_the_entry() {
     // A live row still selects and deselects.
     assert!(matches!(
         repo_row_click_action(false, false, false, path),
-        Some(WorkspaceAction::SelectRepoModeEntry(ref p)) if p == path
+        Some(WorkspaceAction::SelectRepoModeEntry(RepoRegistryKey(ref p))) if p == path
     ));
     assert!(matches!(
         repo_row_click_action(false, false, true, path),
@@ -324,7 +324,7 @@ fn a_row_that_crossed_the_drag_threshold_dispatches_no_selection() {
     );
     assert!(matches!(
         repo_row_click_action(false, false, false, path),
-        Some(WorkspaceAction::SelectRepoModeEntry(ref p)) if p == path
+        Some(WorkspaceAction::SelectRepoModeEntry(RepoRegistryKey(ref p))) if p == path
     ));
 }
 

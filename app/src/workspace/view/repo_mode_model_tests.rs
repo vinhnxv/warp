@@ -2040,13 +2040,14 @@ fn test_the_drag_variants_are_classified_per_frame_and_the_drop_is_not() {
     );
 }
 
-/// The three drag variants carry a registry key, and `WorkspaceAction` derives
-/// `Debug` for a dispatcher that logs `{action:?}` at `Info` — which uploads as
-/// a Sentry breadcrumb. A repo-mode registry key can be a whole SSH connection
-/// string, including the local path to a private key, so no part of it may
-/// reach that rendering.
+/// Every repo-mode variant that carries a registry key, and `WorkspaceAction`
+/// derives `Debug` for a dispatcher that logs `{action:?}` at `Info` — which
+/// uploads as a Sentry breadcrumb. A repo-mode registry key can be a whole SSH
+/// connection string, including the local path to a private key, so no part of
+/// it may reach that rendering. `SelectRepoModeEntry` alone is dispatched on
+/// every ordinary repository row click, so this fires constantly.
 #[test]
-fn test_a_dragged_registry_key_never_renders_into_a_log_line() {
+fn test_a_registry_key_never_renders_into_a_log_line() {
     let key = PathBuf::from("ssh://user@host:22/srv/app?i=/home/u/.ssh/id_ed25519");
     let rect = row_rect(0.);
     let actions = [
@@ -2058,7 +2059,13 @@ fn test_a_dragged_registry_key_never_renders_into_a_log_line() {
             path: RepoRegistryKey(key.clone()),
             row_position: rect,
         },
-        WorkspaceAction::DropRepoModeEntry(RepoRegistryKey(key)),
+        WorkspaceAction::DropRepoModeEntry(RepoRegistryKey(key.clone())),
+        WorkspaceAction::RemoveRepoModeEntry(RepoRegistryKey(key.clone())),
+        WorkspaceAction::SelectRepoModeEntry(RepoRegistryKey(key.clone())),
+        WorkspaceAction::ToggleRepoModeEntryMenu {
+            path: RepoRegistryKey(key),
+            position: vec2f(0., 0.),
+        },
     ];
     for action in actions {
         let rendered = format!("{action:?}");

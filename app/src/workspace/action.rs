@@ -286,14 +286,14 @@ pub enum WorkspaceAction {
     /// machine over SSH.
     AddRemoteRepositoryOrFolder,
     /// Repo mode: remove a registry entry (does not close its tabs).
-    RemoveRepoModeEntry(PathBuf),
+    RemoveRepoModeEntry(RepoRegistryKey),
     /// Repo mode: select "All" (stock tab set).
     SelectRepoModeAll,
     /// Repo mode: select a registered entry by canonical path.
-    SelectRepoModeEntry(PathBuf),
+    SelectRepoModeEntry(RepoRegistryKey),
     /// Repo mode: open the context menu for a registry entry row.
     ToggleRepoModeEntryMenu {
-        path: PathBuf,
+        path: RepoRegistryKey,
         position: Vector2F,
     },
     /// Repo mode: open a picker menu listing registry entries (R13; works with

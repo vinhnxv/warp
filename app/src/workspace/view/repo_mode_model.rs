@@ -63,7 +63,7 @@ use crate::terminal::local_shell::LocalShellState;
 use crate::terminal::model::session::{BootstrapSessionType, SessionsEvent};
 use crate::terminal::warpify::settings::WarpifySettings;
 use crate::workspace::tab_group::{TabGroup, TabGroupId};
-use crate::workspace::{TabContextMenuAnchor, WorkspaceAction, WorkspaceRegistry};
+use crate::workspace::{RepoRegistryKey, TabContextMenuAnchor, WorkspaceAction, WorkspaceRegistry};
 
 /// One registry row as the ordering pass reads it: key, last-opened, added.
 type RegistryRow = (PathBuf, Option<NaiveDateTime>, NaiveDateTime);
@@ -1416,7 +1416,9 @@ impl Workspace {
             }
             items.push(
                 MenuItemFields::new(entry.display_name.as_str())
-                    .with_on_select_action(WorkspaceAction::SelectRepoModeEntry(entry.path.clone()))
+                    .with_on_select_action(WorkspaceAction::SelectRepoModeEntry(RepoRegistryKey(
+                        entry.path.clone(),
+                    )))
                     .into_item(),
             );
         }
@@ -2048,7 +2050,7 @@ fn repo_mode_entry_menu_entries(
 ) -> Vec<Option<(&'static str, WorkspaceAction)>> {
     let mut entries = vec![Some((
         "Remove from Repositories",
-        WorkspaceAction::RemoveRepoModeEntry(path.to_path_buf()),
+        WorkspaceAction::RemoveRepoModeEntry(RepoRegistryKey(path.to_path_buf())),
     ))];
     if has_manual_order {
         entries.push(None);

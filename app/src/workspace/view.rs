@@ -24543,11 +24543,11 @@ impl TypedActionView for Workspace {
             ToggleRepoModeAddMenu { position } => self.toggle_repo_mode_add_menu(*position, ctx),
             AddLocalRepositoryOrFolder => self.open_folder_picker_for_repo_mode(ctx),
             AddRemoteRepositoryOrFolder => self.open_remote_connection_modal(ctx),
-            RemoveRepoModeEntry(path) => self.remove_repo_mode_entry(path, ctx),
+            RemoveRepoModeEntry(path) => self.remove_repo_mode_entry(&path.0, ctx),
             SelectRepoModeAll => self.select_repo_mode_all(ctx),
-            SelectRepoModeEntry(path) => self.select_repo_mode_entry(path, ctx),
+            SelectRepoModeEntry(path) => self.select_repo_mode_entry(&path.0, ctx),
             ToggleRepoModeEntryMenu { path, position } => {
-                self.toggle_repo_mode_entry_menu(path, *position, ctx)
+                self.toggle_repo_mode_entry_menu(&path.0, *position, ctx)
             }
             SelectRepoModePicker => self.open_repo_mode_picker_menu(ctx),
             NewRepoModeLooseTab => self.new_repo_mode_loose_tab(ctx),
