@@ -1243,18 +1243,26 @@ pub struct Workspace {
     /// Repositories-section order captured on first render after launch (R3:
     /// order settles at launch; entries added later append at the end).
     repo_mode_launch_order: RefCell<Option<Vec<String>>>,
-    /// Whether this window has ever rendered while the registry held a manual
-    /// order (R1).
+    /// Whether this window has resolved its list against a stored manual order
+    /// since it last had no order of its own (R8).
     ///
     /// There is no cross-window channel, so a reset performed in another window
     /// is only ever observed as the stored order going away. That alone is
     /// ambiguous — an empty stored order is also the state every window is in
     /// before anyone's first drag, which *must* write the whole list. This flag
-    /// is what separates the two: set, it says this window has seen an order,
-    /// so an empty one now means somebody cleared it.
+    /// is what separates the two: set, it says this window has seen an order, so
+    /// an empty one now means somebody cleared it.
+    ///
+    /// A consumable token, not a lifetime record: this window's own reset clears
+    /// it, and so does spending it on a stale-pin drop, so it says "since then"
+    /// and never "ever".
+    ///
+    /// It is also not an answer to "does the registry hold a manual order". It
+    /// reads false in a window that has resolved no list since its own reset
+    /// while another window's order is stored, and true after another window's
+    /// reset while nothing at all is stored — which is the case it exists for.
     repo_mode_saw_stored_order: Cell<bool>,
-    /// Remote keys this window has rendered as an unverified "Connecting…" row
-    /// (R6).
+    /// Remote keys this window has rendered as an unverified "Connecting…" row.
     ///
     /// Such a key is not in the registry yet, so it is not in any manual order
     /// and the list's two ordering exceptions float it to the top. Once the
@@ -1266,11 +1274,10 @@ pub struct Workspace {
     /// list the instant it connects.
     repo_mode_projected_unverified: RefCell<HashSet<String>>,
     /// The repository-row drag in flight, if any: the anchor the midpoint
-    /// comparison re-bases on once the tab block folds away (R19), and the
-    /// session pin as it was at drag start, which is what tells a drag that
-    /// ended where it began from one that moved a row (R16). Replaced at every
-    /// drag start, so a drag whose release never arrived cannot skew the next
-    /// one.
+    /// comparison re-bases on once the tab block folds away (R19), and the rows
+    /// it has moved past, which is what tells a drag that ended where it began
+    /// from one that moved a row (R16). Replaced at every drag start, so a drag
+    /// whose release never arrived cannot skew the next one.
     ///
     /// A `RefCell` like the sibling repo-mode caches because `repo_mode_entries`
     /// — the only `&self` path that sees the live registry every frame — is what

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use pathfinder_geometry::rect::RectF;
 use repo_mode::{RemoteProbeFailure, RemoteProbeState, RemoteTarget};
 
@@ -151,8 +153,8 @@ fn list_entry(path: &str, probe: Option<RemoteProbeState>, is_dead: bool) -> Rep
     }
 }
 
-/// A remote row projected into the list ahead of the registry: its first probe
-/// is still in flight, so the host may yet expand the key into a different one.
+/// A remote row projected into the list ahead of the registry — see
+/// [`RepoModeListEntry::unverified`].
 fn unverified_entry(path: &str) -> RepoModeListEntry {
     RepoModeListEntry {
         unverified: true,
@@ -160,20 +162,19 @@ fn unverified_entry(path: &str) -> RepoModeListEntry {
     }
 }
 
-/// Covers AE9/R14. A remote row that is not yet in the registry cannot be
-/// picked up: its key is still provisional, so an order written against it
-/// would name a repository that is about to stop existing. A resolved row and a
-/// dead one are draggable on the same terms as any other (R12) — a dead row's
-/// key is settled, only its path is unreachable.
+/// Covers AE9/R14. A remote row whose key the registry has not accepted cannot
+/// be picked up: an order written against a provisional key would name a
+/// repository that is about to stop existing. A resolved row and a dead one are
+/// draggable on the same terms as any other (R12) — a dead row's key is
+/// settled, only its path is unreachable.
 #[test]
 fn an_unverified_remote_row_is_the_only_row_that_cannot_be_dragged() {
     assert!(!repo_row_is_draggable(&unverified_entry(
         "ssh://vinh@10.0.0.7/srv/app"
     )));
-    // The regression this gate was rewritten for. The probe cache is per-window
-    // and empty at launch, so every registered remote row reads `Pending` until
-    // the user clicks it — and clicking one with no tabs also force-opens a tab.
-    // Its key is persisted and settled, so it drags.
+    // The regression this gate was rewritten for: a registered row reads
+    // `Pending` after every launch, and its key is settled all the same — see
+    // [`RepoModeListEntry::unverified`].
     assert!(repo_row_is_draggable(&list_entry(
         "ssh://vinh@10.0.0.7/srv/app",
         Some(RemoteProbeState::Pending),
@@ -304,6 +305,37 @@ fn the_tab_block_folds_away_while_a_repository_row_is_dragged() {
     );
     // An unselected row has no tab block either way.
     assert!(!repo_tab_block_visible(false, false));
+}
+
+/// Covers AE8/R13's actual mechanism. `repo_row_click_action`'s `is_dragging`
+/// parameter is never `true` at runtime; what stops a released drag from also
+/// selecting the repository — and spawning a terminal, and for a remote entry an
+/// SSH session — is the drag start clearing the press off the row body's
+/// interaction state. That only works because both sides address one handle.
+///
+/// The reset itself cannot be driven from here: `MouseState` exposes no way to
+/// arm interaction state from outside `warpui_core`, and `EventContext` has no
+/// public constructor, so there is no unit-level way to press a row. What is
+/// assertable is the sharing, which is the half a refactor is likely to break.
+#[test]
+fn a_repository_rows_body_and_its_drag_share_one_interaction_state() {
+    let state = RepoSidebarState::default();
+
+    let row_body = state.entry_row_mouse("/repo/a");
+    let drag_start = state.entry_row_mouse("/repo/a");
+    assert!(
+        Arc::ptr_eq(&row_body, &drag_start),
+        "the drag has to clear the very state the row body recorded its press on"
+    );
+    assert!(
+        !Arc::ptr_eq(&row_body, &state.entry_row_mouse("/repo/b")),
+        "and one row's state must not answer for another's"
+    );
+
+    // Pruning drops the handle, so a re-added row starts from a clean one
+    // rather than inheriting a press that was never released.
+    state.prune_to(&HashSet::new());
+    assert!(!Arc::ptr_eq(&row_body, &state.entry_row_mouse("/repo/a")));
 }
 
 /// Covers AE8/R13. Selecting a repository spawns a terminal, and for a remote

@@ -95,6 +95,21 @@ impl RepoSidebarState {
             .retain(|key, _| live_keys.contains(key));
     }
 
+    /// Interaction state for the row keyed by `key`, created on first use.
+    ///
+    /// Exactly one handle per row, and everything that touches that row's mouse
+    /// interaction has to come through here. The row body records a press on it
+    /// and the row's drag start clears it; two handles for one row would leave
+    /// that press to complete into a click on release and select the repository
+    /// the user just dragged (R13).
+    fn entry_row_mouse(&self, key: &str) -> MouseStateHandle {
+        self.entry_rows
+            .borrow_mut()
+            .entry(key.to_string())
+            .or_default()
+            .clone()
+    }
+
     /// Whether any repository row is mid-drag (R15/KTD11).
     fn any_entry_drag_active(&self) -> bool {
         self.entry_drags
@@ -116,19 +131,13 @@ pub(super) fn repo_row_position_id(path: &Path) -> String {
 
 /// Whether a repository row can be picked up.
 ///
-/// R14: a remote row that is not yet in the registry is not draggable. Its key
-/// is still provisional — the host can expand the path into a different key —
-/// so an order written against it would name a repository that is about to
-/// stop existing. A dead row is draggable on the same terms as any other
-/// (R12): its key is settled, only its path is unreachable.
+/// R14: a row whose key is still provisional is not draggable, because an order
+/// written against it would name a repository that is about to stop existing. A
+/// dead row is draggable on the same terms as any other (R12): its key is
+/// settled, only its path is unreachable.
 ///
-/// This reads `unverified`, not the probe state, and the difference is the
-/// whole point. The probe cache is per-window and runtime-only, so after every
-/// app launch each registered remote row reads `Pending` until the user clicks
-/// it — and clicking a remote row with no tabs also force-opens one. Gating on
-/// `Pending` therefore made every remote row undraggable after a restart and
-/// made "make it draggable" mean "open a tab in it". A registered key is
-/// settled whether or not this window has probed it yet.
+/// The test is [`RepoModeListEntry::unverified`] and deliberately not the probe
+/// state — see that field for why the two are different questions.
 pub(super) fn repo_row_is_draggable(entry: &RepoModeListEntry) -> bool {
     !entry.unverified
 }
@@ -258,12 +267,7 @@ pub(super) fn render_repo_tree(
 
     for entry in entries {
         let key = entry.path.to_string_lossy().into_owned();
-        let mouse = sidebar
-            .entry_rows
-            .borrow_mut()
-            .entry(key.clone())
-            .or_default()
-            .clone();
+        let mouse = sidebar.entry_row_mouse(&key);
         let pr_badge_mouse = sidebar
             .pr_badges
             .borrow_mut()
@@ -321,7 +325,7 @@ pub(super) fn render_repo_tree(
             remote_state,
             branch,
             badges,
-            mouse.clone(),
+            mouse,
             drag_state.clone(),
             pr_badge_mouse,
             remove_mouse,
@@ -333,7 +337,7 @@ pub(super) fn render_repo_tree(
             &path,
             is_draggable,
             drag_state,
-            mouse,
+            sidebar,
             appearance,
         ));
 
@@ -480,31 +484,42 @@ fn render_empty_state(app_appearance: &Appearance) -> Box<dyn Element> {
 /// that stops being painted mid-drag would go on answering the lookup at a rect
 /// nothing occupies.
 ///
-/// A pending remote row (R14) skips only the `Draggable`. It keeps its
-/// `SavePosition`: a row with no published rect is invisible to the neighbour
-/// lookup, so an unwrapped pending row would clamp every drag that has to cross
-/// it.
+/// A row whose key the registry has not accepted yet — `unverified`, which is
+/// none of the other things "pending" names in this subsystem: not
+/// `RemoteProbeState::Pending`, and not `repo_mode_pending_remote_key` — skips
+/// only the `Draggable` (R14). It keeps its `SavePosition`: a row with no
+/// published rect is invisible to the neighbour lookup, so an unwrapped one
+/// would clamp every drag that has to cross it.
 ///
 /// Repository rows get no `DropTarget` at all. Nothing here reads drop-target
 /// data — the swap is resolved from the row rect — and reusing the vertical
 /// tabs' pane data to fill the parameter would make every repository row a
 /// valid pane-header drop target.
 ///
-/// `mouse` is the row body's own interaction state, cleared the moment the drag
-/// starts. `Draggable` stores `DragState::None` before any click can be
+/// The row body's own interaction state is cleared the moment the drag starts,
+/// and that — not `repo_row_click_action`'s `is_dragging` parameter — is what
+/// makes R13 hold. `Draggable` stores `DragState::None` before any click can be
 /// delivered, so the row's click handler can never observe "a drag is in
-/// flight" — the press the row recorded at mouse-down would otherwise complete
+/// flight"; the press the row recorded at mouse-down would otherwise complete
 /// into a click on release and select the repository the user just moved.
-/// Resetting the state instead is the same remedy the vertical tabs sidecar
-/// uses when an element stops receiving its own follow-up mouse events.
+/// Resetting the state is the same remedy the vertical tabs sidecar uses when an
+/// element stops receiving its own follow-up mouse events.
+///
+/// The state is looked up here rather than passed in so it is necessarily the
+/// handle the row body records its press on. That much is asserted; the reset
+/// itself is not, and cannot be from a unit test — `MouseState` offers no way to
+/// arm interaction state from outside `warpui_core`, and `EventContext` has no
+/// public constructor, so there is no way to press a row and watch the press go
+/// away.
 fn wrap_entry_row_for_drag(
     row: Box<dyn Element>,
     path: &Path,
     is_draggable: bool,
     drag_state: DraggableState,
-    mouse: MouseStateHandle,
+    sidebar: &RepoSidebarState,
     app_appearance: &Appearance,
 ) -> Box<dyn Element> {
+    let mouse = sidebar.entry_row_mouse(&path.to_string_lossy());
     let row = if is_draggable {
         let start_path = path.to_path_buf();
         let drag_path = path.to_path_buf();

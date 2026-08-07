@@ -177,6 +177,88 @@ fn test_removing_a_project_drops_it_from_the_order_without_renumbering() {
     });
 }
 
+/// A row that is already sitting on the number it is about to be given is
+/// skipped, so the drop does not put it through the writer channel for nothing.
+/// Skipping it must not skip the number: positions are handed out by the
+/// caller's order, not by which rows happen to move, or two repositories end up
+/// on one position and the ordered read starts breaking ties by path.
+#[test]
+fn test_set_manual_order_numbers_every_path_including_the_ones_that_do_not_move() {
+    App::test((), |mut app| async move {
+        let now = Utc::now().naive_utc();
+        // `/repo/a` is already at 0, which is where this order puts it; the two
+        // behind it swap.
+        register(
+            &mut app,
+            vec![
+                project("/repo/a", now, Some(0)),
+                project("/repo/b", now, Some(2)),
+                project("/repo/c", now, Some(1)),
+            ],
+        );
+
+        ProjectManagementModel::handle(&app).update(&mut app, |projects, ctx| {
+            projects.set_manual_order(
+                vec![
+                    PathBuf::from("/repo/a"),
+                    PathBuf::from("/repo/b"),
+                    PathBuf::from("/repo/c"),
+                ],
+                ctx,
+            );
+        });
+
+        app.read(|ctx| {
+            assert_eq!(
+                manual_positions(ctx),
+                vec![
+                    ("/repo/a".to_string(), Some(0)),
+                    ("/repo/b".to_string(), Some(1)),
+                    ("/repo/c".to_string(), Some(2)),
+                ]
+            );
+        });
+    });
+}
+
+/// A key the registry already holds is positioned exactly as handed over. It is
+/// matched before any canonicalization, which would otherwise hit the
+/// filesystem once per repository, on the main thread, on every drop — and
+/// would drop the row from the order outright when the canonical form is a
+/// different string from the one the registry is keyed by.
+#[test]
+fn test_set_manual_order_positions_a_registered_key_without_canonicalizing_it() {
+    App::test((), |mut app| async move {
+        let root = tempfile::tempdir().expect("temp dir");
+        let real = root.path().join("repo");
+        std::fs::create_dir(&real).expect("create the repository directory");
+        // Canonicalizing this resolves the `..` (and, on macOS, the symlinked
+        // temp root), so it is a different string from the one registered here.
+        let as_registered = real.join("..").join("repo");
+        assert_ne!(
+            dunce::canonicalize(&as_registered).expect("the directory exists"),
+            as_registered
+        );
+
+        let now = Utc::now().naive_utc();
+        register(
+            &mut app,
+            vec![project(&as_registered.to_string_lossy(), now, None)],
+        );
+
+        ProjectManagementModel::handle(&app).update(&mut app, |projects, ctx| {
+            projects.set_manual_order(vec![as_registered.clone()], ctx);
+        });
+
+        app.read(|ctx| {
+            assert_eq!(
+                manual_positions(ctx),
+                vec![(as_registered.to_string_lossy().into_owned(), Some(0))]
+            );
+        });
+    });
+}
+
 /// Covers R8: Reset order discards the manual order outright.
 #[test]
 fn test_clear_manual_order_leaves_every_project_without_a_position() {

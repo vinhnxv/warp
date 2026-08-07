@@ -735,6 +735,7 @@ fn test_probe_failure_at_add_time_registers_nothing() {
         let workspace = mock_workspace(&mut app);
         workspace.update(&mut app, |workspace, ctx| {
             let generation = workspace.restart_remote_probe(&key);
+            workspace.repo_mode_pending_remote_key = Some(key.clone());
 
             // The pending row is visible while the probe runs, and it is
             // visible without being registered — the registry means "verified".
@@ -1261,6 +1262,7 @@ fn test_a_pending_remote_row_stays_above_the_manual_order() {
             );
 
             workspace.restart_remote_probe(&key);
+            workspace.repo_mode_pending_remote_key = Some(key.clone());
 
             assert_eq!(
                 rendered_order(workspace, ctx),
@@ -1296,6 +1298,7 @@ fn test_a_row_that_verifies_keeps_its_place_instead_of_dropping_to_the_bottom() 
             );
 
             let generation = workspace.restart_remote_probe(&key);
+            workspace.repo_mode_pending_remote_key = Some(key.clone());
             assert_eq!(
                 rendered_order(workspace, ctx),
                 [key.as_str(), "/repo/c", "/repo/a", "/repo/b"],
@@ -1303,12 +1306,13 @@ fn test_a_row_that_verifies_keeps_its_place_instead_of_dropping_to_the_bottom() 
             );
 
             // The host answers about the path it was asked about, so only the
-            // key's registry status changes.
+            // key's registry status changes. The token is what the add form
+            // submits with, and it is what closes the form on success.
             workspace.apply_remote_probe_result(
                 &target,
                 &key,
                 generation,
-                None,
+                Some(1),
                 Ok(RemoteProbeOutcome::Found {
                     remote_path: "/srv/app".to_string(),
                     kind: RepoEntryKind::Repo,
@@ -1349,6 +1353,7 @@ fn test_a_verifying_row_whose_key_expands_keeps_its_place() {
         workspace.update(&mut app, |workspace, ctx| {
             let _ = rendered_order(workspace, ctx);
             let generation = workspace.restart_remote_probe(&probed_key);
+            workspace.repo_mode_pending_remote_key = Some(probed_key.clone());
             assert_eq!(
                 rendered_order(workspace, ctx),
                 [probed_key.as_str(), "/repo/c", "/repo/a", "/repo/b"]
@@ -1358,7 +1363,7 @@ fn test_a_verifying_row_whose_key_expands_keeps_its_place() {
                 &target,
                 &probed_key,
                 generation,
-                None,
+                Some(1),
                 Ok(RemoteProbeOutcome::Found {
                     remote_path: "/home/vinh/app".to_string(),
                     kind: RepoEntryKind::Repo,
@@ -1376,15 +1381,9 @@ fn test_a_verifying_row_whose_key_expands_keeps_its_place() {
     });
 }
 
-/// Covers R14. `unverified` is what separates a provisional key from a settled
-/// one, and it is not the same question as "is the probe pending".
-///
-/// The probe cache is per-window and runtime-only, so after a launch every
-/// registered remote row reads `Pending`. Those keys are persisted and settled.
-/// Only a key the registry has never accepted can still be expanded into a
-/// different one by the host, and only that row must refuse a drag — otherwise
-/// every remote row is undraggable after every restart, and the only way to
-/// free one is to click it, which also force-opens a tab in it.
+/// Covers R14. `unverified` separates a provisional key from a settled one, and
+/// is not the same question as "is the probe pending" — see
+/// [`RepoModeListEntry::unverified`] for why the two must not be conflated.
 #[test]
 fn test_only_a_row_the_registry_has_not_accepted_is_unverified() {
     let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
@@ -1404,8 +1403,10 @@ fn test_only_a_row_the_registry_has_not_accepted_is_unverified() {
         let workspace = mock_workspace(&mut app);
         workspace.update(&mut app, |workspace, ctx| {
             // Both keys are pending: the registered one because this launch has
-            // not probed it, the other because its first probe is in flight.
+            // not probed it, the other because the add form is still waiting on
+            // its first probe.
             workspace.restart_remote_probe(&in_flight);
+            workspace.repo_mode_pending_remote_key = Some(in_flight.clone());
 
             let entries = workspace.repo_mode_entries(ctx);
             let unverified_for = |key: &str| {
@@ -1429,6 +1430,55 @@ fn test_only_a_row_the_registry_has_not_accepted_is_unverified() {
 
             assert_eq!(unverified_for(&registered), Some(false));
             assert_eq!(unverified_for(&in_flight), Some(true));
+        });
+    });
+}
+
+/// A cached probe session is not evidence that a key belongs on screen. One is
+/// cached for every remote row the user clicks and kept for the life of the
+/// window, so a key another window removes must not be projected back into this
+/// window's list: it would return at the top of the list, refuse a drag for as
+/// long as the window lived, and re-register itself on the next click, undoing
+/// the removal.
+#[test]
+fn test_a_probed_remote_row_removed_elsewhere_does_not_come_back() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let key = probe_target("/srv/app").key();
+    let now = Utc::now().naive_utc();
+    let projects = vec![Project {
+        path: key.clone(),
+        added_ts: now,
+        last_opened_ts: Some(now),
+        manual_position: None,
+    }];
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            // Clicking the row is what caches a probe session for its key.
+            workspace.select_repo_mode_entry(Path::new(&key), ctx);
+            assert_eq!(rendered_order(workspace, ctx), [key.as_str()]);
+
+            // Another window unregisters it. Only the registry says so, and
+            // this window's probe session outlives the entry.
+            ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+                projects.remove_project(PathBuf::from(&key), ctx);
+            });
+            assert!(
+                workspace
+                    .repo_mode_remote_probes
+                    .borrow()
+                    .contains_key(&key),
+                "nothing clears the session, which is exactly the hazard"
+            );
+
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                Vec::<String>::new(),
+                "the row leaves with the registry entry"
+            );
         });
     });
 }
@@ -1599,7 +1649,7 @@ fn test_reset_returns_the_section_to_recency_without_a_relaunch() {
     });
 }
 
-/// Covers R1. A reset clears every stored position, but a second window is
+/// Covers R8. A reset clears every stored position, but a second window is
 /// still holding the pre-reset arrangement in its session pin — by design, so
 /// its list does not reshuffle under the user (KTD6). What must not happen is
 /// that window's next drop writing the pin straight back over the now-empty
@@ -1660,7 +1710,7 @@ fn test_a_drag_after_another_window_reset_discards_the_stale_pin() {
     });
 }
 
-/// The other side of R1's detection rule: an empty stored order is also the
+/// The other side of R8's detection rule: an empty stored order is also the
 /// state every window is in before anybody's first drag, and that drag has to
 /// hand the whole list over. Only a window that has *rendered* with an order can
 /// read its absence as somebody else's reset.
@@ -1699,7 +1749,7 @@ fn test_a_first_drag_in_a_window_that_never_saw_an_order_still_writes_it() {
     });
 }
 
-/// R1 again, from the acting window. Reset puts it back in exactly the
+/// R8 again, from the acting window. Reset puts it back in exactly the
 /// pre-first-drag state, so its own next drag has to take the ordinary
 /// first-drag path — a window must not discard its own drag as if some other
 /// window had done the reset.
@@ -1836,6 +1886,54 @@ fn test_a_repository_added_mid_drag_does_not_turn_a_still_drag_into_a_reorder() 
                 stored_manual_order(ctx),
                 Vec::<String>::new(),
                 "no row changed places, so the added repository must not create an order"
+            );
+        });
+    });
+}
+
+/// R16's third case, and the one that defeats the obvious readings of it: a
+/// genuine move *past* a row that appeared mid-drag. The user watched the row
+/// travel, so the gesture has to be written — but the key it moved past is not
+/// one the drag could have known about at its start, so a rule that compares
+/// only what both ends have in common calls this drag still and discards it.
+#[test]
+fn test_a_drag_past_a_repository_added_mid_drag_is_written() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = projects_by_recency(&["/repo/c", "/repo/a", "/repo/b"]);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let _ = rendered_order(workspace, ctx);
+            workspace.start_repo_mode_entry_drag(Path::new("/repo/b"), row_rect(0.), ctx);
+
+            // Another window registers a repository while the row is held; it
+            // appends to this window's pin, below the row being dragged.
+            ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+                projects.upsert_project(PathBuf::from("/repo/d"), ctx);
+            });
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/c", "/repo/a", "/repo/b", "/repo/d"]
+            );
+
+            // The user drags the held row below it.
+            assert!(
+                workspace.swap_repo_mode_pinned_rows(Path::new("/repo/b"), Path::new("/repo/d"))
+            );
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/c", "/repo/a", "/repo/d", "/repo/b"],
+                "the move is on screen, so it has to survive the release"
+            );
+
+            workspace.drop_repo_mode_entry(Path::new("/repo/b"), ctx);
+            assert_eq!(
+                stored_manual_order(ctx),
+                ["/repo/c", "/repo/a", "/repo/d", "/repo/b"],
+                "with nothing stored the pin is the order the user is looking at"
             );
         });
     });
@@ -2063,20 +2161,35 @@ fn test_a_registry_key_never_renders_into_a_log_line() {
         WorkspaceAction::RemoveRepoModeEntry(RepoRegistryKey(key.clone())),
         WorkspaceAction::SelectRepoModeEntry(RepoRegistryKey(key.clone())),
         WorkspaceAction::ToggleRepoModeEntryMenu {
-            path: RepoRegistryKey(key),
+            path: RepoRegistryKey(key.clone()),
             position: vec2f(0., 0.),
         },
     ];
+    // Absence of the two most obvious fragments is not enough: a `Debug` that
+    // rendered `user@host:22/srv/app` would clear both. The key has to render as
+    // the redaction and nothing else.
+    assert_eq!(
+        format!("{:?}", RepoRegistryKey(key.clone())),
+        "RepoRegistryKey(<redacted>)"
+    );
+    let secrets: Vec<&str> = key
+        .to_str()
+        .expect("the key is valid UTF-8")
+        .split(['/', ':', '@', '?', '=', '.'])
+        .filter(|part| part.len() >= 3)
+        .collect();
     for action in actions {
         let rendered = format!("{action:?}");
         assert!(
-            !rendered.contains("ssh://"),
-            "the connection string leaked into {rendered}"
+            rendered.contains("RepoRegistryKey(<redacted>)"),
+            "the key must render as the redaction in {rendered}"
         );
-        assert!(
-            !rendered.contains("id_ed25519"),
-            "the private-key path leaked into {rendered}"
-        );
+        for secret in &secrets {
+            assert!(
+                !rendered.contains(secret),
+                "{secret:?} from the connection string leaked into {rendered}"
+            );
+        }
     }
 }
 
@@ -2251,7 +2364,7 @@ fn first_swap_offset(
     direction: f32,
 ) -> Option<usize> {
     let viewport = RectF::new(vec2f(0., -1000.), vec2f(200., 2000.));
-    let mut drag = RepoModeRowDrag::new(dragged.to_path_buf(), start, None, None);
+    let mut drag = RepoModeRowDrag::new(dragged.to_path_buf(), start, None);
     (0..400).find(|step| {
         let reported = RectF::new(
             start.origin() + vec2f(0., direction * *step as f32),
@@ -2278,7 +2391,7 @@ fn test_the_anchor_correction_absorbs_the_tab_block_collapse() {
     // The pointer has barely moved — one frame past the 5px threshold.
     let reported = RectF::new(start.origin() + vec2f(0., 5.), start.size());
 
-    let mut drag = RepoModeRowDrag::new(PathBuf::from("/repo/b"), start, None, None);
+    let mut drag = RepoModeRowDrag::new(PathBuf::from("/repo/b"), start, None);
     let anchored = drag.anchored(reported, Some(slot_after_collapse), None);
     assert_eq!(
         repo_mode_row_swap_target(
@@ -2369,7 +2482,7 @@ fn test_the_anchor_correction_is_zero_when_nothing_folds_away() {
 #[test]
 fn test_a_slot_move_after_a_swap_is_not_read_as_the_tab_block_collapse() {
     let start = row_rect(ROW_HEIGHT);
-    let mut drag = RepoModeRowDrag::new(PathBuf::from("/repo/b"), start, None, None);
+    let mut drag = RepoModeRowDrag::new(PathBuf::from("/repo/b"), start, None);
 
     // Nothing folded away, so every frame before the swap measures a zero
     // delta and the reported rect passes through untouched.
@@ -2401,7 +2514,7 @@ fn test_a_swap_before_the_collapse_paints_still_leaves_the_anchor_measurable() {
     // a at 0, a's tab block, b at 140, c at 180.
     let start = row_rect(ROW_HEIGHT + TAB_BLOCK_HEIGHT);
     let below_before_collapse = row_rect(ROW_HEIGHT + TAB_BLOCK_HEIGHT + ROW_HEIGHT);
-    let mut drag = RepoModeRowDrag::new(PathBuf::from("/repo/b"), start, None, None);
+    let mut drag = RepoModeRowDrag::new(PathBuf::from("/repo/b"), start, None);
 
     // The frame that decides the swap is still the pre-collapse one: the row's
     // slot is exactly where the drag started, so nothing is measurable yet.
@@ -2425,7 +2538,7 @@ fn test_a_swap_before_the_collapse_paints_still_leaves_the_anchor_measurable() {
     );
 }
 
-/// Covers R2. The collapse correction is inferred from how far the dragged
+/// Covers R19. The collapse correction is inferred from how far the dragged
 /// row's slot moved, and scrolling the list mid-drag moves it by exactly the
 /// same mechanism — so an uncorrected reading absorbs the scroll and leaves the
 /// dragged rect skewed for the rest of the gesture, swapping against rows it is
@@ -2442,7 +2555,6 @@ fn test_a_scroll_mid_drag_is_not_read_as_the_tab_block_collapse() {
     let mut drag = RepoModeRowDrag::new(
         PathBuf::from("/repo/b"),
         start,
-        None,
         Some(DragScrollReference {
             key: PathBuf::from("/repo/a"),
             origin: reference_start.origin(),
@@ -2469,7 +2581,7 @@ fn test_a_scroll_mid_drag_is_not_read_as_the_tab_block_collapse() {
     );
 }
 
-/// The other half of R2: taking the scroll out must not take the collapse with
+/// The other half of R19: taking the scroll out must not take the collapse with
 /// it. The reference row is above the selected repository's tab block and so
 /// stays exactly where it is while the rows below it move up.
 #[test]
@@ -2480,7 +2592,6 @@ fn test_the_collapse_is_still_corrected_with_a_scroll_reference_in_hand() {
     let mut drag = RepoModeRowDrag::new(
         PathBuf::from("/repo/b"),
         start,
-        None,
         Some(DragScrollReference {
             key: PathBuf::from("/repo/a"),
             origin: reference_start.origin(),
@@ -2494,6 +2605,127 @@ fn test_the_collapse_is_still_corrected_with_a_scroll_reference_in_hand() {
         reported.min_y() - TAB_BLOCK_HEIGHT,
         "the reference row did not move, so the whole shift is the collapse"
     );
+}
+
+/// A swap moves the scroll reference itself whenever the reference is one of the
+/// two rows that exchanged slots, and that movement is a reorder rather than a
+/// scroll. Dragging the top row down is the ordinary gesture that hits the first
+/// case, and dragging the second row up over it hits the second.
+///
+/// Left unaccounted, the reference's own displacement is read as the list
+/// scrolling by a row height, which lands in the anchor as a correction a row
+/// tall — and from there the drag swaps once per frame down the rest of the
+/// list.
+#[test]
+fn test_a_swap_that_moves_the_scroll_reference_is_not_read_as_a_scroll() {
+    // The reference is the list's first row and the drag is that same row,
+    // travelling down over its neighbour.
+    let start = row_rect(0.);
+    let mut drag = RepoModeRowDrag::new(
+        PathBuf::from("/repo/a"),
+        start,
+        Some(DragScrollReference {
+            key: PathBuf::from("/repo/a"),
+            origin: start.origin(),
+        }),
+    );
+    let reported = RectF::new(start.origin() + vec2f(0., 25.), start.size());
+    assert_eq!(drag.anchored(reported, Some(start), Some(start)), reported);
+
+    drag.record_swap(vec2f(0., ROW_HEIGHT), Path::new("/repo/b"));
+    let swapped_slot = row_rect(ROW_HEIGHT);
+    assert_eq!(
+        drag.anchored(reported, Some(swapped_slot), Some(swapped_slot)),
+        reported,
+        "the dragged row *is* the reference, so the swap moved both by the same row"
+    );
+
+    // Now the reference is the neighbour: the second row is dragged up over the
+    // first, which pushes the first one down.
+    let start = row_rect(ROW_HEIGHT);
+    let reference_start = row_rect(0.);
+    let mut drag = RepoModeRowDrag::new(
+        PathBuf::from("/repo/b"),
+        start,
+        Some(DragScrollReference {
+            key: PathBuf::from("/repo/a"),
+            origin: reference_start.origin(),
+        }),
+    );
+    let reported = RectF::new(start.origin() - vec2f(0., 25.), start.size());
+    assert_eq!(
+        drag.anchored(reported, Some(start), Some(reference_start)),
+        reported
+    );
+
+    drag.record_swap(vec2f(0., -ROW_HEIGHT), Path::new("/repo/a"));
+    assert_eq!(
+        drag.anchored(reported, Some(reference_start), Some(start)),
+        reported,
+        "the reference row moved the other way by the same row, and that is not a scroll"
+    );
+
+    // A swap between two rows the reference is not part of leaves it alone.
+    let start = row_rect(ROW_HEIGHT * 2.);
+    let reference_start = row_rect(0.);
+    let mut drag = RepoModeRowDrag::new(
+        PathBuf::from("/repo/c"),
+        start,
+        Some(DragScrollReference {
+            key: PathBuf::from("/repo/a"),
+            origin: reference_start.origin(),
+        }),
+    );
+    let reported = RectF::new(start.origin() + vec2f(0., 25.), start.size());
+    assert_eq!(
+        drag.anchored(reported, Some(start), Some(reference_start)),
+        reported
+    );
+
+    drag.record_swap(vec2f(0., ROW_HEIGHT), Path::new("/repo/d"));
+    assert_eq!(
+        drag.anchored(
+            reported,
+            Some(row_rect(ROW_HEIGHT * 3.)),
+            Some(reference_start)
+        ),
+        reported,
+        "the reference did not take part in the swap, so its origin must not move"
+    );
+}
+
+/// The displacement a swap is expected to cause the dragged row's slot, which
+/// `record_swap` subtracts from the anchor. Its sign is the direction of travel:
+/// swapped the wrong way it doubles the error it exists to remove.
+#[test]
+fn test_the_swap_slot_shift_is_signed_by_the_direction_of_travel() {
+    let slot = row_rect(ROW_HEIGHT);
+    let below = row_rect(ROW_HEIGHT * 2.);
+    let above = row_rect(0.);
+
+    assert_eq!(
+        swap_slot_shift(Some(slot), Some(below), true),
+        vec2f(0., ROW_HEIGHT)
+    );
+    assert_eq!(
+        swap_slot_shift(Some(slot), Some(above), false),
+        vec2f(0., -ROW_HEIGHT)
+    );
+
+    // With the dragged row's own slot missing from the position cache, the
+    // target's height signed by the direction of travel stands in for it.
+    assert_eq!(
+        swap_slot_shift(None, Some(below), true),
+        vec2f(0., ROW_HEIGHT)
+    );
+    assert_eq!(
+        swap_slot_shift(None, Some(above), false),
+        vec2f(0., -ROW_HEIGHT)
+    );
+
+    // No target rect at all: nothing is known to have moved.
+    assert_eq!(swap_slot_shift(Some(slot), None, true), Vector2F::zero());
+    assert_eq!(swap_slot_shift(None, None, false), Vector2F::zero());
 }
 
 /// Covers R14/KTD8: a remote entry gets the same group binding a local one
@@ -4000,15 +4232,29 @@ fn test_dragging_a_repositorys_only_tab_leaves_its_group_intact() {
 /// key for the life of the window.
 #[test]
 fn test_a_hung_path_borrow_falls_back_to_the_process_environment() {
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
+    let started = Instant::now();
     let borrowed = warpui_core::r#async::block_on(borrowed_path_env(
         futures::future::pending::<Option<String>>(),
-        std::time::Duration::from_millis(1),
+        TIMEOUT,
     ));
+    let waited = started.elapsed();
 
     assert_eq!(
         borrowed, None,
         "giving up hands the probe the process environment, which is what a \
          build with no local shell to borrow from already passes"
+    );
+    // `None` is also what a borrow that answers with nothing produces, so the
+    // value alone does not say the bound ran. The wait does: this borrow never
+    // resolves, so only the timeout can have ended it.
+    assert!(
+        waited >= TIMEOUT,
+        "the wait ended after {waited:?}, which is short of the bound — nothing timed out"
+    );
+    assert!(
+        waited < TIMEOUT * 30,
+        "and it ended at the bound rather than hanging on the borrow ({waited:?})"
     );
 }
 

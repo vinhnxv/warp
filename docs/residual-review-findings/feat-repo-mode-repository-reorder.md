@@ -199,6 +199,49 @@ reverting it.
 
 ---
 
+## Second review round — what it found, and what is still open
+
+The three reviewers that died in the first round (testing, reliability, maintainability) were re-run
+against `74db428a7..HEAD`, roughly 1200 lines that no reviewer had ever seen. They found two live
+bugs and a set of documentation defects, all fixed. What they found and did **not** get fixed:
+
+### R9. The swap glue in `drag_repo_mode_entry` has no test coverage at all
+
+`ctx.element_position_by_id` is presenter-only and `App::test` has no presenter, so every rect in
+every test is `None` and `repo_mode_row_swap_target` can never return `Some`. That makes the
+`forward` / `target_rect` selection structurally unreachable from a unit test. Swapping the two
+neighbour rects there would accumulate `swap_shift` with the wrong sign, and the drag would cascade
+one swap per frame down the list.
+
+`swap_slot_shift` and all three `record_swap` arms are now unit-tested directly, so the arithmetic
+is pinned; what is not pinned is which rect the caller hands it. Closing this needs a
+presenter-backed harness under `crates/integration`. Not attempted — faking a presenter would test
+the fake.
+
+### R10. `prune_to` can still strand a `DraggableState`, in principle
+
+The specific way this could happen is gone with R11's root cause, but the mechanism survives: if a
+row's key leaves the entry list while the row is held, `RepoSidebarState::prune_to` drops its
+`DraggableState`, taking with it the `Draggable` that would have stored `DragState::None` on
+mouse-up. Today that is harmless — the map entry vanishes too, so `any_entry_drag_active()` goes
+false — but any change that keeps the entry while dropping the `Draggable` reopens the KTD11 hole
+(the selected repository's tab block hidden for the life of the window). Nothing tests that
+invariant end-to-end.
+
+### R11. `repo_row_click_action`'s `is_dragging` doc still overstates what the parameter does
+
+Its doc says the parameter "states the rule so it stays asserted". The rule is actually enforced by
+the mouse-state reset at drag start, which now has a structural test of its own. The parameter is
+kept as an explicit statement of intent, but the doc reads as misdirection next to it.
+
+### R12. Past-tense edit narration at five more sites
+
+AGENTS.md forbids describing what the code used to do. The three sites the fix pass was scoped to
+are rewritten; `repo_row_click_action`, `render_entry_row`, `row_labels`, `repo_mode_badges_by_entry`
+and `add_remote_repo_mode_entry` still carry it. Content worth keeping, phrasing worth changing.
+
+---
+
 ## Coverage gaps
 
 **Three reviewers never returned.** `testing`, `reliability`, and `maintainability` were dispatched
