@@ -20,6 +20,7 @@ use repo_mode::{
     remote_probe_script, remote_ssh_command, remote_ssh_command_landing_in_path,
 };
 use settings::Setting as _;
+use warp_core::safe_warn;
 use warp_errors::report_error;
 use warpui::{AppContext, SingletonEntity, UpdateView, ViewContext, ViewHandle};
 use warpui_core::r#async::FutureExt as _;
@@ -472,9 +473,9 @@ impl Workspace {
                 let canonical = match canonicalize_repo_path(Path::new(&path)) {
                     Ok(canonical) => canonical,
                     Err(err) => {
-                        log::warn!(
-                            "repo_mode: failed to canonicalize picked folder {:?}; not adding: {err}",
-                            path
+                        safe_warn!(
+                            safe: ("repo_mode: failed to canonicalize picked folder; not adding: {err}"),
+                            full: ("repo_mode: failed to canonicalize picked folder {:?}; not adding: {err}", path)
                         );
                         return;
                     }
@@ -2065,7 +2066,10 @@ fn registry_key_path(path: &Path, operation: &str) -> PathBuf {
         return path.to_path_buf();
     }
     canonicalize_repo_path(path).unwrap_or_else(|err| {
-        log::warn!("repo_mode: failed to canonicalize {path:?} on {operation}: {err}");
+        safe_warn!(
+            safe: ("repo_mode: failed to canonicalize a registry key on {operation}: {err}"),
+            full: ("repo_mode: failed to canonicalize {path:?} on {operation}: {err}")
+        );
         path.to_path_buf()
     })
 }
