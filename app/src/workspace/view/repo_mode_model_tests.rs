@@ -1812,6 +1812,70 @@ fn test_an_order_a_window_never_showed_does_not_arm_the_reset_guard() {
     });
 }
 
+/// The second way a window's list comes to be a stored order: it wrote one
+/// itself. Its pin and the registry agree from that moment, so a reset in
+/// another window afterwards leaves it holding the pre-reset arrangement just
+/// as if it had rendered somebody else's order — and R8 says it must not write
+/// that back. The render path cannot see this: it finds a pin already in place
+/// and records nothing.
+#[test]
+fn test_a_window_that_wrote_the_order_recognises_another_windows_reset() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = projects_by_recency(&["/repo/c", "/repo/a", "/repo/b"]);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/c", "/repo/a", "/repo/b"],
+                "nothing is stored yet, so the window pins recency"
+            );
+
+            // This window's own first drag writes an order.
+            workspace.start_repo_mode_entry_drag(Path::new("/repo/b"), row_rect(0.), ctx);
+            assert!(workspace.swap_repo_mode_pinned_rows(
+                Path::new("/repo/b"),
+                Path::new("/repo/a"),
+                ctx
+            ));
+            workspace.drop_repo_mode_entry(Path::new("/repo/b"), ctx);
+            assert_eq!(stored_manual_order(ctx), ["/repo/c", "/repo/b", "/repo/a"]);
+
+            // The *other* window resets. Only the registry says so.
+            ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+                projects.clear_manual_order(ctx);
+            });
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/c", "/repo/b", "/repo/a"],
+                "KTD6 still holds: this window's list does not reshuffle on its own"
+            );
+
+            // A second drag lands on that now-stale arrangement.
+            workspace.start_repo_mode_entry_drag(Path::new("/repo/c"), row_rect(0.), ctx);
+            assert!(workspace.swap_repo_mode_pinned_rows(
+                Path::new("/repo/c"),
+                Path::new("/repo/b"),
+                ctx
+            ));
+            workspace.drop_repo_mode_entry(Path::new("/repo/c"), ctx);
+
+            assert_eq!(
+                stored_manual_order(ctx),
+                Vec::<String>::new(),
+                "the reset stands — the arrangement this window wrote is not written back"
+            );
+            assert!(
+                workspace.repo_mode_launch_order.borrow().is_none(),
+                "and the pin that would have replayed it is dropped"
+            );
+        });
+    });
+}
+
 /// R9/R16. The projected "Connecting…" row renders at the top of the list
 /// whatever the session pin says, so a pin swap against it moves nothing on
 /// screen. Counting that as a row passed would hand the whole registry a manual

@@ -1074,6 +1074,14 @@ impl Workspace {
         ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
             projects.set_manual_order(merged, ctx);
         });
+        // The other way this window's list comes to be a stored order: it just
+        // wrote one. The pin and the registry agree from here, so a later
+        // window resetting leaves this one holding the pre-reset arrangement
+        // exactly as if it had rendered somebody else's order — and the guard
+        // above is what stops it writing that back. Set here rather than left
+        // to the next render, which finds a pin already in place and so records
+        // nothing.
+        self.repo_mode_saw_stored_order.set(true);
         ctx.notify();
     }
 

@@ -148,14 +148,15 @@ which is R4 unchanged. `commit_remote_key` also rewrites the pin in place when t
 key into a different one, so the row the user watched connect keeps its slot instead of being
 retired from the pin and re-appended under its resolved name.
 
-### R7. `repo_row_position_id` interpolates the full registry key
+### R7. `repo_row_position_id` interpolated the full registry key — **fixed in a later pass**
 
-`app/src/workspace/view/repo_sidebar.rs` — noticed while applying the log-leak fix.
+`app/src/workspace/view/repo_sidebar.rs:138` — noticed while applying the log-leak fix.
 
-The `SavePosition` id is `format!("repo_mode:row:{}", path.to_string_lossy())`. Position ids are
-not logged today — `element_position_by_id` only reaches the position cache — so this is not a live
-leak. It is the same class as the fixed finding, and would become one if element ids ever reached a
-diagnostic dump.
+The `SavePosition` id was `format!("repo_mode:row:{}", path.to_string_lossy())`. Position ids are
+not logged today — `element_position_by_id` only reaches the position cache — so it was never a
+live leak, only the same class as the fixed finding, and would have become one if element ids ever
+reached a diagnostic dump. Filed here as advisory and fixed anyway: the id is now a fixed-key
+SipHash of the path, `repo_mode:row:{:016x}`. Agreement within a run is all an element id needs.
 
 ---
 
@@ -234,11 +235,17 @@ Its doc says the parameter "states the rule so it stays asserted". The rule is a
 the mouse-state reset at drag start, which now has a structural test of its own. The parameter is
 kept as an explicit statement of intent, but the doc reads as misdirection next to it.
 
-### R12. Past-tense edit narration at five more sites
+### R12. Past-tense edit narration at five more sites — **mostly gone**
 
 AGENTS.md forbids describing what the code used to do. The three sites the fix pass was scoped to
-are rewritten; `repo_row_click_action`, `render_entry_row`, `row_labels`, `repo_mode_badges_by_entry`
-and `add_remote_repo_mode_entry` still carry it. Content worth keeping, phrasing worth changing.
+were rewritten, and a later sweep of `repo_row_click_action`, `render_entry_row`, `row_labels`,
+`repo_mode_badges_by_entry` and `add_remote_repo_mode_entry` finds the phrasing gone from all five;
+what reads as past tense there now is present-tense runtime state ("keys that are no longer in the
+registry"), which is not what the rule is about.
+
+One deliberate exception remains, at `repo_mode_model.rs:1233`: "Under the old cwd-based attribution
+it could." It is load-bearing — it says why a defence-in-depth branch exists that is unreachable
+under the current attribution — so it stays.
 
 ---
 
@@ -247,7 +254,18 @@ and `add_remote_repo_mode_entry` still carry it. Content worth keeping, phrasing
 Every fix round writes code no reviewer has seen, so the ~900 lines added by the second-round fixes
 (`7bf4f020b..6ca88f5e9`) were reviewed by a correctness pass and an adversarial pass. Between them
 they found four live defects, all now fixed and pinned by tests that were confirmed to fail without
-the fix. What they found and did **not** get fixed:
+the fix.
+
+**One of those fixes reopened R1, and the fix pass caught it.** Moving `repo_mode_saw_stored_order`
+to the render that builds the pin covers a window that renders somebody else's order, but not a
+window that *writes* one: its pin and the registry agree from that moment, yet the render path finds
+a pin already in place and records nothing. A reset elsewhere then left it free to write its own
+pre-reset arrangement straight back. The flag is now also set where the order is written
+(`drop_repo_mode_entry`), and `test_a_window_that_wrote_the_order_recognises_another_windows_reset`
+pins it. Worth recording as the shape of the mistake: R8's flag has two sources, and a fix aimed at
+one of them silently dropped the other.
+
+What the round found and did **not** get fixed:
 
 ### R13. The pin can keep a key another window removed — **not a defect**
 
