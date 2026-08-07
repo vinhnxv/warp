@@ -38,6 +38,16 @@ const REMOTE_PROBE_TIMEOUT: Duration = Duration::from_secs(12);
 /// dead host fails at the connect stage with a usable stderr message rather
 /// than being killed by the outer timeout.
 const REMOTE_PROBE_CONNECT_TIMEOUT_SECS: u64 = 8;
+/// Bound on borrowing the interactive shell's `PATH` before a probe runs.
+///
+/// That borrow runs `$SHELL -i -l -c` and has no bound of its own, so an rc
+/// file that hangs — a stalled network mount, a slow plugin manager — hangs it
+/// indefinitely. It is awaited *before* [`REMOTE_PROBE_TIMEOUT`] starts, so
+/// without a bound here the probe never runs at all: the result callback is
+/// never reached, the session stays in flight, and `begin_remote_probe` then
+/// refuses every later reprobe of that key. The row reads "Connecting…" for the
+/// life of the window with no way back.
+const REMOTE_PROBE_PATH_TIMEOUT: Duration = Duration::from_secs(5);
 
 use super::Workspace;
 use super::repo_sidebar::repo_row_position_id;
@@ -568,7 +578,7 @@ impl Workspace {
         let path_future = futures::future::ready(None);
         ctx.spawn(
             async move {
-                let path_env = path_future.await;
+                let path_env = borrowed_path_env(path_future, REMOTE_PROBE_PATH_TIMEOUT).await;
                 run_remote_probe(args, script, REMOTE_PROBE_TIMEOUT, path_env).await
             },
             move |workspace, result, ctx| {
@@ -1677,6 +1687,29 @@ pub(super) fn probe_path_env(
         return FALLBACK_PROBE_PATH.map(str::to_string);
     }
     None
+}
+
+/// The interactive shell's `PATH` if it can be had within `timeout`, and the
+/// process environment's otherwise.
+///
+/// Giving up is not a failure: a build with no local shell to borrow from
+/// already passes `None` here and probes fine. The point is that waiting
+/// forever *is* a failure, because this is awaited ahead of the probe's own
+/// wall-clock bound — see [`REMOTE_PROBE_PATH_TIMEOUT`] for what that costs.
+async fn borrowed_path_env(
+    path_future: impl std::future::Future<Output = Option<String>>,
+    timeout: Duration,
+) -> Option<String> {
+    match path_future.with_timeout(timeout).await {
+        Ok(path_env) => path_env,
+        Err(_) => {
+            log::info!(
+                "repo_mode: borrowing the interactive shell PATH timed out after {timeout:?}; \
+                 probing with the process environment instead"
+            );
+            None
+        }
+    }
 }
 
 /// Every failure mode collapses into a [`RemoteProbeFailure`] the form can

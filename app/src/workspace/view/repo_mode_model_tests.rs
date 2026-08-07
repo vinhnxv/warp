@@ -3984,3 +3984,35 @@ fn test_dragging_a_repositorys_only_tab_leaves_its_group_intact() {
         });
     });
 }
+
+/// The interactive-shell `PATH` borrow has no bound of its own — it runs
+/// `$SHELL -i -l -c`, and an rc file that hangs hangs it. It is awaited *before*
+/// the probe's own wall-clock timeout starts, so a shell that never answers used
+/// to leave the probe unstartable: the result callback never ran, the session
+/// stayed in flight, and `begin_remote_probe` then refused every reprobe of that
+/// key for the life of the window.
+#[test]
+fn test_a_hung_path_borrow_falls_back_to_the_process_environment() {
+    let borrowed = warpui_core::r#async::block_on(borrowed_path_env(
+        futures::future::pending::<Option<String>>(),
+        std::time::Duration::from_millis(1),
+    ));
+
+    assert_eq!(
+        borrowed, None,
+        "giving up hands the probe the process environment, which is what a \
+         build with no local shell to borrow from already passes"
+    );
+}
+
+/// And the ordinary path is untouched: a borrow that answers is what the probe
+/// runs with.
+#[test]
+fn test_a_path_borrow_that_answers_is_the_one_the_probe_uses() {
+    let borrowed = warpui_core::r#async::block_on(borrowed_path_env(
+        futures::future::ready(Some("/opt/homebrew/bin".to_string())),
+        std::time::Duration::from_secs(30),
+    ));
+
+    assert_eq!(borrowed.as_deref(), Some("/opt/homebrew/bin"));
+}
