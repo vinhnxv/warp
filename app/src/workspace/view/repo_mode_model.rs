@@ -38,6 +38,17 @@ const REMOTE_PROBE_TIMEOUT: Duration = Duration::from_secs(12);
 /// dead host fails at the connect stage with a usable stderr message rather
 /// than being killed by the outer timeout.
 const REMOTE_PROBE_CONNECT_TIMEOUT_SECS: u64 = 8;
+/// The slice of [`REMOTE_PROBE_TIMEOUT`] the script write may spend.
+///
+/// The write shares the probe's one deadline, so a host that accepts the
+/// connection and then never drains its end of the pipe would otherwise spend
+/// the whole budget and leave nothing for the drain — and the drain is what
+/// turns `ssh`'s stderr into a verdict. Capping the write at whatever the
+/// connect stage does not need keeps the guarantee
+/// [`REMOTE_PROBE_CONNECT_TIMEOUT_SECS`] is chosen for: a dead host still fails
+/// at the connect stage with a usable message rather than as a bare timeout.
+const REMOTE_PROBE_WRITE_TIMEOUT: Duration =
+    REMOTE_PROBE_TIMEOUT.saturating_sub(Duration::from_secs(REMOTE_PROBE_CONNECT_TIMEOUT_SECS));
 /// Bound on borrowing the interactive shell's `PATH` before a probe runs.
 ///
 /// That borrow runs `$SHELL -i -l -c` and has no bound of its own, so an rc
@@ -297,12 +308,6 @@ impl Workspace {
         // appears mid-session is appended to the pin, so without it the
         // guarantee would hold only in a window that had never rendered.
         if !manual_order.is_empty() {
-            // R8: this window has now resolved its list against a stored order,
-            // so an empty stored order later is somebody else's reset rather
-            // than the pre-first-drag state. Recorded here because this is the
-            // one place the stored order is read — by everything that resolves
-            // the entry list, not only by a paint.
-            self.repo_mode_saw_stored_order.set(true);
             entries.sort_by_key(|entry| {
                 if entry.unverified {
                     return 0;
@@ -320,6 +325,20 @@ impl Workspace {
         // NEXT launch without reshuffling this session). Entries added during
         // the session append at the end.
         let mut launch_order = self.repo_mode_launch_order.borrow_mut();
+        // R8: record that a stored order shaped what this window is showing —
+        // which is true only of the render that builds the pin out of it. The
+        // sort below is total over every rendered key, so once a pin exists it
+        // overwrites the manual sort above and a stored order written by
+        // another window afterwards never reaches this screen at all.
+        //
+        // Setting the flag on those later renders is what let somebody else's
+        // reset throw away a first drag: the window would be showing plain
+        // recency, having never seen the stored order, yet `drop_repo_mode_entry`
+        // would read its pin as a pre-reset arrangement and discard it, snapping
+        // the row the user had just moved back where it was.
+        if launch_order.is_none() && !manual_order.is_empty() {
+            self.repo_mode_saw_stored_order.set(true);
+        }
         let order = launch_order.get_or_insert_with(|| {
             entries
                 .iter()
@@ -361,11 +380,12 @@ impl Workspace {
         // it, so `on_drop` never fires and the drag would outlive the row it
         // names. This is the one place that sees the live key set every frame.
         let mut row_drag = self.repo_mode_row_drag.borrow_mut();
-        if row_drag
-            .as_ref()
-            .is_some_and(|drag| !entries.iter().any(|entry| entry.path == drag.path))
-        {
+        let listed = |key: &Path| entries.iter().any(|entry| entry.path.as_path() == key);
+        if row_drag.as_ref().is_some_and(|drag| !listed(&drag.path)) {
             *row_drag = None;
+        } else if let Some(drag) = row_drag.as_mut() {
+            // The rows it has passed can leave the same way the dragged row can.
+            drag.retain_passed_rows(|key| listed(Path::new(key)));
         }
 
         entries
@@ -600,7 +620,14 @@ impl Workspace {
         ctx.spawn(
             async move {
                 let path_env = borrowed_path_env(path_future, REMOTE_PROBE_PATH_TIMEOUT).await;
-                run_remote_probe(args, script, REMOTE_PROBE_TIMEOUT, path_env).await
+                run_remote_probe(
+                    args,
+                    script,
+                    REMOTE_PROBE_TIMEOUT,
+                    REMOTE_PROBE_WRITE_TIMEOUT,
+                    path_env,
+                )
+                .await
             },
             move |workspace, result, ctx| {
                 workspace.apply_remote_probe_result(&target, &key, generation, token, result, ctx);
@@ -738,6 +765,25 @@ impl Workspace {
                 }
             }
         }
+    }
+
+    /// This window's projected "Connecting…" row, if it is showing one.
+    ///
+    /// The key the add form is waiting on, while the registry has yet to accept
+    /// it — the same pair [`Self::repo_mode_entries`] resolves `unverified`
+    /// from, and the one row this window renders that is not a repository yet.
+    ///
+    /// Worth naming rather than open-coding, because the row is unlike every
+    /// other one twice over: the registry has not accepted it, and the two
+    /// `unverified` exceptions in `repo_mode_entries` nail it to the top of the
+    /// list whatever the session pin says, so its position in that pin tells
+    /// you nothing about where it is on screen.
+    fn projected_unverified_key(&self, ctx: &AppContext) -> Option<&str> {
+        let key = self.repo_mode_pending_remote_key.as_deref()?;
+        let registered = ProjectManagementModel::handle(ctx).read(ctx, |projects, _| {
+            projects.all_projects().any(|p| p.path == key)
+        });
+        (!registered).then_some(key)
     }
 
     /// Drop a row whose probe never succeeded. Nothing was persisted for it, but
@@ -915,7 +961,7 @@ impl Workspace {
         // exchange slots with, and therefore how far its slot is about to move.
         let forward = repo_mode_row_neighbor(&entry_paths, path, true) == Some(target_index);
         let target_rect = if forward { below_rect } else { above_rect };
-        if self.swap_repo_mode_pinned_rows(path, neighbor) {
+        if self.swap_repo_mode_pinned_rows(path, neighbor, ctx) {
             // A swap moves the dragged row's slot for a reason that is not the
             // tab block. Record how far, so the next frame can subtract it and
             // still measure a collapse that has not been paid for yet.
@@ -936,9 +982,30 @@ impl Workspace {
     /// A swap that lands is also recorded on the drag in flight, because this is
     /// the only place a repository row changes places with another one — see
     /// [`RepoModeRowDrag::passed_rows`] for what the record is for.
-    pub(super) fn swap_repo_mode_pinned_rows(&self, dragged: &Path, neighbor: &Path) -> bool {
+    pub(super) fn swap_repo_mode_pinned_rows(
+        &self,
+        dragged: &Path,
+        neighbor: &Path,
+        ctx: &AppContext,
+    ) -> bool {
         let dragged_key = dragged.to_string_lossy();
         let neighbor_key = neighbor.to_string_lossy();
+        // The projected "Connecting…" row renders at the top of the list
+        // whatever the pin says, so swapping with it permutes the pin and
+        // leaves the screen byte-identical. Everything downstream reads that
+        // swap as a move the user watched happen: `passed_rows` counts a row
+        // passed, so the drop hands the whole registry a manual order for a
+        // gesture that visibly did nothing — and on the frame after, the
+        // midpoint test still holds, so it swaps back and the outcome comes
+        // down to the parity of the mouse-move frames. `record_swap` compounds
+        // it by charging the anchor for a slot that never moved.
+        //
+        // Refused here rather than by filtering the row out of the swap
+        // candidates: the row keeps its `SavePosition` and its place in the
+        // rendered list, and this is the one place a pin position changes.
+        if self.projected_unverified_key(ctx) == Some(&*neighbor_key) {
+            return false;
+        }
         let mut swapped = false;
         if let Some(order) = self.repo_mode_launch_order.borrow_mut().as_mut()
             && let Some(from) = order.iter().position(|key| key.as_str() == &*dragged_key)
@@ -1130,6 +1197,16 @@ impl Workspace {
             return;
         }
         let path_buf = registry_key_path(path, "select");
+        // A projected "Connecting…" row is not a repository yet, and clicking
+        // one must not make it into one. The registry is what "verified" means
+        // (R9), so the `upsert_project` below would settle a connection that
+        // has not answered — and, worse, `drop_pending_remote_entry` refuses to
+        // remove a *registered* key, so a probe that then failed could no
+        // longer take the row away. The reprobe below would also race the probe
+        // already in flight for it. Selecting it is a no-op until it lands.
+        if self.projected_unverified_key(ctx) == Some(&*path_buf.to_string_lossy()) {
+            return;
+        }
         self.selected_repo_root = Some(path_buf.to_string_lossy().into_owned());
 
         // R11: selecting a remote entry is the moment its displayed state gets
@@ -1743,6 +1820,7 @@ async fn run_remote_probe(
     args: Vec<String>,
     script: String,
     timeout: Duration,
+    write_timeout: Duration,
     path_env: Option<String>,
 ) -> Result<RemoteProbeOutcome, RemoteProbeFailure> {
     use std::process::Stdio;
@@ -1771,20 +1849,26 @@ async fn run_remote_probe(
     let started = Instant::now();
     let mut script_written = false;
     if let Some(mut stdin) = child.stdin.take() {
-        // Bounded on its own account: this await sits *ahead* of the wall-clock
-        // bound, and a host that accepts the connection and then stops draining
-        // its end of the pipe would leave the probe with no bound at all — a
-        // probe that never returns never runs its result callback, so the
-        // session stays in flight and `begin_remote_probe` refuses every later
-        // reprobe of the key.
+        // Bounded on its own account, and to a slice rather than the whole
+        // deadline: a host that accepts the connection and then stops draining
+        // its end of the pipe would otherwise leave the probe with no bound at
+        // all — a probe that never returns never runs its result callback, so
+        // the session stays in flight and `begin_remote_probe` refuses every
+        // later reprobe of the key — and, spending the whole budget, would also
+        // skip the drain that classifies the failure.
+        let write_timeout = write_timeout.min(timeout);
         match stdin
             .write_all(script.as_bytes())
-            .with_timeout(timeout)
+            .with_timeout(write_timeout)
             .await
         {
             Ok(Ok(())) => script_written = true,
             Ok(Err(err)) => log::warn!("repo_mode: failed to write the probe script to ssh: {err}"),
-            Err(_) => log::info!("repo_mode: writing the probe script to ssh timed out"),
+            Err(_) => {
+                log::info!(
+                    "repo_mode: writing the probe script to ssh timed out after {write_timeout:?}"
+                );
+            }
         }
         // Closing stdin is what makes the remote shell run and exit.
         drop(stdin);
@@ -1801,7 +1885,11 @@ async fn run_remote_probe(
             return Err(RemoteProbeFailure::Unreachable);
         }
         Err(_) => {
-            log::info!("repo_mode: ssh probe timed out after {timeout:?}");
+            // `remaining`, not `timeout`: the write above has already spent part
+            // of the deadline, and reporting the whole budget would send whoever
+            // reads this during an incident looking for a stall that took
+            // longer than the one that happened.
+            log::info!("repo_mode: ssh probe timed out after {remaining:?} of {timeout:?}");
             return Err(RemoteProbeFailure::Unreachable);
         }
     };
@@ -2133,6 +2221,11 @@ pub(super) struct RepoModeRowDrag {
     /// the keys those two pins share fixes the second at the cost of missing a
     /// genuine move *past* a row that appeared mid-drag, which is a move the
     /// user watched happen.
+    ///
+    /// A row that *leaves* the list mid-drag is pruned instead — see
+    /// [`Self::retain_passed_rows`]. It is the same question read the other way
+    /// round: passing a row that is no longer there is not a rearrangement of
+    /// the list the user is looking at.
     passed_rows: HashSet<String>,
     /// Total slot displacement the swaps so far are expected to have caused the
     /// dragged row, so a reordered slot is never mistaken for the collapse.
@@ -2188,6 +2281,16 @@ impl RepoModeRowDrag {
         if !self.passed_rows.remove(neighbor) {
             self.passed_rows.insert(neighbor.to_string());
         }
+    }
+
+    /// Forget every row the drag has passed that is no longer listed.
+    ///
+    /// Another window can remove a row this drag has already moved past. What
+    /// is left on screen is then exactly what the list would show had the drag
+    /// never happened, so the record has to go with the row — otherwise the
+    /// drop reads R16 as "a row moved" and writes a manual order for it.
+    fn retain_passed_rows(&mut self, listed: impl Fn(&str) -> bool) {
+        self.passed_rows.retain(|key| listed(key));
     }
 
     /// Whether the dragged row ended up on a different side of any other row

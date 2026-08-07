@@ -242,6 +242,40 @@ and `add_remote_repo_mode_entry` still carry it. Content worth keeping, phrasing
 
 ---
 
+## Third review round — the fix passes reviewed
+
+Every fix round writes code no reviewer has seen, so the ~900 lines added by the second-round fixes
+(`7bf4f020b..6ca88f5e9`) were reviewed by a correctness pass and an adversarial pass. Between them
+they found four live defects, all now fixed and pinned by tests that were confirmed to fail without
+the fix. What they found and did **not** get fixed:
+
+### R13. The pin can keep a key another window removed — **not a defect**
+
+The correctness reviewer reported that nothing prunes a session-pin key whose row left the registry
+via another window's removal, so a re-add resurfaces mid-list instead of appending. The adversarial
+reviewer tested exactly this, including the re-add: the intervening keys are unrendered, so
+`order.swap` still flips exactly one *rendered* pair, `passed_rows` stays correct, and the write is
+consistent. The row does reappear where it used to sit rather than at the end — which is R3's
+promise ("a window's list does not reshuffle under the user"), not a violation of R4. Left alone.
+
+### R14. A remove **and** a re-add inside one drag loses the drag
+
+`repo_mode_entries` nulls `repo_mode_row_drag` when the dragged row stops being listed, and the next
+`on_drag` re-anchors a fresh drag with `passed_rows` empty. Swaps already applied to the pin survive,
+so the window renders the moved order but `moved_a_row()` reads false and the drop writes nothing —
+the arrangement is lost on relaunch. Needs another window to remove *and* re-add the dragged row
+inside a single gesture. Constructible, not realistic; the failure is a lost drag, not corruption.
+
+### R15. `get_interactive_path_env_var` never leaves `Pending` if the shell hangs
+
+`app/src/terminal/local_shell/mod.rs:163-168`. If `capture_interactive_shell_env` hangs, the state
+stays `Pending` forever and each caller gets a fresh never-resolving waiter, so
+`REMOTE_PROBE_PATH_TIMEOUT` is paid in full on *every* probe for the life of the process rather than
+once. The 5s bound is correct and the probe still runs; only its doc's "one-time cost" reading is
+wrong. Pre-existing, and in another subsystem — out of scope for this change.
+
+---
+
 ## Coverage gaps
 
 **Three reviewers never returned.** `testing`, `reliability`, and `maintainability` were dispatched

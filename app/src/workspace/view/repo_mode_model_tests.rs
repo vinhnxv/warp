@@ -1687,9 +1687,11 @@ fn test_a_drag_after_another_window_reset_discards_the_stale_pin() {
 
             // A drag lands on that stale list.
             workspace.start_repo_mode_entry_drag(Path::new("/repo/c"), row_rect(0.), ctx);
-            assert!(
-                workspace.swap_repo_mode_pinned_rows(Path::new("/repo/c"), Path::new("/repo/b"))
-            );
+            assert!(workspace.swap_repo_mode_pinned_rows(
+                Path::new("/repo/c"),
+                Path::new("/repo/b"),
+                ctx
+            ));
             workspace.drop_repo_mode_entry(Path::new("/repo/c"), ctx);
 
             assert_eq!(
@@ -1731,9 +1733,11 @@ fn test_a_first_drag_in_a_window_that_never_saw_an_order_still_writes_it() {
             );
 
             workspace.start_repo_mode_entry_drag(Path::new("/repo/b"), row_rect(0.), ctx);
-            assert!(
-                workspace.swap_repo_mode_pinned_rows(Path::new("/repo/b"), Path::new("/repo/a"))
-            );
+            assert!(workspace.swap_repo_mode_pinned_rows(
+                Path::new("/repo/b"),
+                Path::new("/repo/a"),
+                ctx
+            ));
             workspace.drop_repo_mode_entry(Path::new("/repo/b"), ctx);
 
             assert_eq!(
@@ -1747,6 +1751,224 @@ fn test_a_first_drag_in_a_window_that_never_saw_an_order_still_writes_it() {
             );
         });
     });
+}
+
+/// The line between the two tests above. "Rendered with an order" has to mean
+/// the order reached the screen, not merely that the registry was holding one
+/// when this window painted: the pin sort is total over every rendered key, so
+/// once a pin exists it overwrites the manual sort and an order stored by
+/// another window afterwards never shows up here at all. Reading that render as
+/// "I have seen the order" makes the next reset discard a drag this window's
+/// user just watched land.
+#[test]
+fn test_an_order_a_window_never_showed_does_not_arm_the_reset_guard() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = projects_by_recency(&["/repo/c", "/repo/a", "/repo/b"]);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/c", "/repo/a", "/repo/b"],
+                "this window pins recency before anybody has ordered anything"
+            );
+
+            // Another window orders the list. This one paints in between.
+            apply_manual_order(&["/repo/a", "/repo/b", "/repo/c"], ctx);
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/c", "/repo/a", "/repo/b"],
+                "KTD6: the pin owns the order, so the stored one never reaches this screen"
+            );
+
+            // And then resets it.
+            ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+                projects.clear_manual_order(ctx);
+            });
+
+            // The user drags here for the first time.
+            workspace.start_repo_mode_entry_drag(Path::new("/repo/b"), row_rect(0.), ctx);
+            assert!(workspace.swap_repo_mode_pinned_rows(
+                Path::new("/repo/b"),
+                Path::new("/repo/a"),
+                ctx
+            ));
+            workspace.drop_repo_mode_entry(Path::new("/repo/b"), ctx);
+
+            assert_eq!(
+                stored_manual_order(ctx),
+                ["/repo/c", "/repo/b", "/repo/a"],
+                "an ordinary first drag: there is no pre-reset arrangement here to replay"
+            );
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/c", "/repo/b", "/repo/a"],
+                "and the row stays where the user put it rather than snapping back"
+            );
+        });
+    });
+}
+
+/// R9/R16. The projected "Connecting…" row renders at the top of the list
+/// whatever the session pin says, so a pin swap against it moves nothing on
+/// screen. Counting that as a row passed would hand the whole registry a manual
+/// order for a gesture the user watched do nothing — and, because the render
+/// does not change, the midpoint test still holds on the next frame, so which
+/// way it went would come down to the parity of the mouse-move frames.
+#[test]
+fn test_a_drag_past_the_connecting_row_moves_nothing_and_writes_nothing() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = projects_by_recency(&["/repo/a", "/repo/b"]);
+    let target = probe_target("/srv/app");
+    let key = target.key();
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            assert_eq!(rendered_order(workspace, ctx), ["/repo/a", "/repo/b"]);
+
+            // The user submits a remote connection; its row appears while the
+            // probe runs.
+            let _generation = workspace.restart_remote_probe(&key);
+            workspace.repo_mode_pending_remote_key = Some(key.clone());
+            let before = rendered_order(workspace, ctx);
+            assert_eq!(
+                before,
+                [key.clone(), "/repo/a".into(), "/repo/b".into()],
+                "the projected row is nailed to the top of the list"
+            );
+
+            // And drags a repository up past it while it connects.
+            workspace.start_repo_mode_entry_drag(Path::new("/repo/a"), row_rect(0.), ctx);
+            assert!(
+                !workspace.swap_repo_mode_pinned_rows(Path::new("/repo/a"), Path::new(&key), ctx),
+                "refused: it would permute the pin and leave the screen identical"
+            );
+            workspace.drop_repo_mode_entry(Path::new("/repo/a"), ctx);
+
+            assert_eq!(rendered_order(workspace, ctx), before, "nothing moved");
+            assert_eq!(
+                stored_manual_order(ctx),
+                Vec::<String>::new(),
+                "so nothing is written"
+            );
+        });
+    });
+}
+
+/// R9: the registry is what "verified" means, so clicking a row that is still
+/// connecting must not register it. It would settle a connection that has not
+/// answered — and `drop_pending_remote_entry` refuses to remove a *registered*
+/// key, so a probe that then failed could no longer take the row away.
+#[test]
+fn test_selecting_the_connecting_row_does_not_register_it() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = projects_by_recency(&["/repo/a", "/repo/b"]);
+    let target = probe_target("/srv/app");
+    let key = target.key();
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let _generation = workspace.restart_remote_probe(&key);
+            workspace.repo_mode_pending_remote_key = Some(key.clone());
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                [key.clone(), "/repo/a".into(), "/repo/b".into()]
+            );
+
+            workspace.select_repo_mode_entry(Path::new(&key), ctx);
+
+            assert_eq!(
+                registered_paths(ctx),
+                ["/repo/a", "/repo/b"],
+                "the provisional key stays out of the registry"
+            );
+            assert_eq!(
+                workspace.selected_repo_root, None,
+                "and the row cannot be selected until it lands"
+            );
+
+            // Which is what keeps the failure path able to clean up.
+            workspace.repo_mode_pending_remote_key = None;
+            workspace.drop_pending_remote_entry(&key, ctx);
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/a", "/repo/b"],
+                "a probe that fails afterwards can still take the row away"
+            );
+        });
+    });
+}
+
+/// R16 read the other way round. A row this drag has passed can leave the list
+/// the same way the dragged row can, and once it has, what is on screen is
+/// exactly what the list would show had the drag never happened.
+#[test]
+fn test_a_passed_row_that_leaves_the_list_stops_counting_as_a_move() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = projects_by_recency(&["/repo/a", "/repo/b", "/repo/c"]);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/a", "/repo/b", "/repo/c"]
+            );
+
+            workspace.start_repo_mode_entry_drag(Path::new("/repo/b"), row_rect(0.), ctx);
+            assert!(workspace.swap_repo_mode_pinned_rows(
+                Path::new("/repo/b"),
+                Path::new("/repo/a"),
+                ctx
+            ));
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/b", "/repo/a", "/repo/c"]
+            );
+
+            // Another window removes the row the drag passed.
+            ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+                projects.remove_project(PathBuf::from("/repo/a"), ctx);
+            });
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/b", "/repo/c"],
+                "which is the recency order this list started in"
+            );
+
+            workspace.drop_repo_mode_entry(Path::new("/repo/b"), ctx);
+            assert_eq!(
+                stored_manual_order(ctx),
+                Vec::<String>::new(),
+                "so the drop has nothing to write"
+            );
+        });
+    });
+}
+
+/// R6/R7. The write and the drain share one deadline, and the drain is what
+/// turns `ssh`'s stderr into a verdict, so the write's slice has to leave the
+/// connect stage its whole budget: a host that accepts the connection and then
+/// stalls the write must still fail as unreachable-with-a-reason rather than as
+/// a bare timeout.
+#[test]
+fn test_the_probe_write_budget_leaves_the_connect_stage_whole() {
+    assert_eq!(
+        REMOTE_PROBE_WRITE_TIMEOUT
+            + std::time::Duration::from_secs(REMOTE_PROBE_CONNECT_TIMEOUT_SECS),
+        REMOTE_PROBE_TIMEOUT,
+    );
 }
 
 /// R8 again, from the acting window. Reset puts it back in exactly the
@@ -1774,9 +1996,11 @@ fn test_the_window_that_reset_writes_normally_on_its_next_drag() {
             );
 
             workspace.start_repo_mode_entry_drag(Path::new("/repo/b"), row_rect(0.), ctx);
-            assert!(
-                workspace.swap_repo_mode_pinned_rows(Path::new("/repo/b"), Path::new("/repo/a"))
-            );
+            assert!(workspace.swap_repo_mode_pinned_rows(
+                Path::new("/repo/b"),
+                Path::new("/repo/a"),
+                ctx
+            ));
             workspace.drop_repo_mode_entry(Path::new("/repo/b"), ctx);
 
             assert_eq!(
@@ -1806,9 +2030,11 @@ fn test_a_drag_move_reorders_the_rendered_entries_immediately() {
                 ["/repo/c", "/repo/a", "/repo/b"]
             );
 
-            assert!(
-                workspace.swap_repo_mode_pinned_rows(Path::new("/repo/a"), Path::new("/repo/c"))
-            );
+            assert!(workspace.swap_repo_mode_pinned_rows(
+                Path::new("/repo/a"),
+                Path::new("/repo/c"),
+                ctx
+            ));
 
             assert_eq!(
                 rendered_order(workspace, ctx),
@@ -1920,9 +2146,11 @@ fn test_a_drag_past_a_repository_added_mid_drag_is_written() {
             );
 
             // The user drags the held row below it.
-            assert!(
-                workspace.swap_repo_mode_pinned_rows(Path::new("/repo/b"), Path::new("/repo/d"))
-            );
+            assert!(workspace.swap_repo_mode_pinned_rows(
+                Path::new("/repo/b"),
+                Path::new("/repo/d"),
+                ctx
+            ));
             assert_eq!(
                 rendered_order(workspace, ctx),
                 ["/repo/c", "/repo/a", "/repo/d", "/repo/b"],
@@ -1991,9 +2219,11 @@ fn test_a_there_and_back_drag_writes_nothing() {
 
             // Down past both neighbours, then back up past both.
             for neighbor in ["/repo/b", "/repo/c", "/repo/c", "/repo/b"] {
-                assert!(
-                    workspace.swap_repo_mode_pinned_rows(Path::new("/repo/a"), Path::new(neighbor))
-                );
+                assert!(workspace.swap_repo_mode_pinned_rows(
+                    Path::new("/repo/a"),
+                    Path::new(neighbor),
+                    ctx
+                ));
             }
             assert_eq!(
                 rendered_order(workspace, ctx),
@@ -2039,9 +2269,11 @@ fn test_a_drop_merges_only_the_dragged_row_into_the_stored_order() {
 
             // One row dragged up one place in this window.
             workspace.start_repo_mode_entry_drag(Path::new("/repo/c"), row_rect(0.), ctx);
-            assert!(
-                workspace.swap_repo_mode_pinned_rows(Path::new("/repo/c"), Path::new("/repo/b"))
-            );
+            assert!(workspace.swap_repo_mode_pinned_rows(
+                Path::new("/repo/c"),
+                Path::new("/repo/b"),
+                ctx
+            ));
             workspace.drop_repo_mode_entry(Path::new("/repo/c"), ctx);
 
             assert_eq!(
@@ -2102,9 +2334,11 @@ fn test_a_drop_for_an_unregistered_path_leaves_the_order_unchanged() {
             });
 
             workspace.start_repo_mode_entry_drag(Path::new("/repo/b"), row_rect(0.), ctx);
-            assert!(
-                workspace.swap_repo_mode_pinned_rows(Path::new("/repo/b"), Path::new("/repo/a"))
-            );
+            assert!(workspace.swap_repo_mode_pinned_rows(
+                Path::new("/repo/b"),
+                Path::new("/repo/a"),
+                ctx
+            ));
             workspace.drop_repo_mode_entry(Path::new("/repo/b"), ctx);
 
             assert_eq!(
