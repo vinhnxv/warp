@@ -127,16 +127,32 @@ impl ProjectManagementModel {
     /// zero. Paths that are not in the registry are skipped, so a stale order
     /// from another window cannot resurrect a removed repository. Registry
     /// entries the caller leaves out keep whatever position they already had.
+    ///
+    /// Only the rows whose position actually moves are persisted. Callers hand
+    /// over the whole list on every drag, and re-upserting a repository whose
+    /// number did not change would put a row through the writer channel for no
+    /// reason — the same guard [`Self::clear_manual_order`] gets from `take`.
     pub fn set_manual_order(&mut self, ordered_paths: Vec<PathBuf>, ctx: &mut ModelContext<Self>) {
         let mut repositioned = Vec::new();
         let mut next_position = 0;
         for path in ordered_paths {
-            let path = canonicalize_registry_key(path);
+            // Only canonicalize on a miss. A key that is already in the registry
+            // is already canonical, and canonicalizing hits the filesystem —
+            // once per repository, on the main thread, on every drop.
+            let path = if self.projects.contains_key(&path) {
+                path
+            } else {
+                canonicalize_registry_key(path)
+            };
             let Some(project) = self.projects.get_mut(&path) else {
                 continue;
             };
-            project.manual_position = Some(next_position);
+            let position = Some(next_position);
             next_position += 1;
+            if project.manual_position == position {
+                continue;
+            }
+            project.manual_position = position;
             repositioned.push((path, project.clone()));
         }
 
@@ -175,10 +191,8 @@ impl ProjectManagementModel {
 
     /// Clear every persisted manual position.
     ///
-    /// This cannot go through [`Self::save_project`]: `Project` derives
-    /// `AsChangeset` without `treat_none_as_null`, so diesel skips `None`
-    /// fields on update and the upsert would leave the old positions in the
-    /// database for the next launch to read back.
+    /// This cannot go through [`Self::save_project`] — see the writer,
+    /// `persistence::sqlite::clear_project_manual_order`, for why.
     fn clear_persisted_manual_order(&self) {
         if let Some(sender) = &self.model_event_sender
             && let Err(err) = sender.send(ModelEvent::ClearProjectManualOrder)

@@ -129,9 +129,15 @@ impl Workspace {
         // pass so the list is resolved against one snapshot of the registry.
         let (mut projects, manual_order): (Vec<RegistryRow>, Vec<String>) =
             ProjectManagementModel::handle(ctx).read(ctx, |projects, _| {
+                // Whether anything is positioned falls out of the pass that
+                // builds the rows, so the ordered read below is skipped
+                // entirely until the user's first drag — it sorts the whole
+                // registry, and this runs on every render.
+                let mut any_manual_position = false;
                 let rows = projects
                     .all_projects()
                     .map(|project| {
+                        any_manual_position |= project.manual_position.is_some();
                         (
                             PathBuf::from(&project.path),
                             project.last_opened_ts,
@@ -139,6 +145,9 @@ impl Workspace {
                         )
                     })
                     .collect();
+                if !any_manual_position {
+                    return (rows, Vec::new());
+                }
                 // Positioned rows lead `projects_in_manual_order`, so the first
                 // unpositioned one ends the manual order.
                 let manual_order = projects
@@ -228,7 +237,10 @@ impl Workspace {
         // and so is never in the manual order. It stays at the top, where the
         // `now` timestamp above put it, rather than dropping into that tail: a
         // "Connecting…" row at the bottom of a long list can sit below the fold
-        // with nothing to scroll it into view.
+        // with nothing to scroll it into view. The session-pin sort below
+        // carries the same exception — it runs last, and a key that first
+        // appears mid-session is appended to the pin, so without it the
+        // guarantee would hold only in a window that had never rendered.
         if !manual_order.is_empty() {
             entries.sort_by_key(|entry| {
                 let key = entry.path.to_string_lossy();
@@ -261,8 +273,26 @@ impl Workspace {
         }
         entries.sort_by_key(|e| {
             let key = e.path.to_string_lossy();
-            order.iter().position(|k| *k == key).unwrap_or(usize::MAX)
+            if unverified.contains(&*key) {
+                return 0;
+            }
+            order
+                .iter()
+                .position(|k| *k == key)
+                .map_or(usize::MAX, |position| position + 1)
         });
+
+        // A row removed by another window mid-drag takes its `Draggable` with
+        // it, so `on_drop` never fires and the drag would outlive the row it
+        // names. This is the one place that sees the live key set every frame.
+        let mut row_drag = self.repo_mode_row_drag.borrow_mut();
+        if row_drag
+            .as_ref()
+            .is_some_and(|drag| !entries.iter().any(|entry| entry.path == drag.path))
+        {
+            *row_drag = None;
+        }
+
         entries
     }
 
@@ -680,14 +710,21 @@ impl Workspace {
         if !Self::repo_mode_enabled() {
             return;
         }
-        self.repo_mode_row_drag = Some(RepoModeRowDrag::new(
-            path.to_path_buf(),
-            row_position,
-            self.repo_mode_launch_order.borrow().clone(),
-        ));
+        self.anchor_repo_mode_row_drag(path, row_position);
         // R15: the tab block has to be gone before the first swap is decided,
         // so the rows the drag measures against are the ones the user sees.
         ctx.notify();
+    }
+
+    /// Start tracking a repository-row drag from this frame's geometry,
+    /// discarding whatever was being tracked before.
+    fn anchor_repo_mode_row_drag(&mut self, path: &Path, row_position: RectF) {
+        let drag = RepoModeRowDrag::new(
+            path.to_path_buf(),
+            row_position,
+            self.repo_mode_launch_order.borrow().clone(),
+        );
+        self.repo_mode_row_drag.replace(Some(drag));
     }
 
     /// One frame of a repository-row drag: swap the dragged row with the
@@ -714,25 +751,25 @@ impl Workspace {
             return;
         }
         let slot_rect = ctx.element_position_by_id(repo_row_position_id(path));
-        let Some(dragged_rect) = self
-            .repo_mode_row_drag
-            .as_mut()
-            .filter(|drag| drag.path == path)
-            .map(|drag| drag.anchored(row_position, slot_rect))
-        else {
+        // Scoped so the borrow is released before `repo_mode_entry_paths` below,
+        // which reads the same cell to prune a drag whose row is gone.
+        let anchored = {
+            let mut row_drag = self.repo_mode_row_drag.borrow_mut();
+            row_drag
+                .as_mut()
+                .filter(|drag| drag.path == path)
+                .map(|drag| drag.anchored(row_position, slot_rect))
+        };
+        let Some(dragged_rect) = anchored else {
             // A move with no matching start: this window never saw the
             // drag-start, or a previous drag never reached its drop. Re-anchor
             // on this frame rather than correcting by another drag's geometry.
-            self.repo_mode_row_drag = Some(RepoModeRowDrag::new(
-                path.to_path_buf(),
-                row_position,
-                self.repo_mode_launch_order.borrow().clone(),
-            ));
+            self.anchor_repo_mode_row_drag(path, row_position);
             return;
         };
 
         let entry_paths = self.repo_mode_entry_paths(ctx);
-        let neighbor_rect = |forward: bool| {
+        let neighbor_rect = |forward| {
             repo_mode_row_neighbor(&entry_paths, path, forward)
                 .and_then(|index| entry_paths.get(index))
                 .and_then(|neighbor| ctx.element_position_by_id(repo_row_position_id(neighbor)))
@@ -752,7 +789,7 @@ impl Workspace {
             // A swap moves the dragged row's slot for a reason that is not the
             // tab block, so the anchor must be settled by now — freeze it so a
             // later frame cannot mistake a swap for the collapse.
-            if let Some(drag) = self.repo_mode_row_drag.as_mut() {
+            if let Some(drag) = self.repo_mode_row_drag.borrow_mut().as_mut() {
                 drag.freeze_anchor();
             }
             ctx.notify();
@@ -782,21 +819,25 @@ impl Workspace {
     /// The dragged repository row was released (R17): whatever the list is
     /// showing is what gets written, from wherever the pointer happens to be.
     ///
-    /// Writes nothing when the pin is byte-identical to the one captured at
-    /// drag start (R16) — that covers the there-and-back drag a "did a swap
-    /// fire" flag would report as a move.
+    /// Writes nothing when the pin still lists the keys it shared with the one
+    /// captured at drag start in the same order (R16) — that covers the
+    /// there-and-back drag a "did a swap fire" flag would report as a move.
     pub(super) fn drop_repo_mode_entry(&mut self, path: &Path, ctx: &mut ViewContext<Self>) {
         if !Self::repo_mode_enabled() {
             return;
         }
-        let drag = self.repo_mode_row_drag.take();
+        let drag = self.repo_mode_row_drag.borrow_mut().take();
         let Some(drag) = drag.filter(|drag| drag.path == path) else {
             return;
         };
         let Some(pin) = self.repo_mode_launch_order.borrow().clone() else {
             return;
         };
-        if drag.pin_at_start.as_deref() == Some(pin.as_slice()) {
+        if drag
+            .pin_at_start
+            .as_deref()
+            .is_some_and(|before| shared_key_order_unchanged(before, &pin))
+        {
             return;
         }
         let key = path.to_string_lossy();
@@ -1752,6 +1793,9 @@ pub(super) fn repo_mode_row_swap_target(
     below_rect: Option<RectF>,
 ) -> Option<usize> {
     let dragged_midpoint = (dragged_rect.min_y() + dragged_rect.max_y()) / 2.;
+    // The annotation is load-bearing: the body resolves `Option::filter` on
+    // this parameter, so its type has to be known here rather than at the call
+    // sites below.
     let on_screen = |rect: Option<RectF>| {
         rect.filter(|rect| viewport.is_some_and(|viewport| viewport.intersects(*rect)))
     };
@@ -1769,6 +1813,31 @@ pub(super) fn repo_mode_row_swap_target(
         return Some(below_index);
     }
     None
+}
+
+/// Whether two session pins list the keys they have in common in the same
+/// order — i.e. whether the drag between them moved a row (R16).
+///
+/// Only the shared keys are compared, deliberately. A pin can gain or lose keys
+/// mid-drag without the user having reordered anything: another window adds or
+/// removes a repository, or a pending remote key resolves onto the path the host
+/// expanded. Comparing the two sequences outright read any of those as a
+/// reorder and wrote a manual order the user never asked for — a first drag that
+/// moved nothing would then hand the whole list over. A genuine swap always
+/// changes the relative order of two keys both pins hold, so nothing real is
+/// missed.
+fn shared_key_order_unchanged(before: &[String], after: &[String]) -> bool {
+    let before_keys: HashSet<&str> = before.iter().map(String::as_str).collect();
+    let after_keys: HashSet<&str> = after.iter().map(String::as_str).collect();
+    let before_shared = before
+        .iter()
+        .map(String::as_str)
+        .filter(|key| after_keys.contains(key));
+    let after_shared = after
+        .iter()
+        .map(String::as_str)
+        .filter(|key| before_keys.contains(key));
+    before_shared.eq(after_shared)
 }
 
 /// Where the dragged row lands in the order the registry is holding.
@@ -1901,6 +1970,15 @@ impl RepoModeRowDrag {
     /// Settle the anchor at whatever it is now. Called once a swap has fired,
     /// after which the dragged row's slot moves for a reason that is not the
     /// tab block and can no longer be read as one.
+    ///
+    /// Known residual: a swap decided on a frame delivered before the collapse
+    /// has been painted settles a delta of zero, and the drag then reads a tab
+    /// block's height low for the rest of its life. Leaving the measurement
+    /// open instead is not the fix — with nothing folded away the post-swap
+    /// slot move is a whole row, and capturing that puts the corrected rect
+    /// past the next neighbour on every frame. `start_repo_mode_entry_drag`
+    /// notifies before any move can arrive, which is what keeps a pre-collapse
+    /// frame from being the one that swaps.
     fn freeze_anchor(&mut self) {
         self.anchor_delta.get_or_insert(Vector2F::zero());
     }

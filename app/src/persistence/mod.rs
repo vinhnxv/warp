@@ -455,10 +455,9 @@ pub enum ModelEvent {
     DeleteProject {
         path: String,
     },
-    /// Drops the manual position from every project row. `Project` derives
-    /// `AsChangeset` without `treat_none_as_null`, so diesel skips `None`
-    /// fields on update and [`ModelEvent::UpsertProject`] cannot write the
-    /// NULL back — clearing needs its own event.
+    /// Drops the manual position from every project row. Its own event because
+    /// [`ModelEvent::UpsertProject`] cannot write the NULL back — see
+    /// `sqlite::clear_project_manual_order` for why.
     ClearProjectManualOrder,
     UpsertMCPServerEnvironmentVariables {
         mcp_server_uuid: Vec<u8>,

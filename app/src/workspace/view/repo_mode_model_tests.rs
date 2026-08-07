@@ -4,6 +4,7 @@ use warpui::{App, EntityId, TypedActionView as _};
 
 use super::*;
 use crate::persistence::model::Project;
+use crate::workspace::RepoRegistryKey;
 use crate::workspace::view::non_contiguous_groups;
 use crate::workspace::view::tests::{initialize_app, mock_workspace};
 
@@ -1227,6 +1228,16 @@ fn test_a_pending_remote_row_stays_above_the_manual_order() {
         let workspace = mock_workspace(&mut app);
         workspace.update(&mut app, |workspace, ctx| {
             apply_manual_order(&["/repo/a", "/repo/b", "/repo/c"], ctx);
+            // Rendered first, so the window is carrying a session pin by the
+            // time the probe starts — the state every window is in after its
+            // first frame. The pin is applied last and a key that appears
+            // mid-session is appended to it, so without the same exception the
+            // pending row lands at the *bottom* here.
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/a", "/repo/b", "/repo/c"]
+            );
+
             workspace.restart_remote_probe(&key);
 
             assert_eq!(
@@ -1468,6 +1479,76 @@ fn test_a_drag_that_ends_where_it_started_writes_nothing() {
     });
 }
 
+/// Covers R16 against a pin that changed for a reason the pointer had nothing
+/// to do with. Another window registering a repository mid-drag appends its key
+/// to this window's pin, and a pending remote key resolving does the same — so
+/// comparing the two pins outright read a drag that moved nothing as a reorder
+/// and handed the whole list over to a manual order.
+#[test]
+fn test_a_repository_added_mid_drag_does_not_turn_a_still_drag_into_a_reorder() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = projects_by_recency(&["/repo/c", "/repo/a", "/repo/b"]);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let _ = rendered_order(workspace, ctx);
+            workspace.start_repo_mode_entry_drag(Path::new("/repo/a"), row_rect(0.), ctx);
+
+            // Another window registers a repository while the row is held.
+            ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+                projects.upsert_project(PathBuf::from("/repo/d"), ctx);
+            });
+            assert_eq!(
+                rendered_order(workspace, ctx),
+                ["/repo/c", "/repo/a", "/repo/b", "/repo/d"],
+                "the new key is appended to this window's pin"
+            );
+
+            workspace.drop_repo_mode_entry(Path::new("/repo/a"), ctx);
+            assert_eq!(
+                stored_manual_order(ctx),
+                Vec::<String>::new(),
+                "no row changed places, so the added repository must not create an order"
+            );
+        });
+    });
+}
+
+/// A row removed by another window mid-drag takes its `Draggable` with it, so
+/// `on_drop` never arrives and the tracked drag would sit on the workspace
+/// until the next drag start replaced it. The render pass that sees the live
+/// registry is what drops it.
+#[test]
+fn test_a_row_removed_mid_drag_leaves_no_drag_behind() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let projects = projects_by_recency(&["/repo/c", "/repo/a", "/repo/b"]);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let _ = rendered_order(workspace, ctx);
+            workspace.start_repo_mode_entry_drag(Path::new("/repo/a"), row_rect(0.), ctx);
+            assert!(workspace.repo_mode_row_drag.borrow().is_some());
+
+            // Another window unregisters the repository while the row is held.
+            ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+                projects.remove_project(PathBuf::from("/repo/a"), ctx);
+            });
+            let _ = rendered_order(workspace, ctx);
+
+            assert!(
+                workspace.repo_mode_row_drag.borrow().is_none(),
+                "the drag names a row that is no longer rendered, and no drop can clear it"
+            );
+        });
+    });
+}
+
 /// Covers R16's harder half: a drag that passes several neighbours and comes
 /// back to its starting index has moved nothing, so it writes nothing. A flag
 /// set by the first successful swap answers "did a swap fire?", which this drag
@@ -1623,16 +1704,49 @@ fn test_the_drag_variants_are_classified_per_frame_and_the_drop_is_not() {
 
     assert!(
         !WorkspaceAction::DragRepoModeEntry {
-            path: path.clone(),
+            path: RepoRegistryKey(path.clone()),
             row_position: rect,
         }
         .should_save_app_state_on_action(),
         "a per-frame drag move must not serialize the app state"
     );
     assert!(
-        WorkspaceAction::DropRepoModeEntry(path).should_save_app_state_on_action(),
+        WorkspaceAction::DropRepoModeEntry(RepoRegistryKey(path)).should_save_app_state_on_action(),
         "the release commits an order, like DropTab"
     );
+}
+
+/// The three drag variants carry a registry key, and `WorkspaceAction` derives
+/// `Debug` for a dispatcher that logs `{action:?}` at `Info` — which uploads as
+/// a Sentry breadcrumb. A repo-mode registry key can be a whole SSH connection
+/// string, including the local path to a private key, so no part of it may
+/// reach that rendering.
+#[test]
+fn test_a_dragged_registry_key_never_renders_into_a_log_line() {
+    let key = PathBuf::from("ssh://user@host:22/srv/app?i=/home/u/.ssh/id_ed25519");
+    let rect = row_rect(0.);
+    let actions = [
+        WorkspaceAction::StartRepoModeEntryDrag {
+            path: RepoRegistryKey(key.clone()),
+            row_position: rect,
+        },
+        WorkspaceAction::DragRepoModeEntry {
+            path: RepoRegistryKey(key.clone()),
+            row_position: rect,
+        },
+        WorkspaceAction::DropRepoModeEntry(RepoRegistryKey(key)),
+    ];
+    for action in actions {
+        let rendered = format!("{action:?}");
+        assert!(
+            !rendered.contains("ssh://"),
+            "the connection string leaked into {rendered}"
+        );
+        assert!(
+            !rendered.contains("id_ed25519"),
+            "the private-key path leaked into {rendered}"
+        );
+    }
 }
 
 /// Every variant this unit adds is placed explicitly in
@@ -1646,19 +1760,22 @@ fn test_every_new_drag_action_is_placed_in_the_save_state_match() {
     let classifications = [
         (
             WorkspaceAction::StartRepoModeEntryDrag {
-                path: path.clone(),
+                path: RepoRegistryKey(path.clone()),
                 row_position: rect,
             },
             false,
         ),
         (
             WorkspaceAction::DragRepoModeEntry {
-                path: path.clone(),
+                path: RepoRegistryKey(path.clone()),
                 row_position: rect,
             },
             false,
         ),
-        (WorkspaceAction::DropRepoModeEntry(path), true),
+        (
+            WorkspaceAction::DropRepoModeEntry(RepoRegistryKey(path)),
+            true,
+        ),
         (WorkspaceAction::ResetRepoModeOrder, true),
     ];
     for (action, expected) in classifications {
@@ -1763,7 +1880,7 @@ fn test_a_drag_move_with_no_rects_at_all_leaves_the_list_alone() {
             let before = rendered_order(workspace, ctx);
             workspace.handle_action(
                 &WorkspaceAction::StartRepoModeEntryDrag {
-                    path: PathBuf::from("/repo/b"),
+                    path: RepoRegistryKey(PathBuf::from("/repo/b")),
                     row_position: row_rect(ROW_HEIGHT),
                 },
                 ctx,
@@ -1771,14 +1888,14 @@ fn test_a_drag_move_with_no_rects_at_all_leaves_the_list_alone() {
             for step in 1..=20 {
                 workspace.handle_action(
                     &WorkspaceAction::DragRepoModeEntry {
-                        path: PathBuf::from("/repo/b"),
+                        path: RepoRegistryKey(PathBuf::from("/repo/b")),
                         row_position: row_rect(ROW_HEIGHT - step as f32 * 4.),
                     },
                     ctx,
                 );
             }
             workspace.handle_action(
-                &WorkspaceAction::DropRepoModeEntry(PathBuf::from("/repo/b")),
+                &WorkspaceAction::DropRepoModeEntry(RepoRegistryKey(PathBuf::from("/repo/b"))),
                 ctx,
             );
 
@@ -1906,6 +2023,35 @@ fn test_the_anchor_correction_is_zero_when_nothing_folds_away() {
             "a drag with nothing to fold away swaps at the same pointer distance"
         );
     }
+}
+
+/// Covers what `freeze_anchor` is for, and why it cannot simply stop settling
+/// an unmeasured anchor.
+///
+/// The anchor translates `Draggable`'s frozen pre-collapse coordinates into the
+/// live layout, and the only thing that shifts that frame is the tab block
+/// folding away. A swap shifts the dragged row's slot too, but for an unrelated
+/// reason — the list reordered — and every neighbour rect moved with it. Left
+/// measurable, the post-swap slot would be captured as a collapse correction a
+/// full row tall, which puts the corrected rect straight past the next
+/// neighbour: one swap per frame for the rest of the drag.
+#[test]
+fn test_a_slot_move_after_a_swap_is_not_read_as_the_tab_block_collapse() {
+    let start = row_rect(ROW_HEIGHT);
+    let mut drag = RepoModeRowDrag::new(PathBuf::from("/repo/b"), start, None);
+
+    // Nothing folded away, so every frame before the swap measures a zero
+    // delta and the reported rect passes through untouched.
+    let reported = RectF::new(start.origin() + vec2f(0., 25.), start.size());
+    assert_eq!(drag.anchored(reported, Some(start)), reported);
+
+    // The swap fires and the dragged row's slot moves down one row.
+    drag.freeze_anchor();
+    assert_eq!(
+        drag.anchored(reported, Some(row_rect(ROW_HEIGHT * 2.))),
+        reported,
+        "the reordered slot is not a coordinate-frame shift, so it corrects nothing"
+    );
 }
 
 /// Covers R14/KTD8: a remote entry gets the same group binding a local one

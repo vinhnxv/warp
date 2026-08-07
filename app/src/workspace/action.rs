@@ -126,6 +126,22 @@ pub enum AutoCloudHandoffTrigger {
     Uri,
 }
 
+/// A repo-mode registry key in an action payload.
+///
+/// `WorkspaceAction` derives `Debug`, and the dispatcher logs `{action:?}` at
+/// `Info`, which uploads as a Sentry breadcrumb. A registry key can be a full
+/// SSH connection string including the path to a local private key, so the
+/// key must never render. The value is still available to handlers; only its
+/// `Debug` is redacted.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RepoRegistryKey(pub PathBuf);
+
+impl std::fmt::Debug for RepoRegistryKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("RepoRegistryKey(<redacted>)")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum WorkspaceAction {
     ActivateTab(usize),
@@ -292,19 +308,19 @@ pub enum WorkspaceAction {
     /// at that moment — the anchor the drag re-bases on once the selected
     /// repository's tab block folds away (R19).
     StartRepoModeEntryDrag {
-        path: PathBuf,
+        path: RepoRegistryKey,
         row_position: RectF,
     },
     /// Repo mode: the dragged repository row moved. `row_position` is the rect
     /// `Draggable` reports for the row this frame.
     DragRepoModeEntry {
-        path: PathBuf,
+        path: RepoRegistryKey,
         row_position: RectF,
     },
     /// Repo mode: the dragged repository row was released, committing the order
     /// the list is showing. Release is the only terminal state — a repository
     /// drag has no cancel (R17).
-    DropRepoModeEntry(PathBuf),
+    DropRepoModeEntry(RepoRegistryKey),
     /// Repo mode: discard the manual order and give the Repositories list back
     /// to recency ordering (R8). List-level, so it names no repository.
     ResetRepoModeOrder,

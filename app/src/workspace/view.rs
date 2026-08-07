@@ -1249,7 +1249,11 @@ pub struct Workspace {
     /// ended where it began from one that moved a row (R16). Replaced at every
     /// drag start, so a drag whose release never arrived cannot skew the next
     /// one.
-    repo_mode_row_drag: Option<repo_mode_model::RepoModeRowDrag>,
+    ///
+    /// A `RefCell` like the sibling repo-mode caches because `repo_mode_entries`
+    /// — the only `&self` path that sees the live registry every frame — is what
+    /// drops a drag whose row another window has removed.
+    repo_mode_row_drag: RefCell<Option<repo_mode_model::RepoModeRowDrag>>,
     /// Cached (kind, is_dead) filesystem probes per repo root, refreshed at most
     /// every `REPO_FS_CACHE_TTL`, so `repo_mode_entries` does not stat every
     /// registered path on each render.
@@ -3683,7 +3687,7 @@ impl Workspace {
             vertical_tabs_panel_open: false,
             selected_repo_root: None,
             repo_mode_launch_order: RefCell::new(None),
-            repo_mode_row_drag: None,
+            repo_mode_row_drag: RefCell::new(None),
             repo_mode_fs_cache: RefCell::new(HashMap::new()),
             repo_mode_remote_probes: RefCell::new(HashMap::new()),
             repo_mode_probe_generation: Cell::new(0),
@@ -24524,12 +24528,12 @@ impl TypedActionView for Workspace {
             SelectRepoModePicker => self.open_repo_mode_picker_menu(ctx),
             NewRepoModeLooseTab => self.new_repo_mode_loose_tab(ctx),
             StartRepoModeEntryDrag { path, row_position } => {
-                self.start_repo_mode_entry_drag(path, *row_position, ctx)
+                self.start_repo_mode_entry_drag(&path.0, *row_position, ctx)
             }
             DragRepoModeEntry { path, row_position } => {
-                self.drag_repo_mode_entry(path, *row_position, ctx)
+                self.drag_repo_mode_entry(&path.0, *row_position, ctx)
             }
-            DropRepoModeEntry(path) => self.drop_repo_mode_entry(path, ctx),
+            DropRepoModeEntry(path) => self.drop_repo_mode_entry(&path.0, ctx),
             ResetRepoModeOrder => self.reset_repo_mode_order(ctx),
             AddDefaultTab => {
                 let effective_mode = AISettings::as_ref(ctx).default_session_mode(ctx);

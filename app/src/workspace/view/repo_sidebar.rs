@@ -37,8 +37,8 @@ use super::vertical_tabs::{
     terminal_pull_request_badge_label,
 };
 use crate::appearance::Appearance;
-use crate::workspace::WorkspaceAction;
 use crate::workspace::tab_settings::TabSettings;
+use crate::workspace::{RepoRegistryKey, WorkspaceAction};
 
 const ROW_ICON_SIZE: f32 = 14.;
 const CHEVRON_SIZE: f32 = 10.;
@@ -316,7 +316,7 @@ pub(super) fn render_repo_tree(
             remote_state,
             branch,
             badges,
-            mouse,
+            mouse.clone(),
             drag_state.clone(),
             pr_badge_mouse,
             remove_mouse,
@@ -328,6 +328,7 @@ pub(super) fn render_repo_tree(
             &path,
             is_draggable,
             drag_state,
+            mouse,
             appearance,
         ));
 
@@ -483,11 +484,20 @@ fn render_empty_state(app_appearance: &Appearance) -> Box<dyn Element> {
 /// data — the swap is resolved from the row rect — and reusing the vertical
 /// tabs' pane data to fill the parameter would make every repository row a
 /// valid pane-header drop target.
+///
+/// `mouse` is the row body's own interaction state, cleared the moment the drag
+/// starts. `Draggable` stores `DragState::None` before any click can be
+/// delivered, so the row's click handler can never observe "a drag is in
+/// flight" — the press the row recorded at mouse-down would otherwise complete
+/// into a click on release and select the repository the user just moved.
+/// Resetting the state instead is the same remedy the vertical tabs sidecar
+/// uses when an element stops receiving its own follow-up mouse events.
 fn wrap_entry_row_for_drag(
     row: Box<dyn Element>,
     path: &Path,
     is_draggable: bool,
     drag_state: DraggableState,
+    mouse: MouseStateHandle,
     app_appearance: &Appearance,
 ) -> Box<dyn Element> {
     let row = if is_draggable {
@@ -497,19 +507,24 @@ fn wrap_entry_row_for_drag(
         Draggable::new(drag_state.clone(), row)
             .with_drag_axis(DragAxis::VerticalOnly)
             .on_drag_start(move |ctx, _, row_position| {
+                if let Ok(mut mouse_state) = mouse.lock() {
+                    mouse_state.reset_interaction_state();
+                }
                 ctx.dispatch_typed_action(WorkspaceAction::StartRepoModeEntryDrag {
-                    path: start_path.clone(),
+                    path: RepoRegistryKey(start_path.clone()),
                     row_position,
                 });
             })
             .on_drag(move |ctx, _, row_position, _| {
                 ctx.dispatch_typed_action(WorkspaceAction::DragRepoModeEntry {
-                    path: drag_path.clone(),
+                    path: RepoRegistryKey(drag_path.clone()),
                     row_position,
                 });
             })
             .on_drop(move |ctx, _, _, _| {
-                ctx.dispatch_typed_action(WorkspaceAction::DropRepoModeEntry(drop_path.clone()));
+                ctx.dispatch_typed_action(WorkspaceAction::DropRepoModeEntry(RepoRegistryKey(
+                    drop_path.clone(),
+                )));
             })
             .finish()
     } else {
@@ -541,10 +556,12 @@ fn wrap_entry_row_for_drag(
 ///
 /// **A drag never selects the repository it moves (R13).** Selecting spawns a
 /// terminal, and for a remote entry an SSH session, so a row that crossed the
-/// drag threshold must dispatch nothing. `Draggable` already suppresses every
-/// child event for the life of a drag; stating the rule here is what makes it
-/// testable, and what keeps a press the child recorded before the threshold was
-/// crossed from completing into a click afterwards.
+/// drag threshold must dispatch nothing. `Draggable` suppresses every child
+/// event for the life of a drag, and it has already stored `DragState::None` by
+/// the time a click could be delivered — so `is_dragging` is never `true` here
+/// at runtime, and it is the mouse-state reset in [`wrap_entry_row_for_drag`]
+/// that actually stops a pre-threshold press from completing into a click. This
+/// parameter states the rule so it stays asserted rather than assumed.
 fn repo_row_click_action(
     is_dragging: bool,
     is_dead: bool,
