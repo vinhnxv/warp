@@ -185,6 +185,12 @@ impl Workspace {
             .cloned()
             .collect();
         if !unverified.is_empty() {
+            // R6: remember that this window put the key on screen as a
+            // "Connecting…" row, so the pin can keep it near the top when it
+            // verifies instead of letting it fall to the appended slot.
+            self.repo_mode_projected_unverified
+                .borrow_mut()
+                .extend(unverified.iter().cloned());
             let added = chrono::Utc::now().naive_utc();
             projects.extend(
                 unverified
@@ -262,6 +268,11 @@ impl Workspace {
         // appears mid-session is appended to the pin, so without it the
         // guarantee would hold only in a window that had never rendered.
         if !manual_order.is_empty() {
+            // R1: this window has now seen an order, so an empty stored order
+            // later is somebody else's reset rather than the pre-first-drag
+            // state. Recorded here because this is the only read of the stored
+            // order on the render path.
+            self.repo_mode_saw_stored_order.set(true);
             entries.sort_by_key(|entry| {
                 if entry.unverified {
                     return 0;
@@ -285,12 +296,26 @@ impl Workspace {
                 .map(|e| e.path.to_string_lossy().into_owned())
                 .collect()
         });
+        let mut projected_unverified = self.repo_mode_projected_unverified.borrow_mut();
         for entry in &entries {
             let key = entry.path.to_string_lossy();
-            if !order.iter().any(|k| *k == key) {
+            if order.iter().any(|k| *k == key) {
+                continue;
+            }
+            // R6: a key this window has shown connecting joins the pin at the
+            // front rather than the end. It is rendering at the top right now —
+            // the unverified exception below puts it there — and appending
+            // would drop it the whole length of the list the moment the probe
+            // lands and that exception stops applying. Special-cased once: it
+            // is in the pin from here on, and every other newly appearing key
+            // still appends, which is R4.
+            if projected_unverified.remove::<str>(key.as_ref()) {
+                order.insert(0, key.into_owned());
+            } else {
                 order.push(key.into_owned());
             }
         }
+        drop(projected_unverified);
         entries.sort_by_key(|e| {
             if e.unverified {
                 return 0;
@@ -650,6 +675,13 @@ impl Workspace {
                 projects.upsert_project(PathBuf::from(resolved), ctx);
             }
         });
+        // The key has stopped being provisional, so the "shown connecting"
+        // marker has done its job — for the same-key case the pin already holds
+        // it at the front, and for a key the host expanded the pin is rewritten
+        // below.
+        self.repo_mode_projected_unverified
+            .borrow_mut()
+            .remove(probed);
         if probed != resolved {
             // Move the session across, so the resolved row keeps the state the
             // probe just wrote and the retired key stops being rendered.
@@ -660,7 +692,19 @@ impl Workspace {
                     .insert(resolved.to_string(), session);
             }
             if let Some(order) = self.repo_mode_launch_order.borrow_mut().as_mut() {
-                order.retain(|pinned| pinned != probed);
+                // R6: the row the user watched connect keeps its place. The key
+                // it was watched under is retired, so the pin takes the
+                // resolved key in that same slot rather than dropping the row
+                // to the end of the list the instant it verifies. A resolved
+                // key the pin already holds stays where it is — the user
+                // re-added a connection they already had — and the retired key
+                // simply goes.
+                match order.iter().position(|pinned| pinned == probed) {
+                    Some(index) if !order.iter().any(|pinned| pinned == resolved) => {
+                        order[index] = resolved.to_string();
+                    }
+                    _ => order.retain(|pinned| pinned != probed),
+                }
             }
         }
     }
@@ -688,6 +732,7 @@ impl Workspace {
 
     fn forget_remote_key(&self, key: &str) {
         self.repo_mode_remote_probes.borrow_mut().remove(key);
+        self.repo_mode_projected_unverified.borrow_mut().remove(key);
         if let Some(order) = self.repo_mode_launch_order.borrow_mut().as_mut() {
             order.retain(|pinned| pinned != key);
         }
@@ -730,7 +775,7 @@ impl Workspace {
         if !Self::repo_mode_enabled() {
             return;
         }
-        self.anchor_repo_mode_row_drag(path, row_position);
+        self.anchor_repo_mode_row_drag(path, row_position, ctx);
         // R15: the tab block has to be gone before the first swap is decided,
         // so the rows the drag measures against are the ones the user sees.
         ctx.notify();
@@ -738,11 +783,29 @@ impl Workspace {
 
     /// Start tracking a repository-row drag from this frame's geometry,
     /// discarding whatever was being tracked before.
-    fn anchor_repo_mode_row_drag(&mut self, path: &Path, row_position: RectF) {
+    fn anchor_repo_mode_row_drag(
+        &mut self,
+        path: &Path,
+        row_position: RectF,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        // R2: the row this drag will read scrolling off, resolved once so it is
+        // the same row for the whole gesture. Absent until the list has been
+        // painted, which in practice it always has by the time a row can be
+        // picked up — a drag with no reference simply cannot tell a scroll from
+        // the collapse, exactly as before.
+        let scroll_reference = self.repo_mode_entry_paths(ctx).first().and_then(|first| {
+            ctx.element_position_by_id(repo_row_position_id(first))
+                .map(|rect| DragScrollReference {
+                    key: first.clone(),
+                    origin: rect.origin(),
+                })
+        });
         let drag = RepoModeRowDrag::new(
             path.to_path_buf(),
             row_position,
             self.repo_mode_launch_order.borrow().clone(),
+            scroll_reference,
         );
         self.repo_mode_row_drag.replace(Some(drag));
     }
@@ -771,6 +834,18 @@ impl Workspace {
             return;
         }
         let slot_rect = ctx.element_position_by_id(repo_row_position_id(path));
+        // R2: the scroll reference's key is the drag's, but its rect comes from
+        // the position cache — read before the drag is borrowed, so `anchored`
+        // can take a whole frame's geometry at once.
+        let reference_key = self
+            .repo_mode_row_drag
+            .borrow()
+            .as_ref()
+            .filter(|drag| drag.path == path)
+            .and_then(|drag| drag.scroll_reference_key().map(Path::to_path_buf));
+        let reference_rect = reference_key
+            .as_deref()
+            .and_then(|key| ctx.element_position_by_id(repo_row_position_id(key)));
         // Scoped so the borrow is released before `repo_mode_entry_paths` below,
         // which reads the same cell to prune a drag whose row is gone.
         let anchored = {
@@ -778,13 +853,13 @@ impl Workspace {
             row_drag
                 .as_mut()
                 .filter(|drag| drag.path == path)
-                .map(|drag| drag.anchored(row_position, slot_rect))
+                .map(|drag| drag.anchored(row_position, slot_rect, reference_rect))
         };
         let Some(dragged_rect) = anchored else {
             // A move with no matching start: this window never saw the
             // drag-start, or a previous drag never reached its drop. Re-anchor
             // on this frame rather than correcting by another drag's geometry.
-            self.anchor_repo_mode_row_drag(path, row_position);
+            self.anchor_repo_mode_row_drag(path, row_position, ctx);
             return;
         };
 
@@ -794,23 +869,32 @@ impl Workspace {
                 .and_then(|index| entry_paths.get(index))
                 .and_then(|neighbor| ctx.element_position_by_id(repo_row_position_id(neighbor)))
         };
+        let above_rect = neighbor_rect(false);
+        let below_rect = neighbor_rect(true);
         let target = repo_mode_row_swap_target(
             &entry_paths,
             path,
             dragged_rect,
             ctx.element_position_by_id(repo_tree_viewport_position_id()),
-            neighbor_rect(false),
-            neighbor_rect(true),
+            above_rect,
+            below_rect,
         );
-        let Some(neighbor) = target.and_then(|index| entry_paths.get(index)) else {
+        let Some(target_index) = target else {
             return;
         };
+        let Some(neighbor) = entry_paths.get(target_index) else {
+            return;
+        };
+        // Which side the row is travelling to decides which rect it is about to
+        // exchange slots with, and therefore how far its slot is about to move.
+        let forward = repo_mode_row_neighbor(&entry_paths, path, true) == Some(target_index);
+        let target_rect = if forward { below_rect } else { above_rect };
         if self.swap_repo_mode_pinned_rows(path, neighbor) {
             // A swap moves the dragged row's slot for a reason that is not the
-            // tab block, so the anchor must be settled by now — freeze it so a
-            // later frame cannot mistake a swap for the collapse.
+            // tab block. Record how far, so the next frame can subtract it and
+            // still measure a collapse that has not been paid for yet.
             if let Some(drag) = self.repo_mode_row_drag.borrow_mut().as_mut() {
-                drag.freeze_anchor();
+                drag.record_swap(swap_slot_shift(slot_rect, target_rect, forward), neighbor);
             }
             ctx.notify();
         }
@@ -873,6 +957,21 @@ impl Workspace {
                 .map(|project| PathBuf::from(&project.path))
                 .collect()
         });
+        // R1: another window reset the order since this one last rendered with
+        // it. This window's pin is the pre-reset arrangement, and merging into
+        // an empty stored order would write that whole arrangement straight
+        // back — undoing the reset from a window that never asked to.
+        //
+        // The pin is dropped instead of replayed, so this window re-sorts by
+        // recency on its next render and the drag that landed on the stale list
+        // is discarded, once. KTD6 is not weakened by that: the rendered list
+        // only changes because the user just acted on it.
+        if stored.is_empty() && self.repo_mode_saw_stored_order.get() {
+            self.repo_mode_launch_order.replace(None);
+            self.repo_mode_saw_stored_order.set(false);
+            ctx.notify();
+            return;
+        }
         let merged = merge_dragged_row(stored, &pin, pin_index);
         ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
             projects.set_manual_order(merged, ctx);
@@ -891,6 +990,12 @@ impl Workspace {
             return;
         }
         self.repo_mode_launch_order.replace(None);
+        // The acting window is about to render with no stored order, which is
+        // exactly the state it was in before anyone's first drag — so its next
+        // drag has to take the ordinary first-drag path and write the whole
+        // list. Leaving the flag set would make this window discard its own
+        // next drag as if some other window had done the reset.
+        self.repo_mode_saw_stored_order.set(false);
         ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
             projects.clear_manual_order(ctx);
         });
@@ -1941,16 +2046,61 @@ pub(super) struct RepoModeRowDrag {
     anchor_delta: Option<Vector2F>,
     /// The session pin at drag start (R16).
     pin_at_start: Option<Vec<String>>,
+    /// Total slot displacement the swaps so far are expected to have caused the
+    /// dragged row, so a reordered slot is never mistaken for the collapse.
+    swap_shift: Vector2F,
+    /// The row this drag reads scrolling off (R2), when one could be resolved
+    /// at drag start.
+    scroll_reference: Option<DragScrollReference>,
+}
+
+/// The row a repository-row drag measures scrolling against, and where its slot
+/// sat when the drag started.
+///
+/// A scroll moves every row in the list by the same amount; the tab block
+/// folding away (R15) moves only the rows *below* the selected repository. The
+/// list's first row is the one row a collapse can never move — the block always
+/// renders directly under the selected repository's own row, so nothing above
+/// that row shifts, and the first row is never below it. Everything the first
+/// row does is therefore scrolling, and taking it back out of the dragged row's
+/// slot movement leaves the collapse on its own.
+///
+/// Deliberately *not* the dragged row's neighbour, which the drag already has to
+/// hand: two adjacent rows are all but always on the same side of the tab block,
+/// so a neighbour moves with the collapse exactly as the dragged row does and
+/// subtracting it would cancel the very correction the anchor exists to make.
+struct DragScrollReference {
+    /// Registry key of the reference row, fixed for the life of the drag.
+    key: PathBuf,
+    /// Where its slot sat at drag start, advanced by the displacement each swap
+    /// that moved it is expected to have caused — a swap reorders the list
+    /// under the reference exactly as it does under the dragged row, and that
+    /// is not scrolling either.
+    origin: Vector2F,
 }
 
 impl RepoModeRowDrag {
-    fn new(path: PathBuf, start_rect: RectF, pin_at_start: Option<Vec<String>>) -> Self {
+    fn new(
+        path: PathBuf,
+        start_rect: RectF,
+        pin_at_start: Option<Vec<String>>,
+        scroll_reference: Option<DragScrollReference>,
+    ) -> Self {
         Self {
             path,
             start_rect,
             anchor_delta: None,
             pin_at_start,
+            swap_shift: Vector2F::zero(),
+            scroll_reference,
         }
+    }
+
+    /// The row whose slot this drag reads scrolling off, if it resolved one.
+    fn scroll_reference_key(&self) -> Option<&Path> {
+        self.scroll_reference
+            .as_ref()
+            .map(|reference| reference.key.as_path())
     }
 
     /// The reported rect, moved into the coordinates the neighbour rects are in.
@@ -1972,14 +2122,26 @@ impl RepoModeRowDrag {
     /// pre-collapse geometry and stay skewed by the block's height for the rest
     /// of the drag. Until the slot moves, the neighbour rects have not moved
     /// either, so an uncorrected comparison is the consistent one.
-    fn anchored(&mut self, reported: RectF, slot_rect: Option<RectF>) -> RectF {
+    ///
+    /// The slot has two other ways to move, and both are taken back out before
+    /// what is left is called a collapse: a swap, which reorders the list under
+    /// the row (`record_swap`), and a scroll, which moves every row in the list
+    /// including `reference_rect`'s (see [`DragScrollReference`]).
+    fn anchored(
+        &mut self,
+        reported: RectF,
+        slot_rect: Option<RectF>,
+        reference_rect: Option<RectF>,
+    ) -> RectF {
         let delta = match self.anchor_delta {
             Some(delta) => delta,
             None => {
                 let Some(slot) = slot_rect else {
                     return reported;
                 };
-                let delta = self.start_rect.origin() - slot.origin();
+                let delta = self.start_rect.origin() - slot.origin()
+                    + self.swap_shift
+                    + self.scrolled_by(reference_rect);
                 if delta == Vector2F::zero() {
                     return reported;
                 }
@@ -1990,20 +2152,65 @@ impl RepoModeRowDrag {
         RectF::new(reported.origin() - delta, reported.size())
     }
 
-    /// Settle the anchor at whatever it is now. Called once a swap has fired,
-    /// after which the dragged row's slot moves for a reason that is not the
-    /// tab block and can no longer be read as one.
+    /// How far the list has scrolled since the drag started (R2), or zero when
+    /// this drag has no reference row to read it off.
+    fn scrolled_by(&self, reference_rect: Option<RectF>) -> Vector2F {
+        match (&self.scroll_reference, reference_rect) {
+            (Some(reference), Some(rect)) => rect.origin() - reference.origin,
+            _ => Vector2F::zero(),
+        }
+    }
+
+    /// Account for a swap that has just fired: `slot_shift` is how far it is
+    /// expected to move the dragged row's slot, and `neighbor` is the row it
+    /// exchanged slots with.
     ///
-    /// Known residual: a swap decided on a frame delivered before the collapse
-    /// has been painted settles a delta of zero, and the drag then reads a tab
-    /// block's height low for the rest of its life. Leaving the measurement
-    /// open instead is not the fix — with nothing folded away the post-swap
-    /// slot move is a whole row, and capturing that puts the corrected rect
-    /// past the next neighbour on every frame. `start_repo_mode_entry_drag`
-    /// notifies before any move can arrive, which is what keeps a pre-collapse
-    /// frame from being the one that swaps.
-    fn freeze_anchor(&mut self) {
-        self.anchor_delta.get_or_insert(Vector2F::zero());
+    /// Settling the anchor here instead — freezing it at whatever it is, which
+    /// for an unmeasured anchor is zero — was the old rule, and it lost the
+    /// collapse correction outright whenever a swap was decided on a frame
+    /// delivered before the collapse had painted: the drag then sat a tab
+    /// block's height low for the rest of its life. Simply leaving the anchor
+    /// open is not the fix either, because with nothing folded away the
+    /// post-swap slot move is a whole row and capturing *that* puts the
+    /// corrected rect past the next neighbour on every frame. A swap moves the
+    /// slot by a knowable amount, so the honest thing is to subtract it and let
+    /// whatever remains be measured as the collapse.
+    fn record_swap(&mut self, slot_shift: Vector2F, neighbor: &Path) {
+        self.swap_shift += slot_shift;
+        // The same reorder moves the scroll reference when the reference is one
+        // of the two rows that exchanged slots, and that is not scrolling.
+        let reference_shift = match self.scroll_reference_key() {
+            Some(key) if key == self.path => slot_shift,
+            Some(key) if key == neighbor => -slot_shift,
+            _ => return,
+        };
+        if let Some(reference) = self.scroll_reference.as_mut() {
+            reference.origin += reference_shift;
+        }
+    }
+}
+
+/// How far a swap moves the dragged row's slot: the two rows exchange slots, so
+/// it is exactly the distance between them.
+///
+/// Measured rather than assumed to be one row height — R15 does make every row
+/// the same height for the duration of a drag, but the two rects are right
+/// there. With the dragged row's own slot missing from the position cache the
+/// target's height, signed by the direction of travel, is the closest stand-in.
+fn swap_slot_shift(slot: Option<RectF>, target: Option<RectF>, forward: bool) -> Vector2F {
+    let Some(target) = target else {
+        return Vector2F::zero();
+    };
+    match slot {
+        Some(slot) => target.origin() - slot.origin(),
+        None => vec2f(
+            0.,
+            if forward {
+                target.height()
+            } else {
+                -target.height()
+            },
+        ),
     }
 }
 

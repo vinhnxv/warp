@@ -1243,6 +1243,28 @@ pub struct Workspace {
     /// Repositories-section order captured on first render after launch (R3:
     /// order settles at launch; entries added later append at the end).
     repo_mode_launch_order: RefCell<Option<Vec<String>>>,
+    /// Whether this window has ever rendered while the registry held a manual
+    /// order (R1).
+    ///
+    /// There is no cross-window channel, so a reset performed in another window
+    /// is only ever observed as the stored order going away. That alone is
+    /// ambiguous — an empty stored order is also the state every window is in
+    /// before anyone's first drag, which *must* write the whole list. This flag
+    /// is what separates the two: set, it says this window has seen an order,
+    /// so an empty one now means somebody cleared it.
+    repo_mode_saw_stored_order: Cell<bool>,
+    /// Remote keys this window has rendered as an unverified "Connecting…" row
+    /// (R6).
+    ///
+    /// Such a key is not in the registry yet, so it is not in any manual order
+    /// and the list's two ordering exceptions float it to the top. Once the
+    /// probe lands it becomes an ordinary registered row and falls back to its
+    /// pinned slot — which, for a key that joined the pin by the append rule,
+    /// is the bottom of the list. Remembering that this window showed it
+    /// connecting is what lets the pin take it at the front instead, so the row
+    /// stays where the user last saw it rather than jumping the length of the
+    /// list the instant it connects.
+    repo_mode_projected_unverified: RefCell<HashSet<String>>,
     /// The repository-row drag in flight, if any: the anchor the midpoint
     /// comparison re-bases on once the tab block folds away (R19), and the
     /// session pin as it was at drag start, which is what tells a drag that
@@ -3687,6 +3709,8 @@ impl Workspace {
             vertical_tabs_panel_open: false,
             selected_repo_root: None,
             repo_mode_launch_order: RefCell::new(None),
+            repo_mode_saw_stored_order: Cell::new(false),
+            repo_mode_projected_unverified: RefCell::new(HashSet::new()),
             repo_mode_row_drag: RefCell::new(None),
             repo_mode_fs_cache: RefCell::new(HashMap::new()),
             repo_mode_remote_probes: RefCell::new(HashMap::new()),

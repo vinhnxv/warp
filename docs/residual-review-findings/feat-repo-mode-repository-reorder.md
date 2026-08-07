@@ -8,18 +8,25 @@ Reviewers that returned: correctness, security, performance, project-standards, 
 adversarial. Three more — testing, reliability, maintainability — were dispatched and never
 returned; see Coverage gaps below.
 
-Seven findings were applied in `0b88b23b5`, one of them only partially, and one more was applied
-experimentally and rejected (R3 below). This file records everything that was not applied, with the
-reasoning, so the decisions do not have to be re-derived.
+Seven findings were applied in `1803d7f1d`, one of them only partially. Four more (R1, R2, R3, R6)
+were first routed here as residuals and then fixed in a later pass, once the design questions two of
+them carried had been settled with the user; their reasoning is kept below because it explains the
+shape each fix took. R8 was found in manual testing after the review and is also fixed.
+
+What remains genuinely open is R4, R5 and R7. This file records all of it — applied and not — with
+the reasoning, so the decisions do not have to be re-derived.
 
 No tickets were filed. This repository's issue tracker belongs to the upstream OSS project, and
 filing there for an unmerged personal branch was not authorized.
 
 ---
 
-## Not applied — needs a decision
+## Fixed after the review, in a later pass
 
-### R1. Reset order does not reach another window's session pin, and can be silently undone
+These three were routed here as residuals, then taken up and fixed. The reasoning is kept because it
+explains why each fix takes the shape it does.
+
+### R1. Reset order could be silently undone by another window — **fixed**
 
 `app/src/workspace/view/repo_mode_model.rs` — from `adversarial`, P1, confidence 75.
 `autofix_class: manual`, owner `human`.
@@ -34,24 +41,44 @@ What KTD6 did not consider is the write-back. The next drag in that second windo
 it. The reset is then undone, and the first window picks the old order back up. The user's escape
 hatch quietly fails.
 
-Fixing this means deciding what reset means across windows: broadcast the clear to every window's
-pin, or mark a pin as reset-invalidated so the next drag rebuilds it from the registry instead of
-replaying it. Both change settled KTD6 semantics, so this is a design call, not a mechanical fix.
+The user chose between the two available readings: the second window keeps rendering what it is
+showing, so KTD6 stands, but its pin is treated as stale and its next drop rebuilds from the
+registry instead of replaying the pin.
 
-### R2. Scrolling mid-drag is read as the tab-block collapse
+Fixed without adding any cross-window channel, because the second window can detect the reset
+locally. It records whether it has ever rendered while a non-empty stored order existed; if it then
+finds the stored order empty at drop time, that is somebody else's reset rather than the
+pre-first-drag state. It drops its pin, writes nothing, and re-sorts by recency on the next render.
+The drag that landed on the stale list is discarded once. The window that performed the reset clears
+the same flag, so its own next drag takes the ordinary first-drag path.
+
+Known limit of the signal: removing every repository that carried a manual position produces the
+same evidence as a reset, so one drag in a window that had rendered with that order would be
+discarded. It self-heals after that one gesture.
+
+### R2. Scrolling mid-drag was read as the tab-block collapse — **fixed**
 
 `app/src/workspace/view/repo_mode_model.rs` — from `adversarial`, P2, confidence 75.
-`autofix_class: manual`.
 
 The drag corrects for the selected repository's tab block collapsing by measuring how far the
-dragged row's slot moved between frames. A scroll during the drag moves every slot by the same
-mechanism, and the drag cannot tell the two apart, so a mid-drag scroll is absorbed as a collapse
-correction and the dragged rect reads at the wrong offset for the rest of the gesture.
+dragged row's slot moved between frames. A scroll moves every slot by the same mechanism, so a
+mid-drag scroll was absorbed as a collapse correction and the dragged rect read at the wrong offset
+for the rest of the gesture.
 
-Distinguishing them needs the scrollable's offset at each frame, which the drag does not currently
-receive. Not attempted here.
+Fixed by measuring the scroll off a row the collapse provably cannot move. The obvious candidate —
+the dragged row's neighbour, which the drag already holds — is wrong: two adjacent rows are almost
+always on the same side of the tab block, so a neighbour moves with the collapse exactly as the
+dragged row does, and subtracting it would cancel the correction the anchor exists to make. The
+list's *first* row works instead: `render_repo_tree` appends rows to one column in list order and
+inserts the tab block immediately after the selected repository's own row, so nothing at or above
+that row shifts when the block folds, and the first row is never below it. Whatever the first row
+does is therefore scrolling, and taking it back out leaves the collapse alone.
 
-### R3. `freeze_anchor` still loses the correction when a swap precedes the collapse render
+Boundaries, deliberate: when the dragged row *is* the first row the correction is identically zero,
+which is correct, since a first row is never below the block; and with no reference rect resolvable
+the drag behaves exactly as it did before.
+
+### R3. `freeze_anchor` lost the correction when a swap preceded the collapse render — **fixed**
 
 `app/src/workspace/view/repo_mode_model.rs` — from `adversarial`, P2, confidence 75.
 Reviewer's proposed fix was **rejected**; the underlying gap is real and stands.
@@ -65,8 +92,13 @@ selected — the measured delta is legitimately zero and never stored, so the pr
 producing one swap per frame. `test_a_slot_move_after_a_swap_is_not_read_as_the_tab_block_collapse`
 now pins that behavior and fails under the proposed change.
 
-A real fix requires the drag to tell swap-induced slot movement from frame-shift movement, rather
-than inferring the collapse from raw slot delta.
+Fixed the way that paragraph describes. A swap moves the slot by a knowable amount — the distance to
+the row it exchanges slots with, in a known direction — so `freeze_anchor` became `record_swap`,
+which accumulates that expected displacement instead of settling the anchor. What remains after
+subtracting it, and after subtracting the scroll from R2, is the collapse. The rejected no-op
+variant was re-checked and still breaks
+`test_a_slot_move_after_a_swap_is_not_read_as_the_tab_block_collapse`, which continues to pass under
+the fix that shipped.
 
 ---
 
@@ -101,15 +133,20 @@ The drag path rebuilds the entry list and re-sorts on each frame, and `set_manua
 every ordered path on each drop. Both are O(repositories) with a small constant on a list a person
 scrolls by hand. Recorded, not acted on; revisit only if a registry large enough to matter shows up.
 
-### R6. A resolving remote row visibly jumps from top to bottom
+### R6. A resolving remote row jumped from top to bottom — **fixed**
 
 `app/src/workspace/view/repo_mode_model.rs` — noticed while applying the pin unverified-first fix.
 
-That fix makes a "Connecting…" row sort to the top of the list as intended. The moment the key
-verifies it stops being unverified and falls back to its pin position — the appended slot, i.e.
-last. The row therefore jumps the full length of the list at connect time. This is consistent with
-R4 in the plan (a newly added repository appends), but the jump is now guaranteed rather than
-incidental, and on a long list it may read as the row disappearing.
+A "Connecting…" row sorts to the top of the list. The moment the key verified it stopped being
+unverified and fell back to its pin position — the appended slot, i.e. last — so the row jumped the
+full length of the list at connect time. Consistent with R4 in the plan (a newly added repository
+appends), but guaranteed rather than incidental, and on a long list it read as the row disappearing.
+
+Fixed by remembering which keys this window put on screen as connecting and joining those to the
+session pin at the *front* rather than the end, once. Every other newly appearing key still appends,
+which is R4 unchanged. `commit_remote_key` also rewrites the pin in place when the host expands a
+key into a different one, so the row the user watched connect keeps its slot instead of being
+retired from the pin and re-appended under its resolved name.
 
 ### R7. `repo_row_position_id` interpolates the full registry key
 
