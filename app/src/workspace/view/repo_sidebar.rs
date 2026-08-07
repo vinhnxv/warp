@@ -8,6 +8,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash as _, Hasher as _};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -16,6 +17,7 @@ use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::{Vector2F, vec2f};
 use repo_mode::{RemoteProbeFailure, RemoteProbeState, RepoEntryKind};
 use settings::Setting;
+use siphasher::sip::SipHasher;
 use warp_core::ui::Icon as WarpIcon;
 use warp_core::ui::theme::color::internal_colors;
 use warp_core::ui::theme::{AnsiColorIdentifier, Fill as ThemeFill};
@@ -125,8 +127,18 @@ impl RepoSidebarState {
 /// Keyed by registry path (KTD4) rather than list index: the index-keyed tab
 /// path carries a documented staleness hazard it has to rescan to recover
 /// from, and repo mode already uses the path as identity everywhere else.
+///
+/// The key is hashed rather than spelled out. A remote registry key is a whole
+/// SSH connection string — user, host, port, remote path, and the local path to
+/// a private key — and an element id is a plain string any diagnostic dump is
+/// free to print, so the id must not be the key. The hasher is fixed-key rather
+/// than randomly seeded because the drag's writer and every one of its readers
+/// resolve their ids through this function: agreement within one process run is
+/// the whole requirement, and a per-run `RandomState` would not even give that.
 pub(super) fn repo_row_position_id(path: &Path) -> String {
-    format!("repo_mode:row:{}", path.to_string_lossy())
+    let mut hasher = SipHasher::new_with_keys(0, 0);
+    path.hash(&mut hasher);
+    format!("repo_mode:row:{:016x}", hasher.finish())
 }
 
 /// Whether a repository row can be picked up.
@@ -568,20 +580,25 @@ fn wrap_entry_row_for_drag(
 ///
 /// A pure function so the two properties that matter can be asserted directly.
 ///
-/// **The row body is never destructive.** It used to dispatch
-/// `RemoveRepoModeEntry` for a dead entry, so a single unmodified left-click
-/// anywhere on the row permanently dropped the registry entry — no
-/// confirmation, no undo — and a repo on a briefly-unavailable network mount
-/// reads as dead. Removal now belongs to the row's own "Remove" button.
+/// **The row body is never destructive.** A dead row dispatches nothing, and
+/// removal is reachable only through the row's own "Remove" button. Dispatching
+/// `RemoveRepoModeEntry` from the body would make one unmodified left-click drop
+/// a registry entry with no confirmation and no undo — and a repo on a briefly
+/// unavailable network mount reads as dead, so that click would land on healthy
+/// repositories.
 ///
 /// **A drag never selects the repository it moves (R13).** Selecting spawns a
 /// terminal, and for a remote entry an SSH session, so a row that crossed the
-/// drag threshold must dispatch nothing. `Draggable` suppresses every child
-/// event for the life of a drag, and it has already stored `DragState::None` by
-/// the time a click could be delivered — so `is_dragging` is never `true` here
-/// at runtime, and it is the mouse-state reset in [`wrap_entry_row_for_drag`]
-/// that actually stops a pre-threshold press from completing into a click. This
-/// parameter states the rule so it stays asserted rather than assumed.
+/// drag threshold must dispatch nothing. What holds that at runtime is the
+/// mouse-state reset in [`wrap_entry_row_for_drag`], which clears the row body's
+/// recorded press the moment a drag starts;
+/// `a_repository_rows_body_and_its_drag_share_one_interaction_state` is what
+/// fails if the two sides stop addressing the same handle. `is_dragging` is
+/// never `true` here — `Draggable` suppresses every child event for the life of
+/// a drag and has stored `DragState::None` by the time a click could be
+/// delivered — so the parameter is the rule written down as a total function:
+/// the answer for a dragging row is pinned by a test rather than left to depend
+/// on that reset never regressing.
 fn repo_row_click_action(
     is_dragging: bool,
     is_dead: bool,
@@ -741,12 +758,12 @@ fn render_entry_row(
                 )
                 .finish(),
             );
-            // "Remove" is its own hit target. It used to be inert text on a row
-            // whose whole area dispatched `RemoveRepoModeEntry`, so a single
-            // left-click anywhere on the row deleted the registry entry with no
-            // confirmation and no undo. A repo on a briefly-unavailable network
-            // mount reads as dead, which made an ordinary click on a healthy
-            // repository destructive.
+            // "Remove" is its own hit target, and the only way to delete a
+            // registry entry from the sidebar. Deletion has no confirmation and
+            // no undo, so it must not be reachable from anywhere a click can
+            // land by accident — and a repo on a briefly unavailable network
+            // mount reads as dead, so the rows this button appears on are not
+            // reliably rows the user has finished with.
             top_row.add_child(render_header_button(
                 "Remove",
                 HeaderButtonRole::Danger,
@@ -939,9 +956,10 @@ pub(super) struct RowLabels {
 /// Clip a row's name and secondary line to the panel width, keeping the clipped
 /// text recoverable on hover.
 ///
-/// Only the remote `user@host` was clipped before, so a long repo name or a deep
-/// local path pushed the row wider than the panel — the sidebar is fixed-width,
-/// so the overflow was simply cut off with nothing to say it had been.
+/// Every string on the row goes through here, not just the remote `user@host`.
+/// The sidebar is fixed-width and does not scroll horizontally, so anything left
+/// unclipped — a long repo name, a deep local path — is cut off by the panel
+/// edge with nothing to say it had been.
 ///
 /// The secondary line is idempotent under this: a remote row arrives already
 /// clipped to the same budget by `remote_row_state`, so re-clipping it is a

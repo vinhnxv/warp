@@ -199,6 +199,49 @@ fn an_unverified_remote_row_is_the_only_row_that_cannot_be_dragged() {
     assert!(repo_row_is_draggable(&list_entry("/repo/a", None, false)));
 }
 
+/// A row's element id must not spell out the registry key it identifies. A
+/// remote key is a whole SSH connection string — user, host, port, remote path,
+/// and the local path to a private key — and an element id is a plain string any
+/// diagnostic dump is free to print, so the key is hashed into the id rather
+/// than interpolated.
+#[test]
+fn a_rows_position_id_carries_no_part_of_its_registry_key() {
+    let remote_key = "ssh://vinh@10.0.0.7:2222/srv/deploy?i=/Users/vinh/.ssh/id_ed25519";
+    let id = repo_row_position_id(Path::new(remote_key));
+
+    assert!(
+        id.starts_with("repo_mode:row:"),
+        "the id stays identifiable in a debugger: {id}"
+    );
+    for secret in [
+        "ssh://",
+        "vinh",
+        "10.0.0.7",
+        "2222",
+        "/srv/deploy",
+        ".ssh",
+        "id_ed25519",
+    ] {
+        assert!(
+            !id.contains(secret),
+            "{secret:?} of the connection reached the element id {id:?}"
+        );
+    }
+
+    assert_eq!(
+        id,
+        repo_row_position_id(Path::new(remote_key)),
+        "the writer and every reader resolve their id through this function, so \
+         one key has to answer with one id"
+    );
+    assert_ne!(
+        repo_row_position_id(Path::new("/repo/a")),
+        repo_row_position_id(Path::new("/repo/b")),
+        "two rows must not share a rect"
+    );
+    assert_ne!(id, repo_row_position_id(Path::new("/repo/a")));
+}
+
 /// An unverified remote row still publishes a position id, even though it
 /// cannot be dragged. A row with no published rect is invisible to the
 /// neighbour lookup, so an unwrapped one would clamp every drag that had to

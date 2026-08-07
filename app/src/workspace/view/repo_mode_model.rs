@@ -445,10 +445,11 @@ impl Workspace {
     /// the host resolved and closes the form; failure leaves nothing registered
     /// and hands the form back with the reason.
     ///
-    /// The pending row lives in the probe session, not the registry. Writing it
-    /// on submit made the registry mean "the user typed this", so a host that
-    /// never answered — or one the user cancelled — still came back after a
-    /// restart as an entry they never successfully connected to.
+    /// The pending row lives in the probe session, not the registry, because the
+    /// registry means "verified" (R9) and nothing is verified at submit time.
+    /// Writing the row on submit would make it mean "the user typed this", and a
+    /// host that never answered — or one the user cancelled out of — would come
+    /// back after a restart as an entry they never successfully connected to.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn add_remote_repo_mode_entry(
         &mut self,
@@ -1459,12 +1460,12 @@ impl Workspace {
     /// R12, but badges describe the repository, not the group). MRU tabs are
     /// consulted first so the badges track the terminal the user last touched.
     ///
-    /// One sweep for all entries, not one sweep per entry. The per-entry form
-    /// walked every tab and every pane looking for one repository, so a sidebar
-    /// with N entries over M panes did N×M terminal reads on every frame — and
-    /// nothing memoized it, because the underlying git state changes on its own
-    /// and a stale badge is worse than a recomputed one. Inverting the loop
-    /// makes it M reads per frame with no cache to go stale.
+    /// One sweep for all entries, not one sweep per entry. Asking per entry
+    /// walks every tab and every pane once per row, so a sidebar with N entries
+    /// over M panes costs N×M terminal reads on every frame — and none of it can
+    /// be memoized, because the underlying git state changes on its own and a
+    /// stale badge is worse than a recomputed one. Inverting the loop is M reads
+    /// per frame with no cache to go stale.
     ///
     /// Entries with no matching terminal are absent from the map; the caller
     /// reads a default for them.
@@ -1765,16 +1766,35 @@ async fn run_remote_probe(
         RemoteProbeFailure::SshUnavailable
     })?;
 
+    // The whole round trip shares one deadline, so the write cannot spend the
+    // budget the drain below is bounded by.
+    let started = Instant::now();
+    let mut script_written = false;
     if let Some(mut stdin) = child.stdin.take() {
-        if let Err(err) = stdin.write_all(script.as_bytes()).await {
-            log::warn!("repo_mode: failed to write the probe script to ssh: {err}");
-            return Err(RemoteProbeFailure::Unreachable);
+        // Bounded on its own account: this await sits *ahead* of the wall-clock
+        // bound, and a host that accepts the connection and then stops draining
+        // its end of the pipe would leave the probe with no bound at all — a
+        // probe that never returns never runs its result callback, so the
+        // session stays in flight and `begin_remote_probe` refuses every later
+        // reprobe of the key.
+        match stdin
+            .write_all(script.as_bytes())
+            .with_timeout(timeout)
+            .await
+        {
+            Ok(Ok(())) => script_written = true,
+            Ok(Err(err)) => log::warn!("repo_mode: failed to write the probe script to ssh: {err}"),
+            Err(_) => log::info!("repo_mode: writing the probe script to ssh timed out"),
         }
         // Closing stdin is what makes the remote shell run and exit.
         drop(stdin);
     }
 
-    let output = match child.output().with_timeout(timeout).await {
+    // A failed write is not a verdict, so the process is drained either way: an
+    // `ssh` that exits before the script lands breaks the pipe, and its stderr
+    // is the only thing that says which failure that was.
+    let remaining = timeout.saturating_sub(started.elapsed());
+    let output = match child.output().with_timeout(remaining).await {
         Ok(Ok(output)) => output,
         Ok(Err(err)) => {
             log::warn!("repo_mode: ssh probe failed: {err}");
@@ -1786,12 +1806,41 @@ async fn run_remote_probe(
         }
     };
 
-    if !output.status.success() {
-        return Err(classify_probe_failure(&String::from_utf8_lossy(
-            &output.stderr,
-        )));
+    classify_probe_process(
+        output.status.success(),
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+        script_written,
+    )
+}
+
+/// What a finished probe process resolved to, split out from the spawn so the
+/// classification is exercisable without an `ssh` to run.
+///
+/// `script_written` is whether the probe script reached `ssh`'s stdin. A write
+/// that fails is almost always `EPIPE` from an `ssh` that has already exited,
+/// which under `BatchMode=yes` is what an unknown or changed host key does
+/// within milliseconds of connecting — the stderr it exited with is exactly what
+/// [`classify_probe_failure`] turns into the actionable reason, so treating the
+/// broken pipe itself as the failure would report a live host as unreachable
+/// (R7). A zero exit with no script written is the one case nothing describes:
+/// the remote shell never ran the probe, so its stdout does not answer for the
+/// path.
+#[cfg(not(target_family = "wasm"))]
+fn classify_probe_process(
+    exit_success: bool,
+    stdout: &str,
+    stderr: &str,
+    script_written: bool,
+) -> Result<RemoteProbeOutcome, RemoteProbeFailure> {
+    if !exit_success {
+        return Err(classify_probe_failure(stderr));
     }
-    parse_probe_output(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
+    if !script_written {
+        log::warn!("repo_mode: the ssh probe exited without reading its script");
+        return Err(RemoteProbeFailure::Unreachable);
+    }
+    parse_probe_output(stdout).ok_or_else(|| {
         log::warn!("repo_mode: unreadable ssh probe output");
         RemoteProbeFailure::Unreachable
     })

@@ -2847,6 +2847,74 @@ fn probe_path_env_prefers_the_shell_path_and_replaces_an_empty_one() {
     }
 }
 
+/// R7: what the probe process exited with is the verdict, and a script that
+/// never reached `ssh` does not overrule it. `Host key verification failed.`
+/// under `BatchMode=yes` exits within milliseconds of connecting, breaking the
+/// pipe the script is still being written to — so a reachable host whose key
+/// needs clearing has to keep saying so rather than reading as unreachable.
+///
+/// The subprocess half is not exercisable from a unit test: it needs a real
+/// `ssh` and a host that rejects a key at the right moment. What is assertable
+/// is the classification the drained output feeds, which is the half that
+/// decides what the user is told.
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn a_probe_whose_script_never_landed_is_still_classified_from_its_stderr() {
+    assert_eq!(
+        classify_probe_process(false, "", "Host key verification failed.\r\n", false),
+        Err(RemoteProbeFailure::NeedsFirstHandConnect),
+        "a broken pipe must not bury the reason ssh actually exited with"
+    );
+    assert_eq!(
+        classify_probe_process(
+            false,
+            "",
+            "@@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@@",
+            false
+        ),
+        Err(RemoteProbeFailure::HostKeyChanged)
+    );
+    // The write outcome never changes what a non-zero exit means.
+    assert_eq!(
+        classify_probe_process(false, "", "Host key verification failed.\r\n", true),
+        Err(RemoteProbeFailure::NeedsFirstHandConnect)
+    );
+    assert_eq!(
+        classify_probe_process(
+            false,
+            "",
+            "ssh: connect to host port 22: Connection refused",
+            true
+        ),
+        Err(RemoteProbeFailure::Unreachable)
+    );
+
+    // A zero exit with no script written is the one case nothing describes: the
+    // remote shell never ran the probe, so its stdout does not answer for the
+    // path and must not resolve the entry.
+    assert_eq!(
+        classify_probe_process(true, "path /srv/app\nkind repo\n", "", false),
+        Err(RemoteProbeFailure::Unreachable)
+    );
+    assert_eq!(
+        classify_probe_process(true, "path /srv/app\nkind repo\nbranch main\n", "", true),
+        Ok(RemoteProbeOutcome::Found {
+            remote_path: "/srv/app".to_string(),
+            kind: RepoEntryKind::Repo,
+            branch: Some("main".to_string()),
+        })
+    );
+    assert_eq!(
+        classify_probe_process(true, "missing\n", "", true),
+        Ok(RemoteProbeOutcome::Missing)
+    );
+    assert_eq!(
+        classify_probe_process(true, "", "", true),
+        Err(RemoteProbeFailure::Unreachable),
+        "a clean exit that said nothing resolves nothing"
+    );
+}
+
 fn probe_target(path: &str) -> RemoteTarget {
     RemoteTarget {
         server: "10.0.0.7".to_string(),
