@@ -31,7 +31,9 @@ use warpui::ui_components::components::UiComponent;
 use warpui::{AppContext, SingletonEntity};
 
 use super::Workspace;
-use super::repo_mode_model::{RemoteListEntry, RepoModeEntryBadges, RepoModeListEntry};
+use super::repo_mode_model::{
+    RemoteListEntry, RepoModeEntryBadges, RepoModeListEntry, fs_probe_ttl,
+};
 use super::vertical_tabs::telemetry::VerticalTabsChipEntrypoint;
 use super::vertical_tabs::{
     METADATA_ROW_HEIGHT, VerticalTabsPanelState, render_git_branch_text, render_groups,
@@ -67,8 +69,11 @@ pub(super) struct RepoSidebarState {
     pub pr_badges: RefCell<HashMap<String, MouseStateHandle>>,
     /// Hover state for the "Remove" button on each dead repo row.
     pub remove_buttons: RefCell<HashMap<String, MouseStateHandle>>,
-    /// Cached branch per repo root, refreshed at most every `BRANCH_CACHE_TTL`.
-    pub branch_cache: RefCell<HashMap<String, (Instant, Option<String>)>>,
+    /// Cached branch per repo root. Each entry carries its own refresh
+    /// interval: `BRANCH_CACHE_TTL` normally, backed off to
+    /// `SLOW_MOUNT_CACHE_TTL` when the read that produced it was slow enough to
+    /// mean a stalled mount.
+    pub branch_cache: RefCell<HashMap<String, (Instant, Duration, Option<String>)>>,
 }
 
 impl RepoSidebarState {
@@ -1003,18 +1008,25 @@ pub(super) fn truncate_label(label: &str, budget: usize) -> String {
 /// Cheap enough to poll behind a short-lived cache; supports linked worktrees
 /// where `.git` is a file pointing at the real git dir.
 fn repo_branch(
-    cache: &RefCell<HashMap<String, (Instant, Option<String>)>>,
+    cache: &RefCell<HashMap<String, (Instant, Duration, Option<String>)>>,
     root: &Path,
 ) -> Option<String> {
     let key = root.to_string_lossy().into_owned();
     let now = Instant::now();
-    if let Some((refreshed_at, cached)) = cache.borrow().get(&key)
-        && now.duration_since(*refreshed_at) < BRANCH_CACHE_TTL
+    if let Some((refreshed_at, ttl, cached)) = cache.borrow().get(&key)
+        && now.duration_since(*refreshed_at) < *ttl
     {
         return cached.clone();
     }
     let branch = read_git_head_branch(root);
-    cache.borrow_mut().insert(key, (now, branch.clone()));
+    // Stamped from when the read *finished*: on a stalled mount `now` is already
+    // the full timeout in the past, so timing the TTL from it would expire the
+    // entry the moment it was written and re-read on the very next frame.
+    let refreshed_at = Instant::now();
+    let ttl = fs_probe_ttl(refreshed_at.duration_since(now), BRANCH_CACHE_TTL);
+    cache
+        .borrow_mut()
+        .insert(key, (refreshed_at, ttl, branch.clone()));
     branch
 }
 

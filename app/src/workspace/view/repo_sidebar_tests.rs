@@ -421,10 +421,10 @@ fn removing_an_entry_leaves_no_sidebar_state_behind() {
             .remove_buttons
             .borrow_mut()
             .insert(key.to_string(), MouseStateHandle::default());
-        state
-            .branch_cache
-            .borrow_mut()
-            .insert(key.to_string(), (Instant::now(), Some("main".to_string())));
+        state.branch_cache.borrow_mut().insert(
+            key.to_string(),
+            (Instant::now(), BRANCH_CACHE_TTL, Some("main".to_string())),
+        );
     }
 
     let live: HashSet<String> = ["/repo/a".to_string()].into_iter().collect();

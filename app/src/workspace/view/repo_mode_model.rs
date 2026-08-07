@@ -30,6 +30,31 @@ use warpui_core::r#async::FutureExt as _;
 /// mount would otherwise block the UI thread on every frame.
 const REPO_FS_CACHE_TTL: Duration = Duration::from_secs(5);
 
+/// A filesystem probe taking at least this long did not come off a local disk:
+/// a `stat` or a `.git/HEAD` read there is microseconds, and anything near this
+/// is a network or removable mount already stalling.
+pub(super) const SLOW_MOUNT_PROBE: Duration = Duration::from_millis(50);
+
+/// Refresh interval for a root whose last probe was slow. The ordinary TTL
+/// bounds how often a *healthy* mount is re-probed, but on a stalled one it
+/// bounds nothing that matters: the probe itself blocks the render thread for
+/// the mount's own timeout, so a 5-second TTL just means paying that timeout
+/// every 5 seconds, per row. Backing off trades a staler branch/liveness label
+/// on exactly those rows for a UI that keeps running.
+pub(super) const SLOW_MOUNT_CACHE_TTL: Duration = Duration::from_secs(300);
+
+/// How long to cache a filesystem probe, given how long the probe itself took.
+///
+/// Split out from the callers so the back-off is testable without a slow mount
+/// to point it at.
+pub(super) fn fs_probe_ttl(elapsed: Duration, healthy: Duration) -> Duration {
+    if elapsed >= SLOW_MOUNT_PROBE {
+        SLOW_MOUNT_CACHE_TTL
+    } else {
+        healthy
+    }
+}
+
 /// Wall-clock bound on one SSH probe (R6). A host that accepts the connection
 /// and then never answers must not leave the form hanging, so the whole round
 /// trip is capped regardless of what `ConnectTimeout` does.
@@ -260,15 +285,22 @@ impl Workspace {
                 // `.git`/exists() stats hit the disk; reuse the last probe
                 // within the TTL rather than re-statting on every render.
                 let (kind, is_dead) = match fs_cache.get(&key) {
-                    Some((probed_at, kind, dead))
-                        if now.duration_since(*probed_at) < REPO_FS_CACHE_TTL =>
-                    {
+                    Some((probed_at, ttl, kind, dead)) if now.duration_since(*probed_at) < *ttl => {
                         (*kind, *dead)
                     }
                     _ => {
+                        let started = Instant::now();
                         let kind = classify_entry_kind(&path).unwrap_or(RepoEntryKind::Folder);
                         let dead = is_dead_path(&path);
-                        fs_cache.insert(key, (now, kind, dead));
+                        // Stamped from when the probe *finished*: on a stalled
+                        // mount `started` is already the full timeout in the
+                        // past, so timing the TTL from it would expire the entry
+                        // the moment it was written and re-probe on the very
+                        // next frame.
+                        let probed_at = Instant::now();
+                        let ttl =
+                            fs_probe_ttl(probed_at.duration_since(started), REPO_FS_CACHE_TTL);
+                        fs_cache.insert(key, (probed_at, ttl, kind, dead));
                         (kind, dead)
                     }
                 };

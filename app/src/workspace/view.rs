@@ -1287,11 +1287,22 @@ pub struct Workspace {
     /// — the only `&self` path that sees the live registry every frame — is what
     /// drops a drag whose row another window has removed.
     repo_mode_row_drag: RefCell<Option<repo_mode_model::RepoModeRowDrag>>,
-    /// Cached (kind, is_dead) filesystem probes per repo root, refreshed at most
-    /// every `REPO_FS_CACHE_TTL`, so `repo_mode_entries` does not stat every
-    /// registered path on each render.
-    repo_mode_fs_cache:
-        RefCell<HashMap<String, (instant::Instant, repo_mode::RepoEntryKind, bool)>>,
+    /// Cached (kind, is_dead) filesystem probes per repo root, so
+    /// `repo_mode_entries` does not stat every registered path on each render.
+    /// Each entry carries its own TTL: `REPO_FS_CACHE_TTL` normally, backed off
+    /// to `SLOW_MOUNT_CACHE_TTL` when the probe that produced it was slow enough
+    /// to mean a stalled mount.
+    repo_mode_fs_cache: RefCell<
+        HashMap<
+            String,
+            (
+                instant::Instant,
+                std::time::Duration,
+                repo_mode::RepoEntryKind,
+                bool,
+            ),
+        >,
+    >,
     /// SSH probe session per remote entry key: the last result, plus the
     /// generation that owns it. Ephemeral by design (R11): remote entries are
     /// never polled for liveness, so this starts empty on every launch and a

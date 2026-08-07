@@ -4635,3 +4635,41 @@ fn test_a_path_borrow_that_answers_is_the_one_the_probe_uses() {
 
     assert_eq!(borrowed.as_deref(), Some("/opt/homebrew/bin"));
 }
+
+/// A probe that answers at local-disk speed keeps the ordinary refresh
+/// interval — the back-off must not make every healthy row go stale for five
+/// minutes.
+#[test]
+fn test_a_fast_probe_keeps_the_healthy_ttl() {
+    use std::time::Duration;
+
+    let healthy = Duration::from_secs(5);
+
+    assert_eq!(fs_probe_ttl(Duration::from_micros(80), healthy), healthy);
+    assert_eq!(
+        fs_probe_ttl(SLOW_MOUNT_PROBE - Duration::from_millis(1), healthy),
+        healthy
+    );
+}
+
+/// A probe slow enough to mean a stalled mount backs off, so the render thread
+/// pays that mount's timeout far less often than once per healthy TTL.
+#[test]
+fn test_a_slow_probe_backs_the_ttl_off() {
+    use std::time::Duration;
+
+    let healthy = Duration::from_secs(5);
+
+    assert_eq!(
+        fs_probe_ttl(SLOW_MOUNT_PROBE, healthy),
+        SLOW_MOUNT_CACHE_TTL
+    );
+    assert_eq!(
+        fs_probe_ttl(Duration::from_secs(90), healthy),
+        SLOW_MOUNT_CACHE_TTL
+    );
+    assert!(
+        SLOW_MOUNT_CACHE_TTL > healthy,
+        "backing off has to mean a longer interval, not a shorter one"
+    );
+}
