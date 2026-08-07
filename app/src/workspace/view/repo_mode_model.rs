@@ -73,6 +73,16 @@ pub struct RepoModeListEntry {
     /// Connection and probe state for a remote (SSH) entry; `None` for a local
     /// one.
     pub remote: Option<RemoteListEntry>,
+    /// Whether this row is a remote key whose first probe has not yet put it in
+    /// the registry — the registry is what "verified" means (R9).
+    ///
+    /// Not the same question as "is the probe pending". The probe cache is
+    /// per-window and runtime-only, so after a launch every registered remote
+    /// row reads pending; those keys are settled and persisted. Only a key that
+    /// is still absent from the registry is provisional, because the host can
+    /// expand it into a different key. Callers that care about key stability —
+    /// the drag gate, the top-of-list exception — must read this, not `probe`.
+    pub unverified: bool,
 }
 
 /// The remote half of a [`RepoModeListEntry`]: what machine it points at, and
@@ -191,7 +201,15 @@ impl Workspace {
             .map(|(path, last_opened_ts, added_ts)| {
                 let key = path.to_string_lossy().into_owned();
                 if is_remote_key(&key) {
-                    return remote_list_entry(key, path, last_opened_ts, added_ts, &remote_probes);
+                    let is_unverified = unverified.contains(&key);
+                    return remote_list_entry(
+                        key,
+                        path,
+                        last_opened_ts,
+                        added_ts,
+                        &remote_probes,
+                        is_unverified,
+                    );
                 }
                 // `.git`/exists() stats hit the disk; reuse the last probe
                 // within the TTL rather than re-statting on every render.
@@ -216,6 +234,8 @@ impl Workspace {
                     last_opened_ts,
                     added_ts,
                     remote: None,
+                    // Only remote keys are ever projected ahead of the registry.
+                    unverified: false,
                 }
             })
             .collect();
@@ -243,10 +263,10 @@ impl Workspace {
         // guarantee would hold only in a window that had never rendered.
         if !manual_order.is_empty() {
             entries.sort_by_key(|entry| {
-                let key = entry.path.to_string_lossy();
-                if unverified.contains(&*key) {
+                if entry.unverified {
                     return 0;
                 }
+                let key = entry.path.to_string_lossy();
                 manual_order
                     .iter()
                     .position(|ordered| *ordered == key)
@@ -272,10 +292,10 @@ impl Workspace {
             }
         }
         entries.sort_by_key(|e| {
-            let key = e.path.to_string_lossy();
-            if unverified.contains(&*key) {
+            if e.unverified {
                 return 0;
             }
+            let key = e.path.to_string_lossy();
             order
                 .iter()
                 .position(|k| *k == key)
@@ -1659,6 +1679,7 @@ fn remote_list_entry(
     last_opened_ts: Option<NaiveDateTime>,
     added_ts: NaiveDateTime,
     probes: &HashMap<String, RemoteProbeSession>,
+    unverified: bool,
 ) -> RepoModeListEntry {
     let Some(target) = parse_remote_key(&key) else {
         // Neither logged nor displayed. The key is the whole connection string —
@@ -1675,6 +1696,7 @@ fn remote_list_entry(
             last_opened_ts,
             added_ts,
             remote: None,
+            unverified,
         };
     };
     // No session means a row persisted by an older build that registered on
@@ -1694,6 +1716,7 @@ fn remote_list_entry(
         last_opened_ts,
         added_ts,
         remote: Some(RemoteListEntry { target, probe }),
+        unverified,
     }
 }
 

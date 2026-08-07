@@ -116,16 +116,21 @@ pub(super) fn repo_row_position_id(path: &Path) -> String {
 
 /// Whether a repository row can be picked up.
 ///
-/// R14: a remote row whose first probe has not resolved is not draggable. Its
-/// registry key is still provisional — the host can expand the path into a
-/// different key — so an order written against it would name a repository that
-/// is about to stop existing. A dead row is draggable on the same terms as any
-/// other (R12): its key is settled, only its path is unreachable.
+/// R14: a remote row that is not yet in the registry is not draggable. Its key
+/// is still provisional — the host can expand the path into a different key —
+/// so an order written against it would name a repository that is about to
+/// stop existing. A dead row is draggable on the same terms as any other
+/// (R12): its key is settled, only its path is unreachable.
+///
+/// This reads `unverified`, not the probe state, and the difference is the
+/// whole point. The probe cache is per-window and runtime-only, so after every
+/// app launch each registered remote row reads `Pending` until the user clicks
+/// it — and clicking a remote row with no tabs also force-opens one. Gating on
+/// `Pending` therefore made every remote row undraggable after a restart and
+/// made "make it draggable" mean "open a tab in it". A registered key is
+/// settled whether or not this window has probed it yet.
 pub(super) fn repo_row_is_draggable(entry: &RepoModeListEntry) -> bool {
-    !matches!(
-        entry.remote.as_ref().map(|remote| &remote.probe),
-        Some(RemoteProbeState::Pending)
-    )
+    !entry.unverified
 }
 
 /// Whether the selected repository's tab block renders this frame.

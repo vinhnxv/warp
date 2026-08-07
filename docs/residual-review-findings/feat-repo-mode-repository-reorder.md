@@ -122,12 +122,13 @@ diagnostic dump.
 
 ---
 
-## Found after review, in manual testing — not fixed
+## Found after review, in manual testing — fixed
 
-### R8. A registered remote row is not draggable until it is clicked once per app launch
+### R8. A registered remote row was not draggable until clicked once per app launch — **fixed**
 
-`app/src/workspace/view/repo_sidebar.rs:124` (`repo_row_is_draggable`). Reported by the user while
-dragging; confirmed by tracing the probe lifecycle. **This is a defect in this branch's feature.**
+`app/src/workspace/view/repo_sidebar.rs` (`repo_row_is_draggable`). Reported by the user while
+dragging; confirmed by tracing the probe lifecycle. This was a defect in this branch's feature, and
+it is recorded here because the reasoning is worth keeping, not because it is outstanding.
 
 R14 blocks a drag on `RemoteProbeState::Pending` because a remote key whose first probe has not
 resolved is still provisional — the host can expand the path into a different key, so an order
@@ -149,9 +150,15 @@ computes `unverified` as the probe keys absent from the registry, since the regi
 means (R9). `RepoModeListEntry` (`repo_mode_model.rs:64-76`) does not carry that flag, so
 `repo_row_is_draggable` cannot see it.
 
-Fix shape: carry `unverified` onto `RepoModeListEntry` from the set already computed at line 170,
-and gate on that instead of on `probe`. A registered entry then drags immediately even while
-`Pending`, and a genuinely in-flight first probe stays blocked exactly as R14 intends.
+Fixed by carrying `unverified` onto `RepoModeListEntry` from the set `repo_mode_entries` already
+computes, and gating on that instead of on `probe`. A registered entry now drags immediately even
+while `Pending`, and a genuinely in-flight first probe stays blocked exactly as R14 intends. The two
+top-of-list sort exceptions read the same field, so there is now one definition of "verified"
+instead of three lookups against the same set.
+
+The regression is pinned: `an_unverified_remote_row_is_the_only_row_that_cannot_be_dragged` fails on
+the registered-and-pending assertion if the gate is put back on `probe`, which was confirmed by
+reverting it.
 
 ---
 

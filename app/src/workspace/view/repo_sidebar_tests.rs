@@ -135,7 +135,8 @@ fn a_dead_rows_body_click_never_removes_the_entry() {
     ));
 }
 
-/// A registry row, as `repo_mode_entries` hands it to the sidebar.
+/// A registry row, as `repo_mode_entries` hands it to the sidebar. Registered,
+/// so its key is settled whatever the probe currently says.
 fn list_entry(path: &str, probe: Option<RemoteProbeState>, is_dead: bool) -> RepoModeListEntry {
     let now = chrono::Utc::now().naive_utc();
     RepoModeListEntry {
@@ -146,17 +147,34 @@ fn list_entry(path: &str, probe: Option<RemoteProbeState>, is_dead: bool) -> Rep
         last_opened_ts: Some(now),
         added_ts: now,
         remote: probe.map(remote),
+        unverified: false,
     }
 }
 
-/// Covers AE9/R14. A remote row whose first probe has not resolved cannot be
-/// picked up: its registry key is still provisional, so an order written
-/// against it would name a repository that is about to stop existing. A
-/// resolved row and a dead one are draggable on the same terms as any other
-/// (R12) — a dead row's key is settled, only its path is unreachable.
+/// A remote row projected into the list ahead of the registry: its first probe
+/// is still in flight, so the host may yet expand the key into a different one.
+fn unverified_entry(path: &str) -> RepoModeListEntry {
+    RepoModeListEntry {
+        unverified: true,
+        ..list_entry(path, Some(RemoteProbeState::Pending), false)
+    }
+}
+
+/// Covers AE9/R14. A remote row that is not yet in the registry cannot be
+/// picked up: its key is still provisional, so an order written against it
+/// would name a repository that is about to stop existing. A resolved row and a
+/// dead one are draggable on the same terms as any other (R12) — a dead row's
+/// key is settled, only its path is unreachable.
 #[test]
-fn a_pending_remote_row_is_the_only_row_that_cannot_be_dragged() {
-    assert!(!repo_row_is_draggable(&list_entry(
+fn an_unverified_remote_row_is_the_only_row_that_cannot_be_dragged() {
+    assert!(!repo_row_is_draggable(&unverified_entry(
+        "ssh://vinh@10.0.0.7/srv/app"
+    )));
+    // The regression this gate was rewritten for. The probe cache is per-window
+    // and empty at launch, so every registered remote row reads `Pending` until
+    // the user clicks it — and clicking one with no tabs also force-opens a tab.
+    // Its key is persisted and settled, so it drags.
+    assert!(repo_row_is_draggable(&list_entry(
         "ssh://vinh@10.0.0.7/srv/app",
         Some(RemoteProbeState::Pending),
         false
@@ -180,19 +198,15 @@ fn a_pending_remote_row_is_the_only_row_that_cannot_be_dragged() {
     assert!(repo_row_is_draggable(&list_entry("/repo/a", None, false)));
 }
 
-/// A pending remote row still publishes a position id, even though it cannot be
-/// dragged. A row with no published rect is invisible to the neighbour lookup,
-/// so an unwrapped pending row would clamp every drag that had to cross it —
-/// and a pending row sorts to the *top* of the list, where it would sit between
+/// An unverified remote row still publishes a position id, even though it
+/// cannot be dragged. A row with no published rect is invisible to the
+/// neighbour lookup, so an unwrapped one would clamp every drag that had to
+/// cross it — and it sorts to the *top* of the list, where it would sit between
 /// the first row and every row below it.
 #[test]
-fn a_pending_remote_row_still_publishes_a_position() {
+fn an_unverified_remote_row_still_publishes_a_position() {
     let entries = [
-        list_entry(
-            "ssh://vinh@10.0.0.7/srv/app",
-            Some(RemoteProbeState::Pending),
-            false,
-        ),
+        unverified_entry("ssh://vinh@10.0.0.7/srv/app"),
         list_entry("/repo/a", None, false),
         list_entry("/repo/b", None, false),
     ];

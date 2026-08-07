@@ -534,7 +534,14 @@ fn remote_row_is_pending_until_a_probe_resolves() {
     let now = Utc::now().naive_utc();
     let mut probes = HashMap::new();
 
-    let pending = remote_list_entry(key.clone(), PathBuf::from(&key), Some(now), now, &probes);
+    let pending = remote_list_entry(
+        key.clone(),
+        PathBuf::from(&key),
+        Some(now),
+        now,
+        &probes,
+        false,
+    );
     let remote = pending.remote.as_ref().expect("remote detail");
     assert_eq!(remote.probe, RemoteProbeState::Pending);
     assert_eq!(remote.target.user_host(), "vinh@10.0.0.7");
@@ -549,7 +556,14 @@ fn remote_row_is_pending_until_a_probe_resolves() {
             branch: Some("main".to_string()),
         }),
     );
-    let resolved = remote_list_entry(key.clone(), PathBuf::from(&key), Some(now), now, &probes);
+    let resolved = remote_list_entry(
+        key.clone(),
+        PathBuf::from(&key),
+        Some(now),
+        now,
+        &probes,
+        false,
+    );
     assert_eq!(resolved.kind, RepoEntryKind::Repo);
     assert_eq!(
         resolved.remote.expect("remote detail").probe,
@@ -565,7 +579,14 @@ fn remote_row_is_pending_until_a_probe_resolves() {
             reason: repo_mode::RemoteProbeFailure::Unreachable,
         }),
     );
-    let failed = remote_list_entry(key.clone(), PathBuf::from(&key), Some(now), now, &probes);
+    let failed = remote_list_entry(
+        key.clone(),
+        PathBuf::from(&key),
+        Some(now),
+        now,
+        &probes,
+        false,
+    );
     assert!(!failed.is_dead);
     assert_eq!(failed.kind, RepoEntryKind::Folder);
 }
@@ -583,6 +604,7 @@ fn unparseable_remote_row_is_dead() {
         Some(now),
         now,
         &HashMap::new(),
+        false,
     );
     assert!(entry.remote.is_none());
     assert!(entry.is_dead);
@@ -1244,6 +1266,63 @@ fn test_a_pending_remote_row_stays_above_the_manual_order() {
                 rendered_order(workspace, ctx),
                 [key.as_str(), "/repo/a", "/repo/b", "/repo/c"]
             );
+        });
+    });
+}
+
+/// Covers R14. `unverified` is what separates a provisional key from a settled
+/// one, and it is not the same question as "is the probe pending".
+///
+/// The probe cache is per-window and runtime-only, so after a launch every
+/// registered remote row reads `Pending`. Those keys are persisted and settled.
+/// Only a key the registry has never accepted can still be expanded into a
+/// different one by the host, and only that row must refuse a drag — otherwise
+/// every remote row is undraggable after every restart, and the only way to
+/// free one is to click it, which also force-opens a tab in it.
+#[test]
+fn test_only_a_row_the_registry_has_not_accepted_is_unverified() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let registered = probe_target("/srv/registered").key();
+    let in_flight = probe_target("/srv/in-flight").key();
+    let now = Utc::now().naive_utc();
+    let projects = vec![Project {
+        path: registered.clone(),
+        added_ts: now,
+        last_opened_ts: Some(now),
+        manual_position: None,
+    }];
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, projects);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            // Both keys are pending: the registered one because this launch has
+            // not probed it, the other because its first probe is in flight.
+            workspace.restart_remote_probe(&in_flight);
+
+            let entries = workspace.repo_mode_entries(ctx);
+            let unverified_for = |key: &str| {
+                entries
+                    .iter()
+                    .find(|entry| entry.path.to_string_lossy() == key)
+                    .map(|entry| entry.unverified)
+            };
+
+            for key in [&registered, &in_flight] {
+                let entry = entries
+                    .iter()
+                    .find(|entry| entry.path.to_string_lossy() == *key)
+                    .expect("both rows render");
+                assert_eq!(
+                    entry.remote.as_ref().expect("remote detail").probe,
+                    RemoteProbeState::Pending,
+                    "same probe state on both rows, which is why the gate cannot read it"
+                );
+            }
+
+            assert_eq!(unverified_for(&registered), Some(false));
+            assert_eq!(unverified_for(&in_flight), Some(true));
         });
     });
 }
@@ -2495,6 +2574,11 @@ fn test_a_persisted_but_never_verified_row_renders_unresolved() {
             assert_eq!(remote.probe, RemoteProbeState::Pending);
             assert_eq!(remote.probe.kind(), None, "it has resolved to nothing");
             assert!(!entries[0].is_dead, "and it is not the dead-path state");
+            assert!(
+                !entries[0].unverified,
+                "the key is in the registry, so it is settled and the row can be \
+                 reordered — only this window's probe of it is stale (R14)"
+            );
 
             // Touching it is what refreshes it (R11), and that is a probe the
             // key did not previously have.
