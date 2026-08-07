@@ -1,3 +1,4 @@
+pub(crate) mod agent_cli_launch_modal;
 pub(crate) mod auto_handoff_sleep_modal;
 mod build_plan_migration_modal;
 pub(crate) mod cloud_agent_capacity_modal;
@@ -438,7 +439,7 @@ use crate::terminal::view::{
 };
 use crate::terminal::warpify::settings::WarpifySettings;
 use crate::terminal::{self, BlockListSettings, SizeInfo, TerminalModel, TerminalView};
-use crate::themes::theme::{AnsiColorIdentifier, Blend, RespectSystemTheme, ThemeKind};
+use crate::themes::theme::{AnsiColorIdentifier, RespectSystemTheme, ThemeKind};
 use crate::themes::theme_chooser::{ThemeChooser, ThemeChooserEvent, ThemeChooserMode};
 use crate::themes::theme_creator_modal::{ThemeCreatorModal, ThemeCreatorModalEvent};
 use crate::themes::theme_deletion_modal::{ThemeDeletionModal, ThemeDeletionModalEvent};
@@ -511,6 +512,9 @@ use crate::workspace::tab_group::{TabGroup, TabGroupId};
 use crate::workspace::tab_settings::TabCloseButtonPosition;
 use crate::workspace::toast_stack::{
     ToastStack, ToastStack as WorkspaceToastStack, ToastStackEvent as WorkspaceToastStackEvent,
+};
+use crate::workspace::view::agent_cli_launch_modal::{
+    AgentCliLaunchModal, AgentCliLaunchModalEvent,
 };
 use crate::workspace::view::auto_handoff_sleep_modal::{
     AutoHandoffSleepModal, AutoHandoffSleepModalEvent,
@@ -598,7 +602,6 @@ const THEME_CHOOSER_RATIO: f32 = 3.5;
 /// Save position for the tab bar.
 pub(crate) const TAB_BAR_POSITION_ID: &str = "workspace_view:tab_bar";
 const TEAM_SWITCHER_PILL_POSITION_ID: &str = "workspace_view:team_switcher_pill";
-const TEAM_HEADER_TINT_ALPHA: u8 = 96;
 const TEAM_SWITCHER_DOT_ALPHA: u8 = 204;
 
 /// Save position for the vertical tabs panel.
@@ -1191,6 +1194,7 @@ pub struct Workspace {
     oz_launch_modal: ModalWithTab<LaunchModal<OzLaunchSlide>>,
     openwarp_launch_modal: ViewHandle<OpenWarpLaunchModal>,
     orchestration_launch_modal: ViewHandle<OrchestrationLaunchModal>,
+    agent_cli_launch_modal: ViewHandle<AgentCliLaunchModal>,
     feature_intro_modal: ViewHandle<FeatureIntroModal>,
     /// Tab that first received the feature-intro popover. The popover stays
     /// pinned to this tab for the rest of its lifetime so switching tabs does
@@ -3249,6 +3253,11 @@ impl Workspace {
             me.handle_orchestration_launch_modal_event(event, ctx);
         });
 
+        let agent_cli_launch_view = ctx.add_typed_action_view(AgentCliLaunchModal::new);
+        ctx.subscribe_to_view(&agent_cli_launch_view, |me, _, event, ctx| {
+            me.handle_agent_cli_launch_modal_event(event, ctx);
+        });
+
         let feature_intro_view = ctx.add_typed_action_view(FeatureIntroModal::new);
         ctx.subscribe_to_view(&feature_intro_view, |me, _, event, ctx| {
             me.handle_feature_intro_modal_event(event, ctx);
@@ -3582,6 +3591,8 @@ impl Workspace {
                         me.focus_openwarp_launch_modal(ctx);
                     } else if model_ref.is_orchestration_launch_modal_open() {
                         me.focus_orchestration_launch_modal(ctx);
+                    } else if model_ref.is_agent_cli_launch_modal_open() {
+                        me.focus_agent_cli_launch_modal(ctx);
                     } else if model_ref.is_auto_handoff_sleep_modal_open() {
                         me.focus_auto_handoff_sleep_modal(ctx);
                     } else if model_ref.is_free_ai_removal_modal_open() {
@@ -3750,6 +3761,7 @@ impl Workspace {
             },
             openwarp_launch_modal: openwarp_launch_view,
             orchestration_launch_modal: orchestration_launch_view,
+            agent_cli_launch_modal: agent_cli_launch_view,
             feature_intro_modal: feature_intro_view,
             feature_intro_tab_pane_group_id: None,
             auto_handoff_sleep_modal: auto_handoff_sleep_view,
@@ -6766,6 +6778,7 @@ impl Workspace {
                     LocalOrRemotePath::Local(path.clone()),
                     session,
                     layout,
+                    Some(code_source),
                     ctx,
                 );
             }
@@ -6879,7 +6892,13 @@ impl Workspace {
                             // Jupyter notebook) instead of always opening remote
                             // files as raw code in the editor.
                             if let FileTarget::MarkdownViewer(layout) = target {
-                                self.open_file_notebook(location.clone(), None, *layout, ctx);
+                                self.open_file_notebook(
+                                    location.clone(),
+                                    None,
+                                    *layout,
+                                    Some(code_source),
+                                    ctx,
+                                );
                             } else {
                                 self.open_code(
                                     code_source,
@@ -6946,7 +6965,7 @@ impl Workspace {
                     line_col,
                     CodeSource::Link {
                         path,
-                        range_start: None,
+                        range_start: line_col,
                         range_end: None,
                     },
                     ctx,
@@ -9009,6 +9028,7 @@ impl Workspace {
         path: LocalOrRemotePath,
         session: Option<Arc<Session>>,
         layout: EditorLayout,
+        code_source: Option<CodeSource>,
         ctx: &mut ViewContext<Self>,
     ) {
         let existing_file_pane = {
@@ -9029,11 +9049,14 @@ impl Workspace {
             });
             return;
         }
+        // The notebook viewer renders markdown rather than raw lines, but it
+        // hands this source back when the user toggles to the raw code view, so
+        // keeping it preserves the requested line for that view.
         let pane = FilePane::new(
             Some(path),
             session,
             #[cfg(feature = "local_fs")]
-            None,
+            code_source,
             ctx,
         );
 
@@ -11113,7 +11136,7 @@ impl Workspace {
                     *line_col,
                     CodeSource::Link {
                         path: path.clone(),
-                        range_start: None,
+                        range_start: *line_col,
                         range_end: None,
                     },
                     ctx,
@@ -13554,7 +13577,7 @@ impl Workspace {
     ) {
         let source = CodeSource::Link {
             path: file_path,
-            range_start: None,
+            range_start: line_and_column,
             range_end: None,
         };
         let pane = CodePane::new(source, line_and_column, ctx);
@@ -16704,7 +16727,7 @@ impl Workspace {
                 #[cfg(feature = "local_fs")]
                 {
                     let layout = *EditorSettings::as_ref(ctx).open_file_layout.value();
-                    self.open_file_notebook(path.clone(), Some(session.clone()), layout, ctx);
+                    self.open_file_notebook(path.clone(), Some(session.clone()), layout, None, ctx);
                 }
             }
             pane_group::Event::MoveToSpace {
@@ -17597,7 +17620,11 @@ impl Workspace {
                     *line_col,
                     CodeSource::Link {
                         path: path.clone(),
-                        range_start: None,
+                        // Keep the requested line on the source: consumers that
+                        // re-derive the jump target from the `CodeSource` (e.g.
+                        // `CodePane::pre_attach`) would otherwise open the file
+                        // at the top instead of the requested line.
+                        range_start: *line_col,
                         range_end: None,
                     },
                     ctx,
@@ -19523,6 +19550,22 @@ impl Workspace {
             OrchestrationLaunchModalEvent::Close => {
                 OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
                     model.mark_orchestration_launch_modal_dismissed(ctx);
+                });
+                self.focus_active_tab(ctx);
+                ctx.notify();
+            }
+        }
+    }
+
+    fn handle_agent_cli_launch_modal_event(
+        &mut self,
+        event: &AgentCliLaunchModalEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match event {
+            AgentCliLaunchModalEvent::Close => {
+                OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                    model.mark_agent_cli_launch_modal_dismissed(ctx);
                 });
                 self.focus_active_tab(ctx);
                 ctx.notify();
@@ -21894,7 +21937,7 @@ impl Workspace {
         let tab_bar_border =
             Border::bottom(TAB_BAR_BORDER_HEIGHT).with_border_fill(appearance.theme().outline());
 
-        let mut tab_bar_container = Container::new(
+        let tab_bar_element = Container::new(
             EventHandler::new(Clipped::new(self.render_tab_bar_hoverable(bar_contents)).finish())
                 .on_back_mouse_down(move |ctx, _app, _position| {
                     ctx.dispatch_typed_action(WorkspaceAction::ActivatePrevTab);
@@ -21906,31 +21949,8 @@ impl Workspace {
                 })
                 .finish(),
         )
-        .with_border(tab_bar_border);
-        let is_multi_team = UserWorkspaces::as_ref(ctx).can_switch_teams();
-        let team_color = is_multi_team
-            .then(|| UserWorkspaces::as_ref(ctx).team_for_window(self.window_id))
-            .flatten()
-            .and_then(|team| team.color.as_deref())
-            .and_then(|hex| warp_core::ui::color::hex_color::coloru_from_hex_string(hex).ok())
-            .map(|mut color| {
-                color.a = TEAM_HEADER_TINT_ALPHA;
-                color
-            });
-        let background = if FeatureFlag::NewTabStyling.is_enabled() {
-            let base = internal_colors::fg_overlay_1(appearance.theme());
-            Some(
-                team_color
-                    .map(|color| base.blend(&Fill::Solid(color)))
-                    .unwrap_or(base),
-            )
-        } else {
-            team_color.map(Fill::Solid)
-        };
-        if let Some(background) = background {
-            tab_bar_container = tab_bar_container.with_background(background);
-        }
-        let tab_bar_element = tab_bar_container.finish();
+        .with_border(tab_bar_border)
+        .finish();
 
         let dimming_color = appearance.theme().background().into();
         SavePosition::new(
@@ -24201,6 +24221,10 @@ impl Workspace {
         ctx.focus(&self.orchestration_launch_modal);
     }
 
+    fn focus_agent_cli_launch_modal(&mut self, ctx: &mut ViewContext<Self>) {
+        ctx.focus(&self.agent_cli_launch_modal);
+    }
+
     fn show_feature_intro_modal(&mut self, id: FeatureIntroId, ctx: &mut ViewContext<Self>) {
         // Non-blocking popover: set the descriptor but intentionally do NOT focus it,
         // so the terminal and input stay usable while it is visible. Pin to the
@@ -26444,6 +26468,34 @@ impl TypedActionView for Workspace {
                 );
             }
             #[cfg(debug_assertions)]
+            OpenAgentCliLaunchModal => {
+                OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                    model.force_open_agent_cli_launch_modal(ctx);
+                });
+                ctx.notify();
+            }
+            #[cfg(debug_assertions)]
+            ResetAgentCliLaunchModalState => {
+                let old_value =
+                    *AISettings::as_ref(ctx).did_check_to_trigger_agent_cli_launch_modal;
+                AISettings::handle(ctx).update(ctx, |ai_settings, ctx| {
+                    if let Err(e) = ai_settings
+                        .did_check_to_trigger_agent_cli_launch_modal
+                        .set_value(false, ctx)
+                    {
+                        log::warn!(
+                            "Failed to reset Warp Agent CLI launch modal dismissed setting: {e}"
+                        );
+                    }
+                });
+                let new_value =
+                    *AISettings::as_ref(ctx).did_check_to_trigger_agent_cli_launch_modal;
+                log::info!(
+                    "Warp Agent CLI launch modal state: old={old_value}, new={new_value}, feature_flag_enabled={}",
+                    FeatureFlag::AgentCliLaunchModal.is_enabled()
+                );
+            }
+            #[cfg(debug_assertions)]
             OpenFreeAiRemovalModal => {
                 OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
                     model.force_open_free_ai_removal_modal(ctx);
@@ -27909,6 +27961,10 @@ impl View for Workspace {
             stack.add_child(ChildView::new(&self.orchestration_launch_modal).finish());
         }
 
+        if should_show_modal && one_time_modal_model.is_agent_cli_launch_modal_open() {
+            stack.add_child(ChildView::new(&self.agent_cli_launch_modal).finish());
+        }
+
         if should_show_modal && one_time_modal_model.is_auto_handoff_sleep_modal_open() {
             stack.add_child(ChildView::new(&self.auto_handoff_sleep_modal).finish());
         }
@@ -28225,7 +28281,9 @@ impl View for Workspace {
             );
         }
 
-        let window_corner_radius = app.windows().window_corner_radius();
+        let window_corner_radius = app
+            .windows()
+            .window_corner_radius_for_window(self.window_id);
         let workspace = Container::new(stack.finish()).with_corner_radius(window_corner_radius);
 
         let mut stack = Stack::new();
