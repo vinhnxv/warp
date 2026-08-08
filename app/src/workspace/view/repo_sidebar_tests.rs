@@ -350,6 +350,111 @@ fn the_tab_block_folds_away_while_a_repository_row_is_dragged() {
     assert!(!repo_tab_block_visible(false, false));
 }
 
+// ---------- Collapsed-row activity rollup (R1/R2/R4/R5/R6) ----------
+
+fn activity(any_unread: bool, any_synced: bool) -> RepoRowActivity {
+    RepoRowActivity {
+        any_unread,
+        any_synced,
+    }
+}
+
+/// A collapsed row stands in for the tabs it hides, so unread activity down
+/// there has to surface up here. The link icon is a separate question and is
+/// not answered by unread alone.
+#[test]
+fn a_collapsed_row_with_unread_activity_shows_the_dot_alone() {
+    let indicators = repo_row_indicators(false, false, true, activity(true, false));
+    assert_eq!(
+        indicators,
+        RepoRowIndicators {
+            synced: false,
+            unread: true,
+        }
+    );
+}
+
+/// The link icon follows the same setting the nested rows follow, so the
+/// rollup must read it rather than showing the icon unconditionally.
+#[test]
+fn a_collapsed_row_with_synced_inputs_shows_the_link_icon_when_indicators_are_on() {
+    let indicators = repo_row_indicators(false, false, true, activity(false, true));
+    assert_eq!(
+        indicators,
+        RepoRowIndicators {
+            synced: true,
+            unread: false,
+        }
+    );
+}
+
+/// Turning tab indicators off must silence only the link icon: the unread dot
+/// is ungated everywhere else it renders, and the rollup mirrors that.
+#[test]
+fn disabling_tab_indicators_hides_the_link_icon_but_not_the_dot() {
+    let indicators = repo_row_indicators(false, false, false, activity(true, true));
+    assert_eq!(
+        indicators,
+        RepoRowIndicators {
+            synced: false,
+            unread: true,
+        }
+    );
+}
+
+/// An expanded row's tabs carry their own indicators, so a rollup on the
+/// parent would double-report the same state one row apart.
+#[test]
+fn an_expanded_row_shows_neither_indicator() {
+    assert_eq!(
+        repo_row_indicators(false, true, true, activity(true, true)),
+        RepoRowIndicators::default()
+    );
+}
+
+/// A dead row's trailing edge belongs to its "Remove" button. Nothing may be
+/// added there — a mis-aimed click deletes a registry entry with no undo.
+#[test]
+fn a_dead_row_shows_neither_indicator() {
+    assert_eq!(
+        repo_row_indicators(true, false, true, activity(true, true)),
+        RepoRowIndicators::default()
+    );
+    // Dead wins over selected too — a dead row can be the selected one.
+    assert_eq!(
+        repo_row_indicators(true, true, true, activity(true, true)),
+        RepoRowIndicators::default()
+    );
+}
+
+/// An entry with no bound tabs is absent from the rollup map, and the caller
+/// reads a default for it. That default must render as a quiet row, not as a
+/// row that happens to look quiet by accident.
+#[test]
+fn a_row_with_no_activity_matches_a_row_with_no_entry_in_the_map() {
+    assert_eq!(
+        repo_row_indicators(false, false, true, activity(false, false)),
+        repo_row_indicators(false, false, true, RepoRowActivity::default())
+    );
+    assert_eq!(
+        repo_row_indicators(false, false, true, RepoRowActivity::default()),
+        RepoRowIndicators::default()
+    );
+}
+
+/// Both flags are independent — one must not mask the other.
+#[test]
+fn a_collapsed_row_can_show_both_indicators_at_once() {
+    let indicators = repo_row_indicators(false, false, true, activity(true, true));
+    assert_eq!(
+        indicators,
+        RepoRowIndicators {
+            synced: true,
+            unread: true,
+        }
+    );
+}
+
 /// Covers AE8/R13's actual mechanism. `repo_row_click_action`'s `is_dragging`
 /// parameter is never `true` at runtime; what stops a released drag from also
 /// selecting the repository — and spawning a terminal, and for a remote entry an

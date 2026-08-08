@@ -3509,7 +3509,10 @@ fn has_unread_activity(typed: &TypedPane<'_>, app: &AppContext) -> bool {
     has_unread_activity_for_terminal_view(terminal_view.as_ref(app).id(), app)
 }
 
-fn has_unread_activity_for_terminal_view(terminal_view_id: EntityId, app: &AppContext) -> bool {
+pub(super) fn has_unread_activity_for_terminal_view(
+    terminal_view_id: EntityId,
+    app: &AppContext,
+) -> bool {
     AgentNotificationsModel::as_ref(app)
         .notifications()
         .has_unread_for_terminal_view(terminal_view_id)
@@ -3532,7 +3535,7 @@ fn render_title_indicator(theme: &WarpTheme) -> Box<dyn Element> {
 /// horizontal tab bar's `Indicator::Synced` gating in `tab.rs`: the row's tab is
 /// receiving broadcast keystrokes and tab indicators are enabled. Restricted to
 /// terminal rows because syncing only broadcasts to terminal panes.
-fn shows_synced_inputs_indicator(
+pub(super) fn shows_synced_inputs_indicator(
     is_terminal_row: bool,
     are_inputs_synced: bool,
     show_tab_indicators: bool,
@@ -3565,7 +3568,7 @@ fn render_synced_inputs_indicator() -> Box<dyn Element> {
 /// Row title line with its trailing indicators — the synchronized-inputs link
 /// icon followed by the unread-activity dot — pinned to the right edge. Returns
 /// `title` untouched when the row has no indicator to show.
-fn render_row_title_line(
+pub(super) fn render_row_title_line(
     title: Box<dyn Element>,
     shows_synced_inputs: bool,
     shows_activity_indicator: bool,

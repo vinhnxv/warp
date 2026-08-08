@@ -83,6 +83,51 @@ fn dir_launch_omits_line_and_column() {
     );
 }
 
+// ---------- JetBrains path conversion ----------
+
+// A path that is not valid UTF-8 must not panic. macOS mounts volumes it does
+// not police (exFAT, FAT32, SMB, NFS), so such a path can reach the launcher.
+#[test]
+fn jetbrains_command_does_not_panic_on_non_utf8_path() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::PathBuf;
+
+    let path = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff\xfeinvalid.rs"));
+
+    let (method, args) = Editor::jetbrains_command("idea", None, &path);
+    assert!(
+        matches!(method, OpenFileInEditorMethod::Binary(_)),
+        "expected a binary launch method, got {method:?}"
+    );
+    assert_eq!(args.len(), 1, "expected just the path, got {args:?}");
+    assert!(
+        args[0].contains('\u{fffd}'),
+        "expected the invalid bytes to be replaced lossily, got {args:?}"
+    );
+}
+
+#[test]
+fn jetbrains_command_orders_line_flag_before_path() {
+    use std::path::Path;
+
+    let path = Path::new("/tmp/hello.rs");
+    let line_col = Some(LineAndColumnArg {
+        line_num: 42,
+        column_num: Some(7),
+    });
+
+    let (_, args) = Editor::jetbrains_command("idea", line_col, path);
+    assert_eq!(
+        args,
+        vec![
+            "--line".to_string(),
+            "42".to_string(),
+            "/tmp/hello.rs".to_string(),
+        ]
+    );
+}
+
 // A regular file must still go through the URL-scheme path — the folder branch
 // must not swallow files.
 #[test]

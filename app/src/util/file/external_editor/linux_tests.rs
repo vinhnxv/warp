@@ -110,8 +110,11 @@ fn test_unterminated_quote_errors() {
     )
 }
 
+/// R7: an Exec carrying no path field code would launch the editor on
+/// nothing. Building the command has to fail so the caller can fall back,
+/// rather than opening an empty window and reporting success.
 #[test]
-fn test_basic_exec_no_field_codes() {
+fn test_exec_with_no_path_field_code_errors() {
     let data = r#"
     [Desktop Entry]
     Version=1.0
@@ -119,15 +122,41 @@ fn test_basic_exec_no_field_codes() {
     Exec=/usr/bin/editor --flag
     "#;
     with_files(
-        "test_basic_exec_no_field_codes",
+        "test_exec_with_no_path_field_code_errors",
         data,
         |desktop, content| {
             let metadata = EditorMetadata::try_new(desktop)?;
             let result = metadata.build_default_command(&content);
+            assert!(matches!(result, Err(DesktopExecError::NoTargetPath)));
+            Ok(())
+        },
+    )
+}
+
+/// Literal arguments around the path still survive — the new check rejects a
+/// missing path, not a command that also carries flags.
+#[test]
+fn test_literal_arguments_survive_alongside_the_path() {
+    let data = r#"
+    [Desktop Entry]
+    Version=1.0
+    Type=Application
+    Exec=/usr/bin/editor --flag %f
+    "#;
+    with_files(
+        "test_literal_arguments_survive_alongside_the_path",
+        data,
+        |desktop, content| {
+            let metadata = EditorMetadata::try_new(desktop)?;
+            let file_name = content.display().to_string();
+            let result = metadata.build_default_command(&content);
             assert!(result.is_ok());
             let cmd = result.unwrap();
             assert_eq!(cmd.get_program(), "/usr/bin/editor");
-            assert_eq!(cmd.get_args().collect::<Vec<_>>(), ["--flag"]);
+            assert_eq!(
+                cmd.get_args().collect::<Vec<_>>(),
+                ["--flag", file_name.as_str()]
+            );
             Ok(())
         },
     )
@@ -227,12 +256,13 @@ fn test_field_code_substitutions() {
     [Desktop Entry]
     Version=1.0
     Type=Application
-    Exec=/usr/bin/app %c %i %k %%
+    Exec=/usr/bin/app %c %i %k %% %f
     Name=Warp Test Application
     Icon=/foo/bar/icon.png
     "#;
     with_files("test_field_code_substitutions", data, |desktop, content| {
         let desktop_file_path = desktop.display().to_string();
+        let file_name = content.display().to_string();
         let metadata = EditorMetadata::try_new(desktop)?;
         let result = metadata.build_default_command(&content);
 
@@ -249,6 +279,7 @@ fn test_field_code_substitutions() {
                 "/foo/bar/icon.png",
                 desktop_file_path.as_str(),
                 "%",
+                file_name.as_str(),
             ]
         );
         Ok(())
@@ -734,4 +765,185 @@ fn test_folder_command_zed_uses_binary_without_position() {
         command.get_args().collect::<Vec<_>>(),
         ["-f", binary_path.as_str(), "/home/user/my-project"]
     );
+}
+
+// ---------- A command that never received the target path (R7) ----------
+
+/// `%c` expands to the localized application name, not a path. An Exec whose
+/// only field code is `%c` launches the editor on nothing.
+#[test]
+fn test_exec_with_only_a_non_path_field_code_errors() {
+    let data = r#"
+    [Desktop Entry]
+    Version=1.0
+    Type=Application
+    Exec=/usr/bin/editor %c
+    Name=Warp Test Application
+    "#;
+    with_files(
+        "test_exec_with_only_a_non_path_field_code_errors",
+        data,
+        |desktop, content| {
+            let metadata = EditorMetadata::try_new(desktop)?;
+            let result = metadata.build_default_command(&content);
+            assert!(matches!(result, Err(DesktopExecError::NoTargetPath)));
+            Ok(())
+        },
+    )
+}
+
+/// `%u` resolves through `canonicalize`, which fails for a path that does not
+/// exist — the substitution is dropped and nothing else supplies the path.
+#[test]
+fn test_exec_with_a_url_field_code_for_a_missing_path_errors() {
+    let data = r#"
+    [Desktop Entry]
+    Version=1.0
+    Type=Application
+    Exec=/usr/bin/editor %u
+    "#;
+    with_files(
+        "test_exec_with_a_url_field_code_for_a_missing_path_errors",
+        data,
+        |desktop, content| {
+            let metadata = EditorMetadata::try_new(desktop)?;
+            let missing = content.with_file_name("does-not-exist.txt");
+            let result = metadata.build_default_command(&missing);
+            assert!(matches!(result, Err(DesktopExecError::NoTargetPath)));
+            Ok(())
+        },
+    )
+}
+
+/// A literal `%%` is an escaped percent sign in the argument list, not a path
+/// substitution, so it cannot satisfy the check on its own.
+#[test]
+fn test_exec_with_only_a_literal_percent_errors() {
+    let data = r#"
+    [Desktop Entry]
+    Version=1.0
+    Type=Application
+    Exec=/usr/bin/editor %%
+    "#;
+    with_files(
+        "test_exec_with_only_a_literal_percent_errors",
+        data,
+        |desktop, content| {
+            let metadata = EditorMetadata::try_new(desktop)?;
+            let result = metadata.build_default_command(&content);
+            assert!(matches!(result, Err(DesktopExecError::NoTargetPath)));
+            Ok(())
+        },
+    )
+}
+
+/// An icon expands to two arguments and still is not a path — but it must not
+/// interfere with the path that follows it either.
+#[test]
+fn test_icon_arguments_and_the_path_both_survive() {
+    let data = r#"
+    [Desktop Entry]
+    Version=1.0
+    Type=Application
+    Exec=/usr/bin/editor %i %f
+    Icon=/foo/bar/icon.png
+    "#;
+    with_files(
+        "test_icon_arguments_and_the_path_both_survive",
+        data,
+        |desktop, content| {
+            let metadata = EditorMetadata::try_new(desktop)?;
+            let file_name = content.display().to_string();
+            let cmd = metadata.build_default_command(&content)?;
+
+            assert_eq!(cmd.get_program(), "/usr/bin/editor");
+            assert_eq!(
+                cmd.get_args().collect::<Vec<_>>(),
+                ["--icon", "/foo/bar/icon.png", file_name.as_str()]
+            );
+            Ok(())
+        },
+    )
+}
+
+/// The JetBrains variant substitutes the path through its own closure, so it
+/// needs the same guard as the default one.
+#[test]
+fn test_jetbrains_exec_with_no_path_field_code_errors() {
+    let data = r#"
+    [Desktop Entry]
+    Version=1.0
+    Type=Application
+    Exec=/snap/bin/phpstorm --flag
+    "#;
+    with_files(
+        "test_jetbrains_exec_with_no_path_field_code_errors",
+        data,
+        |desktop, content| {
+            let metadata = EditorMetadata::try_new(desktop)?;
+            let result = metadata.build_jetbrains_command(
+                &content,
+                Some(LineAndColumnArg {
+                    line_num: 42,
+                    column_num: Some(7),
+                }),
+            );
+            assert!(matches!(result, Err(DesktopExecError::NoTargetPath)));
+            Ok(())
+        },
+    )
+}
+
+/// `%f` substitutes nothing for a path that is not valid UTF-8, so a command
+/// whose only field code is `%f` never receives it. Linux mounts volumes it
+/// does not police (exFAT, FAT32, SMB, NFS), so such a path can reach here.
+#[test]
+fn test_exec_with_a_non_utf8_path_errors() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let data = r#"
+    [Desktop Entry]
+    Version=1.0
+    Type=Application
+    Exec=/usr/bin/editor %f
+    "#;
+    with_files(
+        "test_exec_with_a_non_utf8_path_errors",
+        data,
+        |desktop, _content| {
+            let metadata = EditorMetadata::try_new(desktop)?;
+            let non_utf8 = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff\xfeinvalid.rs"));
+            let result = metadata.build_default_command(&non_utf8);
+            assert!(matches!(result, Err(DesktopExecError::NoTargetPath)));
+            Ok(())
+        },
+    )
+}
+
+/// And so does the Sublime variant, which builds its own `:line:col` argument.
+#[test]
+fn test_sublime_exec_with_no_path_field_code_errors() {
+    let data = r#"
+    [Desktop Entry]
+    Version=1.0
+    Type=Application
+    Exec=/snap/bin/subl --flag
+    "#;
+    with_files(
+        "test_sublime_exec_with_no_path_field_code_errors",
+        data,
+        |desktop, content| {
+            let metadata = EditorMetadata::try_new(desktop)?;
+            let result = metadata.build_sublime_command(
+                &content,
+                Some(LineAndColumnArg {
+                    line_num: 42,
+                    column_num: Some(7),
+                }),
+            );
+            assert!(matches!(result, Err(DesktopExecError::NoTargetPath)));
+            Ok(())
+        },
+    )
 }

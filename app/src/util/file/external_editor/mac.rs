@@ -237,7 +237,7 @@ impl<'a> Editor {
         line_column_number: Option<LineAndColumnArg>,
         full_path: &Path,
     ) -> (OpenFileInEditorMethod, Vec<String>) {
-        let full_path = full_path.to_str().expect("full path exists").to_string();
+        let full_path = full_path.to_string_lossy().into_owned();
         (
             OpenFileInEditorMethod::Binary(format!("Contents/MacOS/{cli_name}")),
             if let Some(line_column_number) = line_column_number {

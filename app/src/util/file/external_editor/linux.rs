@@ -148,13 +148,17 @@ impl EditorMetadata {
     ///
     /// Field code expansion is handled by the `field_code_processor` callback,
     /// which receives the field code character (the char after `%`) and pushes
-    /// replacement arguments onto the provided `Vec<String>`.
+    /// replacement arguments onto the provided `Vec<String>`. The callback
+    /// returns whether it substituted the target path, so a command that would
+    /// launch the editor on nothing fails here instead of reporting a
+    /// successful launch of an empty window.
     fn build_command<T>(&self, field_code_processor: T) -> Result<Command, DesktopExecError>
     where
-        T: Fn(&Self, &mut Vec<String>, char),
+        T: Fn(&Self, &mut Vec<String>, char) -> bool,
     {
         let tokens = tokenize_exec(&self.exec)?;
         let mut args: Vec<String> = Vec::new();
+        let mut substituted_path = false;
 
         for token in &tokens {
             if let Some(field_code) = token.strip_prefix('%') {
@@ -164,10 +168,10 @@ impl EditorMetadata {
                     1 => {
                         let code_char = field_code.chars().next().unwrap();
                         if code_char == '%' {
-                            // Literal percent.
+                            // Literal percent — text, not a path.
                             args.push("%".to_string());
                         } else {
-                            field_code_processor(self, &mut args, code_char);
+                            substituted_path |= field_code_processor(self, &mut args, code_char);
                         }
                         continue;
                     }
@@ -176,6 +180,10 @@ impl EditorMetadata {
                 }
             }
             args.push(token.clone());
+        }
+
+        if !substituted_path {
+            return Err(DesktopExecError::NoTargetPath);
         }
 
         let program = args.first().ok_or(DesktopExecError::NoExec)?;
@@ -194,13 +202,23 @@ impl EditorMetadata {
     /// Any errors or missing information (e.g., `%i` with no Icon field,
     /// `%u` with a non-existent path) will fail silently, resulting in no
     /// arguments being pushed.
-    fn process_field_code(&self, args: &mut Vec<String>, field_code: char, file_path: &Path) {
+    ///
+    /// Returns whether the target path was substituted. Only `f`/`F`/`u`/`U`
+    /// can report `true`, and only when the substitution actually succeeded.
+    fn process_field_code(
+        &self,
+        args: &mut Vec<String>,
+        field_code: char,
+        file_path: &Path,
+    ) -> bool {
         match field_code {
             // Single file path or file list.
             'f' | 'F' => {
                 if let Some(s) = file_path.to_str() {
                     args.push(s.to_string());
+                    return true;
                 }
+                false
             }
             // Single URI or URI list.
             'u' | 'U' => {
@@ -215,13 +233,16 @@ impl EditorMetadata {
                     && let Ok(file_url) = url::Url::from_file_path(absolute)
                 {
                     args.push(file_url.as_str().to_string());
+                    return true;
                 }
+                false
             }
             // Localized application name.
             'c' => {
                 if let Some(localized_name) = self.localized_name.as_ref() {
                     args.push(localized_name.clone());
                 }
+                false
             }
             // Icon key — expands to two arguments per the spec.
             'i' => {
@@ -229,16 +250,19 @@ impl EditorMetadata {
                     args.push("--icon".to_string());
                     args.push(icon.clone());
                 }
+                false
             }
             // Location of the .desktop file.
             'k' => {
                 if let Some(s) = self.desktop_file_path.to_str() {
                     args.push(s.to_string());
                 }
+                false
             }
-            // Unknown or deprecated field codes are silently dropped.
-            _ => {}
-        };
+            // Unknown or deprecated field codes are silently dropped. The arm
+            // matches a `char`, so it cannot be made exhaustive.
+            _ => false,
+        }
     }
 
     /// Builds a command based on a FreeDesktop Desktop Entry Exec key.
@@ -270,17 +294,19 @@ impl EditorMetadata {
     ) -> Result<Command, DesktopExecError> {
         self.build_command(|me, args, field_code| match field_code {
             'f' | 'F' | 'u' | 'U' => {
-                if let Some(file_path) = file_path.to_str() {
-                    if let Some(line_column_number) = line_column_number {
-                        args.push("--line".to_string());
-                        args.push(line_column_number.line_num.to_string());
-                        if let Some(column_num) = line_column_number.column_num {
-                            args.push("--column".to_string());
-                            args.push(column_num.to_string());
-                        }
+                let Some(file_path) = file_path.to_str() else {
+                    return false;
+                };
+                if let Some(line_column_number) = line_column_number {
+                    args.push("--line".to_string());
+                    args.push(line_column_number.line_num.to_string());
+                    if let Some(column_num) = line_column_number.column_num {
+                        args.push("--column".to_string());
+                        args.push(column_num.to_string());
                     }
-                    args.push(file_path.to_string());
                 }
+                args.push(file_path.to_string());
+                true
             }
             other => me.process_field_code(args, other, file_path),
         })
@@ -301,16 +327,18 @@ impl EditorMetadata {
     ) -> Result<Command, DesktopExecError> {
         self.build_command(|me, args, field_code| match field_code {
             'f' | 'F' | 'u' | 'U' => {
-                if let Some(file_path) = file_path.to_str() {
-                    let mut arg = file_path.to_string();
-                    if let Some(line_column_number) = line_column_number {
-                        arg += &format!(":{}", line_column_number.line_num);
-                        if let Some(column_num) = line_column_number.column_num {
-                            arg += &format!(":{column_num}");
-                        }
+                let Some(file_path) = file_path.to_str() else {
+                    return false;
+                };
+                let mut arg = file_path.to_string();
+                if let Some(line_column_number) = line_column_number {
+                    arg += &format!(":{}", line_column_number.line_num);
+                    if let Some(column_num) = line_column_number.column_num {
+                        arg += &format!(":{column_num}");
                     }
-                    args.push(arg);
                 }
+                args.push(arg);
+                true
             }
             other => me.process_field_code(args, other, file_path),
         })
@@ -701,6 +729,14 @@ enum DesktopExecError {
 
     #[error("Malformed field code in Exec string (bare %)")]
     MalformedFieldCode,
+
+    /// The built command would launch the editor on nothing: either the Exec
+    /// string carries no path field code at all, or the one it carries could
+    /// not be expanded (a non-UTF-8 path for `%f`/`%F`, a `canonicalize`
+    /// failure for `%u`/`%U`). Launching anyway opens an empty editor window
+    /// and reports success, so the caller can never fall back.
+    #[error("Exec string produced no target path")]
+    NoTargetPath,
 }
 
 #[cfg(test)]

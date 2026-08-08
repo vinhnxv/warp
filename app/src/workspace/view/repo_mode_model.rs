@@ -25,6 +25,9 @@ use warp_errors::report_error;
 use warpui::{AppContext, SingletonEntity, UpdateView, ViewContext, ViewHandle};
 use warpui_core::r#async::FutureExt as _;
 
+use super::vertical_tabs::has_unread_activity_for_terminal_view;
+use crate::workspace::sync_inputs::SyncedInputState;
+
 /// TTL for the cached repo-kind / liveness filesystem probes so
 /// `repo_mode_entries` does not stat every registered path on each render
 /// (mirrors the vertical-tabs branch cache). A stalled network/removable
@@ -171,6 +174,14 @@ pub(super) struct RemoteProbeSession {
 pub struct RepoModeEntryBadges {
     pub diff_stats: Option<GitLineChanges>,
     pub pull_request_url: Option<String>,
+}
+
+/// Rolled-up activity state for one repository row, standing in for the nested
+/// rows the row hides while collapsed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct RepoRowActivity {
+    pub any_unread: bool,
+    pub any_synced: bool,
 }
 
 impl Workspace {
@@ -1625,6 +1636,72 @@ impl Workspace {
             }
         }
         badges
+    }
+
+    /// Rolled-up unread-activity and synchronized-inputs state for every entry
+    /// in `by_entry`, read from the tabs bound to that entry.
+    ///
+    /// Takes the display partition [`Workspace::repo_mode_tab_partition`]
+    /// already produced rather than the entry paths: the sidebar builds that
+    /// partition once per render to decide which row each tab nests under, and
+    /// rebuilding it here walked every tab and re-resolved every bound root a
+    /// second time for an identical answer.
+    ///
+    /// Deliberately its own sweep rather than an extension of
+    /// `repo_mode_badges_by_entry`: that sweep is skipped when both badge
+    /// settings are off and it filters out dead and remote entries, and an
+    /// activity rollup inherits neither restriction — it is not user
+    /// configurable, and a remote repository's bound tabs carry unread state
+    /// like any other.
+    ///
+    /// Sourced from `visible_terminal_views`, not `terminal_views`: the rollup
+    /// stands in for the nested rows a collapsed repository hides, so it must
+    /// count exactly the terminals that would render a row once the repository
+    /// is expanded. An off-tree child-agent pane renders none, and a dot with
+    /// nothing behind it is worse than no dot.
+    ///
+    /// Entries with no bound tabs are absent from the map; the caller reads a
+    /// default for them.
+    pub(super) fn repo_mode_activity_by_entry(
+        &self,
+        by_entry: &HashMap<PathBuf, Vec<usize>>,
+        app: &AppContext,
+    ) -> HashMap<PathBuf, RepoRowActivity> {
+        let mut activity: HashMap<PathBuf, RepoRowActivity> = HashMap::new();
+
+        for (entry_path, tab_indices) in by_entry {
+            let mut row = RepoRowActivity::default();
+            for &index in tab_indices {
+                if row.any_unread && row.any_synced {
+                    break;
+                }
+                let Some(tab) = self.tabs.get(index) else {
+                    continue;
+                };
+                let pane_group = tab.pane_group.as_ref(app);
+                if !row.any_synced
+                    && SyncedInputState::as_ref(app).should_sync_this_pane_group(
+                        tab.pane_group.id(),
+                        tab.pane_group.window_id(app),
+                    )
+                {
+                    row.any_synced = true;
+                }
+                if !row.any_unread {
+                    for terminal_view in pane_group.visible_terminal_views(app) {
+                        if has_unread_activity_for_terminal_view(
+                            terminal_view.as_ref(app).id(),
+                            app,
+                        ) {
+                            row.any_unread = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            activity.insert(entry_path.clone(), row);
+        }
+        activity
     }
 
     /// Tab indices in most-recently-used order, then any tab the MRU list does

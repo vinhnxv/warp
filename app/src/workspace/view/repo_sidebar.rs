@@ -32,12 +32,13 @@ use warpui::{AppContext, SingletonEntity};
 
 use super::Workspace;
 use super::repo_mode_model::{
-    RemoteListEntry, RepoModeEntryBadges, RepoModeListEntry, fs_probe_ttl,
+    RemoteListEntry, RepoModeEntryBadges, RepoModeListEntry, RepoRowActivity, fs_probe_ttl,
 };
 use super::vertical_tabs::telemetry::VerticalTabsChipEntrypoint;
 use super::vertical_tabs::{
     METADATA_ROW_HEIGHT, VerticalTabsPanelState, render_git_branch_text, render_groups,
-    render_passive_terminal_diff_stats_badge, render_terminal_pull_request_badge,
+    render_passive_terminal_diff_stats_badge, render_row_title_line,
+    render_terminal_pull_request_badge, shows_synced_inputs_indicator,
     terminal_pull_request_badge_label,
 };
 use crate::appearance::Appearance;
@@ -50,6 +51,11 @@ const NESTED_TABS_INDENT: f32 = 10.;
 /// Left inset of the branch/badges line, aligning it with the name text.
 const META_LINE_INDENT: f32 = CHEVRON_SIZE + ROW_ICON_SIZE + 12.;
 const BRANCH_CACHE_TTL: Duration = Duration::from_secs(5);
+
+/// Cached branch reads keyed by repo root: when the entry was refreshed, the
+/// refresh interval that read earned itself, and the branch it produced
+/// (`None` for a root that has no readable `.git/HEAD`).
+type BranchCache = RefCell<HashMap<String, (Instant, Duration, Option<String>)>>;
 
 /// Per-row mouse state for the Repositories tree.
 #[derive(Clone, Default)]
@@ -73,7 +79,7 @@ pub(super) struct RepoSidebarState {
     /// interval: `BRANCH_CACHE_TTL` normally, backed off to
     /// `SLOW_MOUNT_CACHE_TTL` when the read that produced it was slow enough to
     /// mean a stalled mount.
-    pub branch_cache: RefCell<HashMap<String, (Instant, Duration, Option<String>)>>,
+    pub branch_cache: BranchCache,
 }
 
 impl RepoSidebarState {
@@ -170,6 +176,47 @@ pub(super) fn repo_tab_block_visible(is_selected: bool, any_entry_drag_active: b
     is_selected && !any_entry_drag_active
 }
 
+/// Which rolled-up indicators a repository row renders.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct RepoRowIndicators {
+    pub synced: bool,
+    pub unread: bool,
+}
+
+/// Rollup gating for one repository row.
+///
+/// Keyed on `is_selected` rather than `repo_tab_block_visible`: that predicate
+/// also folds every block away for the duration of a repository drag, so
+/// keying on it would light indicators up on every row mid-gesture, changing
+/// row content while the user is dragging. `is_selected` is the expansion
+/// state alone — an expanded row's nested rows carry their own indicators, so
+/// it needs no rollup.
+///
+/// Dead rows show nothing: they keep the row shape they have today, with the
+/// trailing edge owned by their "Remove" button.
+///
+/// The link icon follows the tab-indicator setting because
+/// `shows_synced_inputs_indicator` does; the unread dot does not, because
+/// `render_row_title_line`'s other callers pass `has_unread_activity` ungated.
+/// The rollup mirrors the nested rows rather than inventing its own rule.
+pub(super) fn repo_row_indicators(
+    is_dead: bool,
+    is_selected: bool,
+    show_indicators: bool,
+    activity: RepoRowActivity,
+) -> RepoRowIndicators {
+    if is_dead || is_selected {
+        return RepoRowIndicators::default();
+    }
+    RepoRowIndicators {
+        // A repository row stands in for terminal rows, which is what the
+        // helper's `is_terminal_row` gate is asking about: every tab the
+        // rollup walks reaches it through a repo-mode tab group.
+        synced: shows_synced_inputs_indicator(true, activity.any_synced, show_indicators),
+        unread: activity.any_unread,
+    }
+}
+
 /// Fixed "Repositories" header (with + Add) rendered above the scrolling tree.
 pub(super) fn render_repo_header(state: &RepoSidebarState, app: &AppContext) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(app);
@@ -245,6 +292,7 @@ pub(super) fn render_repo_tree(
         .vertical_tabs_show_diff_stats
         .value();
     let show_pr_link = *TabSettings::as_ref(app).vertical_tabs_show_pr_link.value();
+    let show_indicators = *TabSettings::as_ref(app).show_indicators.value();
 
     // Display partition: which repo row each bound tab renders under; loose
     // tabs always land in the "Other tabs" section.
@@ -266,6 +314,8 @@ pub(super) fn render_repo_tree(
         Vec::new()
     };
     let badges_by_entry = workspace.repo_mode_badges_by_entry(&badge_paths, app);
+
+    let activity_by_entry = workspace.repo_mode_activity_by_entry(&by_entry, app);
 
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
@@ -337,11 +387,24 @@ pub(super) fn render_repo_tree(
 
         let is_draggable = repo_row_is_draggable(&entry);
         let path = entry.path.clone();
+        // Gated here rather than inside the row, mirroring how the badge
+        // settings are folded into `badges` above: the row renders what it is
+        // handed.
+        let indicators = repo_row_indicators(
+            entry.is_dead,
+            is_selected,
+            show_indicators,
+            activity_by_entry
+                .get(&entry.path)
+                .copied()
+                .unwrap_or_default(),
+        );
         let row = render_entry_row(
             entry,
             remote_state,
             branch,
             badges,
+            indicators,
             mouse,
             drag_state.clone(),
             pr_badge_mouse,
@@ -632,6 +695,7 @@ fn render_entry_row(
     remote_state: Option<RemoteRowState>,
     branch: Option<String>,
     badges: RepoModeEntryBadges,
+    indicators: RepoRowIndicators,
     mouse: MouseStateHandle,
     drag_state: DraggableState,
     pr_badge_mouse: MouseStateHandle,
@@ -749,11 +813,31 @@ fn render_entry_row(
         leading.add_child(icon_element);
         leading.add_child(text_column);
 
+        // Dead rows keep the shape they have today: their trailing edge belongs
+        // to "Remove".
+        let title_line = if is_dead {
+            leading.finish()
+        } else {
+            // `render_row_title_line` lays its indicators out with
+            // `SpaceBetween`, which only separates anything if the line owns
+            // the row's full width.
+            Expanded::new(
+                1.,
+                render_row_title_line(
+                    leading.finish(),
+                    indicators.synced,
+                    indicators.unread,
+                    theme,
+                ),
+            )
+            .finish()
+        };
+
         let mut top_row = Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(6.)
-            .with_child(leading.finish());
+            .with_child(title_line);
 
         if is_dead {
             top_row.add_child(
@@ -1007,10 +1091,7 @@ pub(super) fn truncate_label(label: &str, budget: usize) -> String {
 /// Current branch (or short detached SHA) for a repo root, via `.git/HEAD`.
 /// Cheap enough to poll behind a short-lived cache; supports linked worktrees
 /// where `.git` is a file pointing at the real git dir.
-fn repo_branch(
-    cache: &RefCell<HashMap<String, (Instant, Duration, Option<String>)>>,
-    root: &Path,
-) -> Option<String> {
+fn repo_branch(cache: &BranchCache, root: &Path) -> Option<String> {
     let key = root.to_string_lossy().into_owned();
     let now = Instant::now();
     if let Some((refreshed_at, ttl, cached)) = cache.borrow().get(&key)

@@ -4,6 +4,11 @@ use warpui::{App, EntityId, TypedActionView as _};
 
 use super::*;
 use crate::persistence::model::Project;
+use crate::terminal::CLIAgent;
+use crate::terminal::cli_agent_sessions::{
+    CLIAgentSessionContext, CLIAgentSessionStatus, CLIAgentSessionsModel,
+    CLIAgentSessionsModelEvent,
+};
 use crate::workspace::RepoRegistryKey;
 use crate::workspace::view::non_contiguous_groups;
 use crate::workspace::view::tests::{initialize_app, mock_workspace};
@@ -4672,4 +4677,278 @@ fn test_a_slow_probe_backs_the_ttl_off() {
         SLOW_MOUNT_CACHE_TTL > healthy,
         "backing off has to mean a longer interval, not a shorter one"
     );
+}
+
+// ---------- Per-entry activity rollup (R1/R2/R3) ----------
+
+/// The terminal a bound tab was opened with. Reads the same
+/// `visible_terminal_views` the rollup reads, so a change to what counts as
+/// "in the tab" moves both together.
+fn first_terminal_view_id(workspace: &Workspace, tab_index: usize, app: &AppContext) -> EntityId {
+    workspace.tabs[tab_index]
+        .pane_group
+        .as_ref(app)
+        .visible_terminal_views(app)
+        .first()
+        .expect("a bound tab opens with a terminal")
+        .as_ref(app)
+        .id()
+}
+
+/// Drives the real notification path rather than writing to the mailbox
+/// directly: `AgentNotificationsModel` owns its items privately, and going
+/// through the event means the test breaks if the production path stops
+/// recording unread state for a terminal.
+fn notify_agent_finished(app: &mut App, terminal_view_id: EntityId) {
+    CLIAgentSessionsModel::handle(app).update(
+        app,
+        |_, ctx: &mut warpui::ModelContext<'_, CLIAgentSessionsModel>| {
+            ctx.emit(CLIAgentSessionsModelEvent::StatusChanged {
+                terminal_view_id,
+                agent: CLIAgent::Claude,
+                status: CLIAgentSessionStatus::Success,
+                session_context: Box::new(CLIAgentSessionContext::default()),
+            });
+        },
+    );
+}
+
+/// Mirrors the sidebar's call: the rollup reads the display partition
+/// `render_repo_tree` has already built for the same entry paths, so the test
+/// builds it the same way rather than hand-assembling one.
+fn activity_by_entry(
+    workspace: &Workspace,
+    entry_paths: &[PathBuf],
+    app: &AppContext,
+) -> HashMap<PathBuf, RepoRowActivity> {
+    let (by_entry, _loose) = workspace.repo_mode_tab_partition(entry_paths);
+    workspace.repo_mode_activity_by_entry(&by_entry, app)
+}
+
+/// R1: a repository row stands in for the tabs it hides while collapsed, so
+/// unread activity in one of them has to reach the entry.
+#[test]
+fn test_unread_activity_in_a_bound_tab_reaches_its_entry() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let _notifications_guard = FeatureFlag::HOANotifications.override_enabled(true);
+    let repo = tempfile::tempdir().expect("tempdir");
+    let other = tempfile::tempdir().expect("tempdir");
+    let repo_root = dunce::canonicalize(repo.path()).expect("canonicalize");
+    let other_root = dunce::canonicalize(other.path()).expect("canonicalize");
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+
+        let terminal_view_id = workspace.update(&mut app, |workspace, ctx| {
+            workspace.select_repo_mode_entry(&repo_root, ctx);
+            let bound_index = workspace.active_tab_index;
+            workspace.select_repo_mode_entry(&other_root, ctx);
+            first_terminal_view_id(workspace, bound_index, ctx)
+        });
+
+        notify_agent_finished(&mut app, terminal_view_id);
+
+        workspace.read(&app, |workspace, ctx| {
+            let entry_paths = vec![repo_root.clone(), other_root.clone()];
+            let activity = activity_by_entry(workspace, &entry_paths, ctx);
+
+            assert!(
+                activity.get(&repo_root).is_some_and(|row| row.any_unread),
+                "the entry owning the terminal with unread activity must report it"
+            );
+            assert!(
+                activity.get(&other_root).is_some_and(|row| !row.any_unread),
+                "and the sibling entry, which has a tab of its own, stays quiet"
+            );
+        });
+    });
+}
+
+/// The sweep short-circuits once both flags are set, so the tab that carries
+/// the activity must still be found when it is not the first one walked.
+#[test]
+fn test_unread_activity_is_found_in_a_later_tab_of_the_same_entry() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let _notifications_guard = FeatureFlag::HOANotifications.override_enabled(true);
+    let repo = tempfile::tempdir().expect("tempdir");
+    let repo_root = dunce::canonicalize(repo.path()).expect("canonicalize");
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+
+        let (bound_indices, last_terminal_view_id) =
+            workspace.update(&mut app, |workspace, ctx| {
+                workspace.select_repo_mode_entry(&repo_root, ctx);
+                let first = workspace.active_tab_index;
+                workspace.add_terminal_tab(false, ctx);
+                let second = workspace.active_tab_index;
+                let last_terminal = first_terminal_view_id(workspace, second, ctx);
+                (vec![first, second], last_terminal)
+            });
+        assert_ne!(
+            bound_indices[0], bound_indices[1],
+            "the second tab must be a distinct tab for this to test anything"
+        );
+
+        notify_agent_finished(&mut app, last_terminal_view_id);
+
+        workspace.read(&app, |workspace, ctx| {
+            let entry_paths = vec![repo_root.clone()];
+            let activity = activity_by_entry(workspace, &entry_paths, ctx);
+            assert!(
+                activity.get(&repo_root).is_some_and(|row| row.any_unread),
+                "activity in any bound tab counts, not only the first one walked"
+            );
+        });
+    });
+}
+
+/// A quiet repository reports neither flag — the rollup must not light a row
+/// up merely because it has tabs.
+#[test]
+fn test_a_repository_with_no_activity_reports_neither_flag() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let _notifications_guard = FeatureFlag::HOANotifications.override_enabled(true);
+    let repo = tempfile::tempdir().expect("tempdir");
+    let repo_root = dunce::canonicalize(repo.path()).expect("canonicalize");
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.select_repo_mode_entry(&repo_root, ctx);
+
+            let entry_paths = vec![repo_root.clone()];
+            let activity = activity_by_entry(workspace, &entry_paths, ctx);
+            let row = activity.get(&repo_root).copied().unwrap_or_default();
+            assert_eq!(row, RepoRowActivity::default());
+        });
+    });
+}
+
+/// R2: synchronized inputs are per pane group, so enabling them on one tab
+/// must not spill onto a repository that owns different tabs.
+#[test]
+fn test_synced_inputs_reach_only_the_entry_owning_that_tab() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let repo = tempfile::tempdir().expect("tempdir");
+    let other = tempfile::tempdir().expect("tempdir");
+    let repo_root = dunce::canonicalize(repo.path()).expect("canonicalize");
+    let other_root = dunce::canonicalize(other.path()).expect("canonicalize");
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.select_repo_mode_entry(&repo_root, ctx);
+            let bound_index = workspace.active_tab_index;
+            workspace.select_repo_mode_entry(&other_root, ctx);
+
+            let pane_group = &workspace.tabs[bound_index].pane_group;
+            let pane_group_id = pane_group.id();
+            let window_id = pane_group.window_id(ctx);
+            let all_pane_group_ids: Vec<EntityId> = workspace
+                .tabs
+                .iter()
+                .map(|tab| tab.pane_group.id())
+                .collect();
+            // A count above the synced set keeps this off the "all panes"
+            // normalization, which would sync every group in the window and
+            // make the sibling assertion below vacuous.
+            let pane_group_count = all_pane_group_ids.len() + 1;
+            SyncedInputState::handle(ctx).update(ctx, |sync, _| {
+                sync.toggle_sync_terminal_inputs_in_tab(
+                    pane_group_id,
+                    all_pane_group_ids.iter().copied(),
+                    pane_group_count,
+                    window_id,
+                );
+            });
+
+            let entry_paths = vec![repo_root.clone(), other_root.clone()];
+            let activity = activity_by_entry(workspace, &entry_paths, ctx);
+
+            assert!(
+                activity.get(&repo_root).is_some_and(|row| row.any_synced),
+                "the entry owning the synced pane group must report it"
+            );
+            assert!(
+                activity.get(&other_root).is_some_and(|row| !row.any_synced),
+                "and the sibling entry, which has a tab of its own, must not"
+            );
+        });
+    });
+}
+
+/// A registered entry with no bound tabs is absent from the map. The caller
+/// reads a default for it, which is the quiet state — so an absent key and a
+/// present-but-quiet key must mean the same thing.
+#[test]
+fn test_an_entry_with_no_tabs_is_absent_and_defaults_to_quiet() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let repo = tempfile::tempdir().expect("tempdir");
+    let empty = tempfile::tempdir().expect("tempdir");
+    let repo_root = dunce::canonicalize(repo.path()).expect("canonicalize");
+    let empty_root = dunce::canonicalize(empty.path()).expect("canonicalize");
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.select_repo_mode_entry(&repo_root, ctx);
+
+            let entry_paths = vec![repo_root.clone(), empty_root.clone()];
+            let activity = activity_by_entry(workspace, &entry_paths, ctx);
+
+            assert!(
+                !activity.contains_key(&empty_root),
+                "an entry with no bound tabs is not in the map"
+            );
+            assert_eq!(
+                activity.get(&empty_root).copied().unwrap_or_default(),
+                RepoRowActivity::default(),
+                "and the caller's default read is the quiet state"
+            );
+        });
+    });
+}
+
+/// A path that was never handed to the sweep must not appear in its result —
+/// the map answers about the entries it was asked about and nothing else.
+#[test]
+fn test_a_path_outside_the_sweep_is_absent_from_the_map() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let repo = tempfile::tempdir().expect("tempdir");
+    let unregistered = tempfile::tempdir().expect("tempdir");
+    let repo_root = dunce::canonicalize(repo.path()).expect("canonicalize");
+    let unregistered_root = dunce::canonicalize(unregistered.path()).expect("canonicalize");
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.select_repo_mode_entry(&repo_root, ctx);
+            workspace.select_repo_mode_entry(&unregistered_root, ctx);
+
+            let entry_paths = vec![repo_root.clone()];
+            let activity = activity_by_entry(workspace, &entry_paths, ctx);
+
+            assert!(activity.contains_key(&repo_root));
+            assert!(
+                !activity.contains_key(&unregistered_root),
+                "a path the sweep was not asked about must not be invented into the map"
+            );
+
+            // An empty ask sweeps nothing at all.
+            assert!(activity_by_entry(workspace, &[], ctx).is_empty());
+        });
+    });
 }
