@@ -184,6 +184,27 @@ pub(super) struct RepoRowActivity {
     pub any_synced: bool,
 }
 
+/// Whether a newly created tab may connect itself to the remote host its tab
+/// group is bound to.
+///
+/// The shared new-terminal-tab seam serves every route that creates a terminal,
+/// and only some of them are the user asking for one. A Docker sandbox tab would
+/// `ssh` out of the sandbox it exists to provide; a tab opened from a `warp://`
+/// link or the Codex modal would get an `ssh` line queued into a terminal an
+/// agent is about to drive, which turns a link click into an outbound connection
+/// the user never asked for. None of the seam's other parameters separate those
+/// cases — every direct caller passes `DefaultSessionModeBehavior::Ignore` — so
+/// eligibility is stated per call site, and `Suppress` is what a route added
+/// later gets until someone decides otherwise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RepoModeAutoConnect {
+    /// The user asked for a terminal; connect it if it lands in a remote group.
+    Allow,
+    /// Opened on another feature's behalf, or connected by its own call site
+    /// once it knows the group the tab really ends up in.
+    Suppress,
+}
+
 impl Workspace {
     /// True when repo mode is compiled in and the runtime flag is on.
     pub(super) fn repo_mode_enabled() -> bool {
@@ -1396,7 +1417,16 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         self.create_repo_mode_group_with_tab(key, ctx);
+        self.connect_active_tab_to_remote(target, ctx);
+    }
 
+    /// Connect the active tab to `target` and land it in the target's path.
+    ///
+    /// Split out of [`Self::open_remote_repo_mode_tab`] so every tab that ends
+    /// up under a remote entry reaches the host the same way — the entry's
+    /// first tab and every tab opened after it. One implementation is what
+    /// keeps the warpification-off route from drifting between them.
+    fn connect_active_tab_to_remote(&mut self, target: &RemoteTarget, ctx: &mut ViewContext<Self>) {
         let Some(terminal) = self
             .active_tab_pane_group()
             .as_ref(ctx)
@@ -1849,6 +1879,60 @@ impl Workspace {
             .values()
             .find(|g| g.repo_root.as_deref() == Some(selected))
             .map(|g| g.id)
+    }
+
+    /// The remote host a tab group is bound to, if it is bound to one.
+    ///
+    /// The group — not `selected_repo_root` — is what says where a new tab
+    /// belongs. Every tab activation reconciles the selection against the
+    /// active tab (`sync_repo_mode_selection_to_active_tab`), so the selection
+    /// can already have moved by the time a freshly created tab is asked about;
+    /// its group binding cannot.
+    ///
+    /// `None` for a group bound to a local repository path, a group with no
+    /// binding at all, an unknown id, or repo mode being off.
+    pub(super) fn remote_target_for_group(&self, group_id: TabGroupId) -> Option<RemoteTarget> {
+        if !Self::repo_mode_enabled() {
+            return None;
+        }
+        parse_remote_key(self.tab_groups.get(&group_id)?.repo_root.as_deref()?)
+    }
+
+    /// Connect the just-created active tab when it landed in a remote entry's
+    /// group, so an entry's second tab reaches the same host as its first (R1).
+    ///
+    /// Group membership is the trigger, so this covers every affordance that
+    /// files a tab into the group rather than being patched into each one (R2).
+    /// Whether the tab is *eligible* to connect is the caller's decision, not
+    /// this method's — see [`RepoModeAutoConnect`].
+    pub(super) fn connect_new_tab_if_remote(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(group_id) = self
+            .tabs
+            .get(self.active_tab_index)
+            .and_then(|t| t.group_id)
+        else {
+            return;
+        };
+        self.connect_new_tab_in_group_if_remote(group_id, ctx);
+    }
+
+    /// Connect the active tab when `group_id` is bound to a remote entry.
+    ///
+    /// Separate from [`Self::connect_new_tab_if_remote`] for the group menu,
+    /// which cannot connect at the shared seam: the creation path hands its tab
+    /// the *selected* entry's group, not the group the menu targeted, so
+    /// connecting there would reach one host and then this call would reach
+    /// another. The menu suppresses the seam and calls this once its assignment
+    /// is final, naming the group it meant (R9).
+    pub(super) fn connect_new_tab_in_group_if_remote(
+        &mut self,
+        group_id: TabGroupId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(target) = self.remote_target_for_group(group_id) else {
+            return;
+        };
+        self.connect_active_tab_to_remote(&target, ctx);
     }
 
     /// Tabs visible under the current repo-mode selection (all tabs when no

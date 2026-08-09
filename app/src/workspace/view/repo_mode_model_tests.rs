@@ -3117,6 +3117,239 @@ fn test_tab_opened_outside_the_entry_path_stays_ungrouped() {
     });
 }
 
+/// Covers U2: the group's binding — not `selected_repo_root` — is what says
+/// where a tab belongs. Every tab activation reconciles the selection against
+/// the active tab, so the selection can already have moved by the time a
+/// freshly created tab is asked about; the binding cannot.
+#[test]
+fn remote_target_for_group_reads_the_groups_binding() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let key = format_remote_key("10.0.0.7", 2222, "vinh", "/k", "/srv/app");
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, _ctx| {
+            let mut remote = TabGroup::new();
+            remote.repo_root = Some(key.clone());
+            let remote_id = remote.id;
+            workspace.tab_groups.insert(remote_id, remote);
+
+            let mut local = TabGroup::new();
+            local.repo_root = Some("/repo/a".to_string());
+            let local_id = local.id;
+            workspace.tab_groups.insert(local_id, local);
+
+            let unbound = TabGroup::new();
+            let unbound_id = unbound.id;
+            workspace.tab_groups.insert(unbound_id, unbound);
+
+            let target = workspace
+                .remote_target_for_group(remote_id)
+                .expect("a group bound to a remote key resolves to its host");
+            assert_eq!(target.server, "10.0.0.7");
+            assert_eq!(target.port, 2222);
+            assert_eq!(target.user, "vinh");
+            assert_eq!(target.identity, "/k");
+            assert_eq!(target.remote_path, "/srv/app");
+
+            // A local repository path is a binding too — just not a remote one.
+            assert!(workspace.remote_target_for_group(local_id).is_none());
+            assert!(workspace.remote_target_for_group(unbound_id).is_none());
+            // An id no group answers to: the caller gets nothing, not a panic.
+            assert!(
+                workspace
+                    .remote_target_for_group(TabGroup::new().id)
+                    .is_none()
+            );
+        });
+    });
+}
+
+/// With repo mode off the binding may still be present — session restore copies
+/// `repo_root` unconditionally — so the flag gate is what keeps such a build
+/// behaving exactly as it did before any of this existed.
+#[test]
+fn remote_target_for_group_is_none_with_repo_mode_off() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(false);
+    let key = format_remote_key("10.0.0.7", 22, "vinh", "", "/srv/app");
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, _ctx| {
+            let mut group = TabGroup::new();
+            group.repo_root = Some(key.clone());
+            let group_id = group.id;
+            workspace.tab_groups.insert(group_id, group);
+
+            assert!(workspace.remote_target_for_group(group_id).is_none());
+        });
+    });
+}
+
+/// Covers AE1/R1: the entry's *second* tab reaches the same host as its first.
+/// Only the first tab used to, because the connect sequence was wired into the
+/// branch of entry-selection that runs when the entry has no tabs yet — so
+/// every tab after it rendered under the remote row while running locally.
+#[test]
+fn test_second_tab_under_a_remote_entry_resolves_to_the_same_host() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let key = format_remote_key("10.0.0.7", 2222, "vinh", "", "/srv/app");
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+                projects.upsert_project(PathBuf::from(&key), ctx);
+            });
+            workspace.select_repo_mode_entry(Path::new(&key), ctx);
+            let group_id = workspace
+                .selected_repo_mode_group_id()
+                .expect("remote entry should bind a group");
+
+            workspace.add_terminal_tab(false, ctx);
+
+            let index = workspace.active_tab_index;
+            assert_eq!(
+                workspace.tabs[index].group_id,
+                Some(group_id),
+                "a new tab under the selected entry joins its group (R3)"
+            );
+            let target = workspace
+                .remote_target_for_group(group_id)
+                .expect("the entry's group resolves to its host");
+            assert_eq!(target.server, "10.0.0.7");
+            assert_eq!(target.remote_path, "/srv/app");
+        });
+    });
+}
+
+/// Covers AE2/R2: the sidebar add-tab menu is a separate call site from the
+/// keyboard shortcut, and it opts in the same way. Group membership is the
+/// trigger, so both routes land in the same place.
+#[test]
+fn test_add_terminal_tab_action_under_a_remote_entry_joins_its_group() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let key = format_remote_key("10.0.0.7", 22, "vinh", "", "/srv/app");
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+                projects.upsert_project(PathBuf::from(&key), ctx);
+            });
+            workspace.select_repo_mode_entry(Path::new(&key), ctx);
+            let group_id = workspace
+                .selected_repo_mode_group_id()
+                .expect("remote entry should bind a group");
+
+            workspace.handle_action(
+                &WorkspaceAction::AddTerminalTab {
+                    hide_homepage: false,
+                },
+                ctx,
+            );
+
+            let index = workspace.active_tab_index;
+            assert_eq!(workspace.tabs[index].group_id, Some(group_id));
+            assert!(workspace.remote_target_for_group(group_id).is_some());
+        });
+    });
+}
+
+/// Covers AE11/R6: deselecting an entry does not by itself make the next tab
+/// local. Under the default placement a new tab inherits the active tab's
+/// group, and a tab that lands in a remote group renders inside it — so leaving
+/// it on a local shell would reproduce the bug this fixes.
+#[test]
+fn test_new_tab_inherits_an_active_remote_tabs_group_with_no_selection() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let key = format_remote_key("10.0.0.7", 22, "vinh", "", "/srv/app");
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+                projects.upsert_project(PathBuf::from(&key), ctx);
+            });
+            workspace.select_repo_mode_entry(Path::new(&key), ctx);
+            let group_id = workspace
+                .selected_repo_mode_group_id()
+                .expect("remote entry should bind a group");
+
+            // Clear the selection while the entry's tab stays active.
+            workspace.select_repo_mode_all(ctx);
+            assert!(workspace.selected_repo_mode_group_id().is_none());
+
+            workspace.add_terminal_tab(false, ctx);
+
+            let index = workspace.active_tab_index;
+            assert_eq!(
+                workspace.tabs[index].group_id,
+                Some(group_id),
+                "inheritance still files the tab under the entry"
+            );
+            assert!(workspace.remote_target_for_group(group_id).is_some());
+        });
+    });
+}
+
+/// Covers AE10/R9/KTD3: the group menu's tab connects to the group it targeted,
+/// never to the entry that happened to be selected. The creation path hands the
+/// tab the *selected* entry's group, so connecting at the shared seam would
+/// reach host A and then this path would reach host B — two `ssh` lines in one
+/// shell. The seam is suppressed for this route; the connect happens once, here.
+#[test]
+fn test_group_menu_tab_resolves_to_its_target_group_not_the_selection() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let key_a = format_remote_key("10.0.0.7", 22, "vinh", "", "/srv/a");
+    let key_b = format_remote_key("10.0.0.8", 22, "vinh", "", "/srv/b");
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+                projects.upsert_project(PathBuf::from(&key_a), ctx);
+                projects.upsert_project(PathBuf::from(&key_b), ctx);
+            });
+
+            workspace.select_repo_mode_entry(Path::new(&key_b), ctx);
+            let group_b = workspace
+                .selected_repo_mode_group_id()
+                .expect("entry B should bind a group");
+            workspace.select_repo_mode_entry(Path::new(&key_a), ctx);
+            let group_a = workspace
+                .selected_repo_mode_group_id()
+                .expect("entry A should bind a group");
+            assert_ne!(group_a, group_b);
+
+            // Entry A is selected; the menu targets B's group.
+            workspace.new_tab_in_group(group_b, ctx);
+
+            let index = workspace.active_tab_index;
+            assert_eq!(
+                workspace.tabs[index].group_id,
+                Some(group_b),
+                "the tab ends up in the group the menu targeted"
+            );
+            let target = workspace
+                .remote_target_for_group(group_b)
+                .expect("B's group resolves to B's host");
+            assert_eq!(target.server, "10.0.0.8");
+            assert_eq!(target.remote_path, "/srv/b");
+        });
+    });
+}
+
 /// R7: the probe's `ssh` must be findable when Warp was launched outside a
 /// login shell. The interactive `PATH` wins, and the one inherited value that
 /// cannot resolve anything — an empty `PATH` — is replaced rather than passed

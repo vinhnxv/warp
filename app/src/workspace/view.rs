@@ -123,6 +123,7 @@ use warpui::{
 
 #[cfg(feature = "local_fs")]
 use self::open_folder::OpenFolderAction;
+use self::repo_mode_model::RepoModeAutoConnect;
 use self::vertical_tabs::telemetry::{VerticalTabsDisplayOption, VerticalTabsTelemetryEvent};
 use self::vertical_tabs::{
     SummaryPaneKind, SummaryPaneKindIcons, VERTICAL_TABS_SETTINGS_BUTTON_POSITION_ID,
@@ -4299,6 +4300,7 @@ impl Workspace {
                         None,  /* chosen_shell */
                         None,  /* ai_conversation */
                         false, /* hide_homepage */
+                        RepoModeAutoConnect::Suppress,
                         ctx,
                     );
                 } else if self.left_panel_visibility_across_tabs_enabled(ctx) {
@@ -4617,6 +4619,7 @@ impl Workspace {
                     shell,
                     None,  /* ai_conversation */
                     false, /* hide_homepage */
+                    RepoModeAutoConnect::Suppress,
                     ctx,
                 );
                 self.check_and_trigger_onboarding(ctx);
@@ -5076,6 +5079,7 @@ impl Workspace {
             None,
             false,
             DefaultSessionModeBehavior::Ignore,
+            RepoModeAutoConnect::Suppress,
             ctx,
         );
         self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
@@ -5109,6 +5113,7 @@ impl Workspace {
             None,
             false,
             DefaultSessionModeBehavior::Ignore,
+            RepoModeAutoConnect::Suppress,
             ctx,
         );
         self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
@@ -7614,6 +7619,7 @@ impl Workspace {
             None,
             None,
             false,
+            RepoModeAutoConnect::Suppress,
             ctx,
         );
         let new_tab_index = self.active_tab_index;
@@ -7897,6 +7903,7 @@ impl Workspace {
             None,
             None,
             false,
+            RepoModeAutoConnect::Suppress,
             ctx,
         );
 
@@ -7916,6 +7923,12 @@ impl Workspace {
             self.move_tab_to_index(new_idx, target_index, ctx);
         }
         self.expand_tab_group(group_id, ctx);
+
+        // R9: only now is the tab's group final. The creation path above gave it
+        // the *selected* entry's group, which may be a different remote entry
+        // entirely, so the seam is suppressed and the connect happens here —
+        // once, against the group the menu actually targeted.
+        self.connect_new_tab_in_group_if_remote(group_id, ctx);
     }
 
     /// True when the user-initiated reorder of `group_id` in `direction`
@@ -9481,6 +9494,7 @@ impl Workspace {
                     None,
                     None,
                     false,
+                    RepoModeAutoConnect::Suppress,
                     ctx,
                 );
             }
@@ -13054,6 +13068,7 @@ impl Workspace {
             None,
             None,
             hide_homepage,
+            RepoModeAutoConnect::Allow,
             ctx,
         );
         ctx.notify();
@@ -13106,6 +13121,7 @@ impl Workspace {
                     None,
                     true, /* hide_homepage */
                     DefaultSessionModeBehavior::Ignore,
+                    RepoModeAutoConnect::Suppress,
                     ctx,
                 );
                 ctx.notify();
@@ -13159,11 +13175,13 @@ impl Workspace {
             Some(shell),
             None,
             false,
+            RepoModeAutoConnect::Allow,
             ctx,
         );
         ctx.notify();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn add_new_session_tab_with_default_mode(
         &mut self,
         new_session_source: NewSessionSource,
@@ -13171,6 +13189,7 @@ impl Workspace {
         chosen_shell: Option<AvailableShell>,
         conversation_restoration: Option<ConversationRestorationInNewPaneType>,
         hide_homepage: bool,
+        auto_connect: RepoModeAutoConnect,
         ctx: &mut ViewContext<Self>,
     ) {
         self.add_new_session_tab_internal_with_default_session_mode_behavior(
@@ -13180,6 +13199,7 @@ impl Workspace {
             conversation_restoration,
             hide_homepage,
             DefaultSessionModeBehavior::Apply,
+            auto_connect,
             ctx,
         );
     }
@@ -13193,6 +13213,7 @@ impl Workspace {
         conversation_restoration: Option<ConversationRestorationInNewPaneType>,
         hide_homepage: bool,
         default_session_mode_behavior: DefaultSessionModeBehavior,
+        auto_connect: RepoModeAutoConnect,
         ctx: &mut ViewContext<Self>,
     ) {
         // Check if we should default to agent mode (only for new sessions, not restorations)
@@ -13261,6 +13282,16 @@ impl Workspace {
         }
         #[cfg(not(all(feature = "local_tty", not(target_family = "wasm"))))]
         let _ = is_docker_sandbox;
+
+        // R1/R2: a terminal the user opened under a remote repository entry
+        // belongs on that machine, not just under its row. The sandbox guard is
+        // belt-and-braces — `add_docker_sandbox_tab` already suppresses — but a
+        // sandbox shell that ssh'd out with the user's identity is the one
+        // failure worth refusing twice.
+        if matches!(auto_connect, RepoModeAutoConnect::Allow) && !is_docker_sandbox {
+            self.connect_new_tab_if_remote(ctx);
+        }
+
         // If the default session mode is Agent and AI is enabled, enter agent view
         if should_enter_agent_view {
             self.enter_agent_view_on_active_tab(ctx);
@@ -14457,6 +14488,7 @@ impl Workspace {
                     has_initial_query,
                 }),
                 false,
+                RepoModeAutoConnect::Suppress,
                 ctx,
             );
 
@@ -19760,6 +19792,7 @@ impl Workspace {
                     None,
                     false,
                     DefaultSessionModeBehavior::Ignore,
+                    RepoModeAutoConnect::Suppress,
                     ctx,
                 );
                 ctx.notify();
@@ -19908,6 +19941,7 @@ impl Workspace {
             None,  // Conversation restoration
             false, // Hide the agent view homepage
             DefaultSessionModeBehavior::Ignore,
+            RepoModeAutoConnect::Suppress,
             ctx,
         );
 
@@ -24646,6 +24680,7 @@ impl TypedActionView for Workspace {
                     None,
                     *hide_homepage,
                     DefaultSessionModeBehavior::Ignore,
+                    RepoModeAutoConnect::Allow,
                     ctx,
                 );
                 ctx.notify();
