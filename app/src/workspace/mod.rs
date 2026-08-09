@@ -25,9 +25,9 @@ pub mod util;
 pub mod view;
 
 pub use action::{
-    AutoCloudHandoffTrigger, CommandSearchOptions, InitContent, RepoRegistryKey,
-    RestoreConversationLayout, TabContextMenuAnchor, VerticalTabsPaneContextMenuTarget,
-    WorkspaceAction,
+    AutoCloudHandoffTrigger, CommandSearchOptions, InitContent, RepoModeAutoConnect,
+    RepoRegistryKey, RestoreConversationLayout, TabContextMenuAnchor,
+    VerticalTabsPaneContextMenuTarget, WorkspaceAction,
 };
 pub use active_session::ActiveSession;
 pub use global_actions::{
@@ -731,6 +731,7 @@ pub fn init(app: &mut AppContext) {
             BindingDescription::new("New Terminal Tab"),
             WorkspaceAction::AddTerminalTab {
                 hide_homepage: false,
+                auto_connect: RepoModeAutoConnect::Allow,
             },
         )
         .with_context_predicate(id!("Workspace") & !id!("Workspace_PaneDragging"))

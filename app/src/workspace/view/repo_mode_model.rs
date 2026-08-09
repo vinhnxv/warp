@@ -184,27 +184,6 @@ pub(super) struct RepoRowActivity {
     pub any_synced: bool,
 }
 
-/// Whether a newly created tab may connect itself to the remote host its tab
-/// group is bound to.
-///
-/// The shared new-terminal-tab seam serves every route that creates a terminal,
-/// and only some of them are the user asking for one. A Docker sandbox tab would
-/// `ssh` out of the sandbox it exists to provide; a tab opened from a `warp://`
-/// link or the Codex modal would get an `ssh` line queued into a terminal an
-/// agent is about to drive, which turns a link click into an outbound connection
-/// the user never asked for. None of the seam's other parameters separate those
-/// cases — every direct caller passes `DefaultSessionModeBehavior::Ignore` — so
-/// eligibility is stated per call site, and `Suppress` is what a route added
-/// later gets until someone decides otherwise.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum RepoModeAutoConnect {
-    /// The user asked for a terminal; connect it if it lands in a remote group.
-    Allow,
-    /// Opened on another feature's behalf, or connected by its own call site
-    /// once it knows the group the tab really ends up in.
-    Suppress,
-}
-
 impl Workspace {
     /// True when repo mode is compiled in and the runtime flag is on.
     pub(super) fn repo_mode_enabled() -> bool {
@@ -1440,7 +1419,7 @@ impl Workspace {
             .value();
 
         if warpification_enabled {
-            self.land_in_remote_path_when_connected(&terminal, &target.remote_path, ctx);
+            self.land_in_remote_path_when_connected(&terminal, target, ctx);
         }
 
         // The tab's shell is still bootstrapping, so this queues and fires on
@@ -1467,15 +1446,25 @@ impl Workspace {
     /// Fires at most once. The subscription outlives that only in the sense that
     /// it stays registered on the tab's `Sessions` model, which dies with the
     /// tab — so a tab closed before its shell connects drops it silently.
+    ///
+    /// Two conditions have to hold beyond the session type. The bootstrapped
+    /// session must name this target, or a remote shell the user opened by hand
+    /// in the same tab first would consume the landing. And the input must be
+    /// clean: the command is inserted at the cursor, so a user who starts typing
+    /// during the handshake would otherwise get the `cd` spliced through the
+    /// middle of their own command. Landing in the entry's path is worth less
+    /// than the line the user is holding, so a dirty input forfeits it outright
+    /// rather than waiting for a later session that will never come.
     fn land_in_remote_path_when_connected(
         &mut self,
         terminal: &ViewHandle<TerminalView>,
-        remote_path: &str,
+        target: &RemoteTarget,
         ctx: &mut ViewContext<Self>,
     ) {
         let sessions = terminal.as_ref(ctx).sessions_model().clone();
         let terminal = terminal.downgrade();
-        let cd_command = remote_cd_command(remote_path);
+        let cd_command = remote_cd_command(&target.remote_path);
+        let user_host = target.user_host();
         let mut landed = false;
 
         ctx.subscribe_to_model(&sessions, move |_, _, event, ctx| {
@@ -1491,10 +1480,20 @@ impl Workspace {
             ) {
                 return;
             }
+            if !bootstrapped.spawning_command.contains(&user_host) {
+                return;
+            }
             let Some(terminal) = terminal.upgrade(ctx) else {
                 return;
             };
             landed = true;
+            if terminal.as_ref(ctx).is_input_dirty() {
+                log::warn!(
+                    "repo_mode: remote shell came up while the user was typing; \
+                     skipping the path change"
+                );
+                return;
+            }
             let cd_command = cd_command.clone();
             terminal.update(ctx, |terminal, ctx| {
                 terminal.execute_command_or_set_pending(&cd_command, ctx);

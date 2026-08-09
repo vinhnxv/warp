@@ -15992,6 +15992,14 @@ impl TerminalView {
     pub fn is_login_shell_bootstrapped(&self) -> bool {
         self.is_login_shell_bootstrapped
     }
+    /// True when the input holds text the user typed and has not sent.
+    ///
+    /// Distinguishes user-authored input from a command some other part of the
+    /// app queued, which a plain emptiness check cannot.
+    pub fn is_input_dirty(&self) -> bool {
+        self.model.lock().is_input_dirty()
+    }
+
     pub fn has_pending_command_or_awaiting_completion(&self, ctx: &AppContext) -> bool {
         self.awaiting_pending_command_completion
             || !self.pending_command_queue.is_empty()

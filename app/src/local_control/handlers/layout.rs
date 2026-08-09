@@ -11,7 +11,7 @@ use crate::local_control::LocalControlBridge;
 use crate::local_control::resolver::{
     decode_params, target_window_id_for_target, validate_tab_create_target, workspace_for_window,
 };
-use crate::workspace::WorkspaceAction;
+use crate::workspace::{RepoModeAutoConnect, WorkspaceAction};
 #[derive(Serialize)]
 struct TabCreateResponse<'a> {
     action: &'static str,
@@ -94,6 +94,10 @@ fn tab_create_action(params: &serde_json::Value) -> Result<WorkspaceAction, Cont
     match params.tab_type {
         None | Some(TabType::Terminal) => Ok(WorkspaceAction::AddTerminalTab {
             hide_homepage: false,
+            // A tab asked for over the control bridge is not the user asking
+            // for a terminal on the selected host, and this bridge has no
+            // action that runs a command — connecting would supply one.
+            auto_connect: RepoModeAutoConnect::Suppress,
         }),
         Some(TabType::Agent) => Ok(WorkspaceAction::AddAgentTab),
         Some(TabType::Default) => Ok(WorkspaceAction::AddDefaultTab),

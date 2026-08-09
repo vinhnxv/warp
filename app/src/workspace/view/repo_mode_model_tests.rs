@@ -9,9 +9,9 @@ use crate::terminal::cli_agent_sessions::{
     CLIAgentSessionContext, CLIAgentSessionStatus, CLIAgentSessionsModel,
     CLIAgentSessionsModelEvent,
 };
-use crate::workspace::RepoRegistryKey;
 use crate::workspace::view::non_contiguous_groups;
 use crate::workspace::view::tests::{initialize_app, mock_workspace};
+use crate::workspace::{RepoModeAutoConnect, RepoRegistryKey};
 
 fn register_projects_model(app: &mut App, projects: Vec<Project>) {
     app.add_singleton_model(|ctx| ProjectManagementModel::new(projects, None, ctx));
@@ -3280,6 +3280,7 @@ fn test_add_terminal_tab_action_under_a_remote_entry_joins_its_group() {
             workspace.handle_action(
                 &WorkspaceAction::AddTerminalTab {
                     hide_homepage: false,
+                    auto_connect: RepoModeAutoConnect::Allow,
                 },
                 ctx,
             );

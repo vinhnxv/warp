@@ -123,7 +123,6 @@ use warpui::{
 
 #[cfg(feature = "local_fs")]
 use self::open_folder::OpenFolderAction;
-use self::repo_mode_model::RepoModeAutoConnect;
 use self::vertical_tabs::telemetry::{VerticalTabsDisplayOption, VerticalTabsTelemetryEvent};
 use self::vertical_tabs::{
     SummaryPaneKind, SummaryPaneKindIcons, VERTICAL_TABS_SETTINGS_BUTTON_POSITION_ID,
@@ -132,7 +131,7 @@ use self::vertical_tabs::{
     vtab_group_position_id,
 };
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
-use super::action::AutoCloudHandoffTrigger;
+use super::action::{AutoCloudHandoffTrigger, RepoModeAutoConnect};
 use super::action::{
     InitContent, NewSessionMenuAnchor, RestoreConversationLayout, TabContextMenuAnchor,
     VerticalTabsPaneContextMenuTarget, WorkspaceAction,
@@ -7143,6 +7142,7 @@ impl Workspace {
                 let mut terminal_item = MenuItemFields::new("Terminal")
                     .with_on_select_action(WorkspaceAction::AddTerminalTab {
                         hide_homepage: false,
+                        auto_connect: RepoModeAutoConnect::Allow,
                     })
                     .with_icon(icons::Icon::LayoutAlt01);
                 if is_terminal_default {
@@ -7180,6 +7180,7 @@ impl Workspace {
                 let mut terminal_item = MenuItemFields::new("Terminal")
                     .with_on_select_action(WorkspaceAction::AddTerminalTab {
                         hide_homepage: false,
+                        auto_connect: RepoModeAutoConnect::Allow,
                     })
                     .with_icon(icons::Icon::LayoutAlt01);
                 if effective_default == DefaultSessionMode::Terminal {
@@ -13306,11 +13307,21 @@ impl Workspace {
         let _ = is_docker_sandbox;
 
         // R1/R2: a terminal the user opened under a remote repository entry
-        // belongs on that machine, not just under its row. The sandbox guard is
-        // belt-and-braces — `add_docker_sandbox_tab` already suppresses — but a
-        // sandbox shell that ssh'd out with the user's identity is the one
-        // failure worth refusing twice.
-        if matches!(auto_connect, RepoModeAutoConnect::Allow) && !is_docker_sandbox {
+        // belongs on that machine, not just under its row.
+        //
+        // Two shell kinds refuse regardless of the call site's opt-in, because
+        // both would have an `ssh` queued into a terminal that is not the one
+        // the user is about to type into. A sandbox shell would leave the
+        // sandbox it exists to provide, carrying the user's identity; an agent
+        // tab hands its input to the agent, which would then drive the remote
+        // host. `add_docker_sandbox_tab` and `add_terminal_tab_with_new_agent_view`
+        // already suppress at their own call sites — these guards are what keep
+        // the `AddDefaultTab` routes, which cannot know which shell they get
+        // until here, from disagreeing with them.
+        if matches!(auto_connect, RepoModeAutoConnect::Allow)
+            && !is_docker_sandbox
+            && !should_enter_agent_view
+        {
             self.connect_new_tab_if_remote(ctx);
         }
 
@@ -24694,7 +24705,10 @@ impl TypedActionView for Workspace {
                     }
                 }
             }
-            AddTerminalTab { hide_homepage } => {
+            AddTerminalTab {
+                hide_homepage,
+                auto_connect,
+            } => {
                 self.add_new_session_tab_internal_with_default_session_mode_behavior(
                     NewSessionSource::Tab,
                     Some(window_id),
@@ -24702,7 +24716,7 @@ impl TypedActionView for Workspace {
                     None,
                     *hide_homepage,
                     DefaultSessionModeBehavior::Ignore,
-                    RepoModeAutoConnect::Allow,
+                    *auto_connect,
                     ctx,
                 );
                 ctx.notify();

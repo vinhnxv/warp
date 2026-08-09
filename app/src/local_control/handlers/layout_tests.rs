@@ -2,9 +2,30 @@ use ::local_control::protocol::TargetSelector;
 use ::local_control::{ErrorCode, InstanceId};
 use warpui::App;
 
-use super::create_tab;
+use super::{create_tab, tab_create_action};
 use crate::local_control::LocalControlBridge;
 use crate::workspace::view::tests::{initialize_app, mock_workspace};
+use crate::workspace::{RepoModeAutoConnect, WorkspaceAction};
+
+/// The bridge has no action that runs a command, so a tab it creates must not
+/// bring one with it: with a remote repository selected, an auto-connecting tab
+/// would put an `ssh` on the wire for a caller that cannot otherwise execute
+/// anything.
+#[test]
+fn tab_create_terminal_tab_does_not_connect_itself() {
+    let action =
+        tab_create_action(&serde_json::json!({})).expect("a terminal tab.create builds an action");
+    assert!(
+        matches!(
+            action,
+            WorkspaceAction::AddTerminalTab {
+                auto_connect: RepoModeAutoConnect::Suppress,
+                ..
+            }
+        ),
+        "expected a suppressed tab, got {action:?}"
+    );
+}
 
 #[test]
 fn tab_create_handler_adds_and_activates_terminal_tab() {

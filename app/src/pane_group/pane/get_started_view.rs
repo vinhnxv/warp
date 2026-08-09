@@ -24,7 +24,7 @@ use crate::pane_group::{BackingView, PaneConfiguration, PaneEvent};
 use crate::terminal::TerminalView;
 use crate::util::bindings::{BindingGroup, CustomAction, keybinding_name_to_display_string};
 use crate::view_components::DismissibleToast;
-use crate::workspace::{ToastStack, Workspace, WorkspaceAction};
+use crate::workspace::{RepoModeAutoConnect, ToastStack, Workspace, WorkspaceAction};
 use crate::{TelemetryEvent, send_telemetry_from_ctx};
 
 pub fn init(app: &mut AppContext) {
@@ -165,6 +165,7 @@ impl GetStartedView {
     fn start_create_new_project(&mut self, prompt: String, ctx: &mut ViewContext<Self>) {
         ctx.dispatch_typed_action(&WorkspaceAction::AddTerminalTab {
             hide_homepage: true,
+            auto_connect: RepoModeAutoConnect::Suppress,
         });
         update_active_terminal(ctx, |terminal, ctx| {
             terminal.create_new_project(prompt, ctx);
@@ -176,6 +177,7 @@ impl GetStartedView {
     fn start_clone_repo(&mut self, url: String, ctx: &mut ViewContext<Self>) {
         ctx.dispatch_typed_action(&WorkspaceAction::AddTerminalTab {
             hide_homepage: true,
+            auto_connect: RepoModeAutoConnect::Suppress,
         });
         update_active_terminal(ctx, |terminal, ctx| {
             terminal.agent_clone_repository(url, ctx);
@@ -314,6 +316,7 @@ impl TypedActionView for GetStartedView {
                 send_telemetry_from_ctx!(TelemetryEvent::GetStartedSkipToTerminal, ctx);
                 ctx.dispatch_typed_action(&WorkspaceAction::AddTerminalTab {
                     hide_homepage: true,
+                    auto_connect: RepoModeAutoConnect::Allow,
                 });
                 self.close(ctx);
             }

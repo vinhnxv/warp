@@ -142,6 +142,28 @@ impl std::fmt::Debug for RepoRegistryKey {
     }
 }
 
+/// Whether a newly created tab may connect itself to the remote host its tab
+/// group is bound to.
+///
+/// The shared new-terminal-tab seam serves every route that creates a terminal,
+/// and only some of them are the user asking for one. A Docker sandbox tab would
+/// `ssh` out of the sandbox it exists to provide; a tab opened from a `warp://`
+/// link, the Codex modal, or the control bridge would get an `ssh` line queued
+/// into a terminal something else is about to drive, which turns a link click or
+/// a scripted `tab.create` into an outbound connection nobody asked for. None of
+/// the seam's other parameters separate those cases — every direct caller passes
+/// `DefaultSessionModeBehavior::Ignore` — so eligibility is stated per call site,
+/// and `Suppress` is what a route added later gets until someone decides
+/// otherwise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepoModeAutoConnect {
+    /// The user asked for a terminal; connect it if it lands in a remote group.
+    Allow,
+    /// Opened on another feature's behalf, or connected by its own call site
+    /// once it knows the group the tab really ends up in.
+    Suppress,
+}
+
 #[derive(Debug, Clone)]
 pub enum WorkspaceAction {
     ActivateTab(usize),
@@ -327,6 +349,14 @@ pub enum WorkspaceAction {
     AddDefaultTab,
     AddTerminalTab {
         hide_homepage: bool,
+        /// Whether this tab may connect itself to the remote host of the
+        /// repo-mode group it lands in.
+        ///
+        /// The action serves both the user-facing new-terminal affordances and
+        /// the programmatic `tab.create` bridge, and only the former is the
+        /// user asking for a terminal. Local control has no command-running
+        /// action of its own, so a connecting tab would hand it one.
+        auto_connect: RepoModeAutoConnect,
     },
     AddTabWithShell {
         shell: AvailableShell,
