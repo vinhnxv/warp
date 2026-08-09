@@ -332,3 +332,112 @@ installed Rust target here is `aarch64-apple-darwin`. Those files were reviewed 
 checked with `rustfmt --check` (which proves they parse), but they have not been type-checked or
 executed. **Linux CI is the only gate on them, including the `test_exec_with_a_non_utf8_path_errors`
 test added during this review pass.**
+
+---
+
+# Run 3 — repo-mode remote new-tab connect
+
+Plan: `docs/plans/2026-08-09-001-fix-repo-mode-remote-new-tab-plan.md`.
+Commits: `c17d8749f` (plan), `87be09dd0` (fix), `94e2c4a99` (review fixes).
+Reviewers: correctness, security, adversarial, testing, project-standards,
+maintainability, reliability. No cross-model peer — no different-provider CLI is
+installed on this host, so the adversarial lens ran in-process and its agreement
+with the other lenses is not different-model corroboration.
+
+## Applied during review
+
+- **Feature-driven tabs connected.** `add_terminal_tab` is a shared helper, not the
+  keyboard shortcut; `root_view.rs`'s `warp://` subshell link and
+  `OpenNewTabAndRunWorkflow` both reach it. Both queued an `ssh` ahead of the command
+  they exist to run. Fixed by `add_terminal_tab_suppressing_repo_connect`.
+- **Tests asserted resolution, not emission.** Measured before the fix: forcing every
+  call site to `Suppress` left all 134 tests green. `input().buffer_text(ctx)` and
+  `has_pending_command()` are public and used throughout `terminal/view_tests.rs`, so
+  the plan's KTD5 premise ("nothing in the harness observes
+  `execute_command_or_set_pending`") was simply false. Six tests now assert the queued
+  command; the forced-`Suppress` run is now red.
+- **Doc comments naming their callers**, plus one describing the edit rather than the
+  code (AGENTS.md lines 139-147).
+
+## Not applied — needs a decision
+
+### R1. `local_control` `tab.create` auto-connects
+
+`app/src/local_control/handlers/layout.rs:95` builds `WorkspaceAction::AddTerminalTab`,
+which is on the allowlist. So a programmatic tab created through the local-control
+bridge auto-`ssh`s when a remote entry happens to be selected. Local control has no
+run/exec action in its catalog (`crates/local_control/src/catalog.rs:167-296`), so this
+gives it a way to start a command it otherwise cannot.
+
+Whether this is a defect depends on whether CLI-driven tab creation counts as the user
+asking for a terminal. Flagged P1 by security, P2 by adversarial. Not applied because
+the fix means adding a provenance field to a serialized action enum
+(`app/src/workspace/action.rs:328`), a heavier upstream edit than the glue inventory
+(R9 of the repo-mode sidebar plan) wants, for a case that is arguably user-driven.
+
+### R2. Delayed `cd` splices into text the user already typed
+
+`land_in_remote_path_when_connected` inserts the `cd` at the cursor with no check for
+unsent input. A user who types during the multi-second SSH handshake gets their command
+spliced, and the tab then fails to land in the entry's path. The mechanism is unchanged
+shipped code, but it used to run once per entry and now runs once per tab. Reliability's
+proposed guard is `TerminalModel::is_input_dirty()`. Not applied: it changes shipped
+behavior on a path outside this plan's scope, and a wrong guard means the `cd` silently
+never runs.
+
+### R3. Agent mode connects, then enters agent view over the connecting shell
+
+`AddDefaultTab` under `DefaultSessionMode::Agent` routes through `add_terminal_tab`
+(`Allow` + `DefaultSessionModeBehavior::Apply`), so the seam connects at `view.rs` and
+`enter_agent_view_on_active_tab` runs immediately after. The other agent route,
+`add_terminal_tab_with_new_agent_view`, passes `Suppress`. The two disagree. This is the
+plan's own deferred question ("Whether a tab created under a remote entry while the
+default session mode is Agent should enter agent view over the connected shell"), so it
+is a smoke-time decision rather than a new defect — but the inconsistency is real.
+
+## Residual risks
+
+- Each connecting tab opens its own SSH control master (`bash_body.sh:1039` keys the
+  control path to `$WARP_SESSION_ID`), so N tabs means up to N handshakes and N
+  passphrase prompts. Recorded as an accepted Scope Boundary in the plan; the cost is
+  created by this change, because before it an entry had exactly one connecting tab.
+- `add_tab_with_shell` passes `Allow`, so explicitly picking a shell under a remote
+  entry starts that shell and immediately `ssh`s away — the choice applies only to the
+  jump host. Intended, but a visible behavior change.
+- The seam's second guard names one implementation (`!is_docker_sandbox`) rather than
+  the property, so a future sandbox/jail shell type inherits `Allow` silently.
+- `connect_active_tab_to_remote`'s `log::warn!`-and-return when no terminal is found
+  reproduces the exact bug being fixed if it is ever hit. No reachable trigger was
+  demonstrated — the pane is built synchronously just before.
+- A pane split inside a remote tab still opens a local shell under the remote row. Same
+  root confusion, different affordance; named as a Scope Boundary.
+- `new_tab_in_group` depends on `move_tab_to_index` and `expand_tab_group` leaving the
+  new tab active. Both do today (`view.rs:8195-8210`, `:7683-7688`), but nothing
+  enforces it for a future reorder helper.
+- Call-site enumeration was grep-based; no symbol-aware index was available, so
+  string-keyed `dispatch_typed_action` routes may hide further entry points.
+
+## Testing gaps
+
+- No test covers the `!is_docker_sandbox` guard's negative case — a Docker Sandbox shell
+  picked from the shell selector while a remote entry is selected. That guard is the
+  sole protection on that path, since `add_docker_sandbox_tab`'s own `Suppress` is a
+  different call site.
+- No test covers the warpification-off branch (`remote_ssh_command_landing_in_path`)
+  from the new call sites, though keeping that branch from drifting is why the connect
+  helper was extracted.
+- No test closes a tab between creation and `SessionBootstrapped`, or simulates a remote
+  shell that never bootstraps.
+- No test covers the user-typed-before-bootstrap race in R2.
+- The nine-step manual smoke is still the only proof of real SSH connectivity; the new
+  emission assertions prove the command is queued, not that it connects.
+
+## Verification note
+
+`./script/presubmit` and `cargo clippy --workspace --all-features` cannot run here:
+`command-signatures-v2`'s build script needs a JS toolchain (`yarn`/`corepack`) that is
+absent. Confirmed pre-existing by reproducing the failure with this change set stashed.
+Green here: `./script/format`, `cargo clippy -p warp --all-targets --tests -- -D
+warnings`, `cargo clippy -p repo_mode ...`, `cargo nextest run -p warp repo_mode` (135),
+`cargo nextest run -p warp workspace::view` (348), `cargo nextest run -p warp root_view`
+(11), `cargo nextest run -p repo_mode` (34).
