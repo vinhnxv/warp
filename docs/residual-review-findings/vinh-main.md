@@ -359,41 +359,33 @@ with the other lenses is not different-model corroboration.
 - **Doc comments naming their callers**, plus one describing the edit rather than the
   code (AGENTS.md lines 139-147).
 
-## Not applied — needs a decision
+## Applied in a follow-up pass (`b5947793b`)
 
-### R1. `local_control` `tab.create` auto-connects
+All three findings recorded here as needing a decision were resolved rather than deferred,
+plus one adversarial P2 from the same review.
 
-`app/src/local_control/handlers/layout.rs:95` builds `WorkspaceAction::AddTerminalTab`,
-which is on the allowlist. So a programmatic tab created through the local-control
-bridge auto-`ssh`s when a remote entry happens to be selected. Local control has no
-run/exec action in its catalog (`crates/local_control/src/catalog.rs:167-296`), so this
-gives it a way to start a command it otherwise cannot.
+- **R1 — `local_control` `tab.create` auto-connected.** `WorkspaceAction::AddTerminalTab` now
+  carries the eligibility as a field, so each dispatcher states it: keybinding, both add-tab
+  menus, and the get-started "Terminal session" button allow; the control bridge suppresses.
+  The enum moved to `workspace::action` since it now parameterizes an action. Cheaper than
+  feared — `WorkspaceAction` has no serde derive and is built only from Rust, so no
+  serialized form or keybinding string had to migrate.
+- **R2 — delayed `cd` spliced into typed input.** The landing now forfeits when the input is
+  dirty. Uses `TerminalView::is_input_dirty`, added here to delegate to the flag the input
+  already maintains for genuine user edits; a plain emptiness check cannot tell user text
+  from a command the app queued.
+- **R3 — agent mode disagreed with itself.** The seam refuses whenever the tab is about to
+  become an agent tab, so `AddDefaultTab` and `add_terminal_tab_with_new_agent_view` now
+  agree.
+- **Adversarial P2 — the `cd` fired on the first warpified remote session in the tab,**
+  whoever opened it. It now requires the bootstrapped session's `spawning_command` to name
+  this target. Containment on `user_host()` rather than an exact command match, so quoting
+  or normalization in the bootstrap path cannot silently stop the landing from ever firing.
 
-Whether this is a defect depends on whether CLI-driven tab creation counts as the user
-asking for a terminal. Flagged P1 by security, P2 by adversarial. Not applied because
-the fix means adding a provenance field to a serialized action enum
-(`app/src/workspace/action.rs:328`), a heavier upstream edit than the glue inventory
-(R9 of the repo-mode sidebar plan) wants, for a case that is arguably user-driven.
-
-### R2. Delayed `cd` splices into text the user already typed
-
-`land_in_remote_path_when_connected` inserts the `cd` at the cursor with no check for
-unsent input. A user who types during the multi-second SSH handshake gets their command
-spliced, and the tab then fails to land in the entry's path. The mechanism is unchanged
-shipped code, but it used to run once per entry and now runs once per tab. Reliability's
-proposed guard is `TerminalModel::is_input_dirty()`. Not applied: it changes shipped
-behavior on a path outside this plan's scope, and a wrong guard means the `cd` silently
-never runs.
-
-### R3. Agent mode connects, then enters agent view over the connecting shell
-
-`AddDefaultTab` under `DefaultSessionMode::Agent` routes through `add_terminal_tab`
-(`Allow` + `DefaultSessionModeBehavior::Apply`), so the seam connects at `view.rs` and
-`enter_agent_view_on_active_tab` runs immediately after. The other agent route,
-`add_terminal_tab_with_new_agent_view`, passes `Suppress`. The two disagree. This is the
-plan's own deferred question ("Whether a tab created under a remote entry while the
-default session mode is Agent should enter agent view over the connected shell"), so it
-is a smoke-time decision rather than a new defect — but the inconsistency is real.
+Two get-started entry points were found in the same pass and fixed with R1: "create project"
+and "clone repo" both open a tab in order to type into it, and had an `ssh` queued ahead of
+the command they exist to run — the `94e2c4a99` class reached through the action rather than
+the helper.
 
 ## Residual risks
 
@@ -419,6 +411,15 @@ is a smoke-time decision rather than a new defect — but the inconsistency is r
 
 ## Testing gaps
 
+- **Three of the four follow-up fixes are not unit-covered, and the reason is the harness,
+  not effort.** An emitted `SessionsEvent::SessionBootstrapped` never reaches a view
+  subscriber under `mock_workspace` — a test that announces a remote bootstrap and asserts
+  the `cd` landed passes identically with the guards removed, so it was deleted rather than
+  kept as a green test proving nothing. That blocks coverage of both the target-match and
+  dirty-input guards. The agent-mode guard needs `AISettings::default_session_mode` set to
+  Agent, which no existing test does. Only the control bridge's action is asserted
+  (`tab_create_terminal_tab_does_not_connect_itself`).
+- Nothing covers the two get-started routes now passing suppress.
 - No test covers the `!is_docker_sandbox` guard's negative case — a Docker Sandbox shell
   picked from the shell selector while a remote entry is selected. That guard is the
   sole protection on that path, since `add_docker_sandbox_tab`'s own `Suppress` is a
