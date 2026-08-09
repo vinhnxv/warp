@@ -1422,10 +1422,9 @@ impl Workspace {
 
     /// Connect the active tab to `target` and land it in the target's path.
     ///
-    /// Split out of [`Self::open_remote_repo_mode_tab`] so every tab that ends
-    /// up under a remote entry reaches the host the same way — the entry's
-    /// first tab and every tab opened after it. One implementation is what
-    /// keeps the warpification-off route from drifting between them.
+    /// The single implementation of that sequence, so an entry's first tab and
+    /// every tab opened after it reach the host the same way — including the
+    /// warpification-off route, which lands via the command line instead.
     fn connect_active_tab_to_remote(&mut self, target: &RemoteTarget, ctx: &mut ViewContext<Self>) {
         let Some(terminal) = self
             .active_tab_pane_group()
@@ -1918,12 +1917,9 @@ impl Workspace {
 
     /// Connect the active tab when `group_id` is bound to a remote entry.
     ///
-    /// Separate from [`Self::connect_new_tab_if_remote`] for the group menu,
-    /// which cannot connect at the shared seam: the creation path hands its tab
-    /// the *selected* entry's group, not the group the menu targeted, so
-    /// connecting there would reach one host and then this call would reach
-    /// another. The menu suppresses the seam and calls this once its assignment
-    /// is final, naming the group it meant (R9).
+    /// Names the group explicitly, for a caller that has resolved the tab's
+    /// final group itself rather than letting tab creation infer one from the
+    /// current selection (R9).
     pub(super) fn connect_new_tab_in_group_if_remote(
         &mut self,
         group_id: TabGroupId,

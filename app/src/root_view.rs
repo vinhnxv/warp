@@ -1290,7 +1290,10 @@ fn open_new_tab_insert_subshell_command_and_bootstrap_if_supported(
                     &root_view.auth_onboarding_state
                 {
                     workspace_view_handle.update(ctx, |workspace, ctx| {
-                        workspace.add_terminal_tab(false /* hide_homepage */, ctx);
+                        workspace.add_terminal_tab_suppressing_repo_connect(
+                            false, /* hide_homepage */
+                            ctx,
+                        );
                     });
                 }
             });

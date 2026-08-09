@@ -6712,7 +6712,7 @@ impl Workspace {
     ) {
         match event {
             AgentManagementViewEvent::OpenNewTabAndRunWorkflow(workflow) => {
-                self.add_terminal_tab(false, ctx);
+                self.add_terminal_tab_suppressing_repo_connect(false, ctx);
                 self.run_workflow_in_active_input(
                     workflow,
                     WorkflowSource::App,
@@ -7924,10 +7924,8 @@ impl Workspace {
         }
         self.expand_tab_group(group_id, ctx);
 
-        // R9: only now is the tab's group final. The creation path above gave it
-        // the *selected* entry's group, which may be a different remote entry
-        // entirely, so the seam is suppressed and the connect happens here —
-        // once, against the group the menu actually targeted.
+        // Only here is the tab's group final: the creation path above gave it
+        // the *selected* entry's group, which can be a different remote entry.
         self.connect_new_tab_in_group_if_remote(group_id, ctx);
     }
 
@@ -13069,6 +13067,30 @@ impl Workspace {
             None,
             hide_homepage,
             RepoModeAutoConnect::Allow,
+            ctx,
+        );
+        ctx.notify();
+    }
+
+    /// [`Self::add_terminal_tab`] for a tab whose first command the caller
+    /// supplies itself.
+    ///
+    /// Same tab, minus repo mode's auto-connect. A caller that opens a tab in
+    /// order to type into it has not asked for a terminal on whatever host
+    /// happens to be selected, and queueing an `ssh` ahead of its command would
+    /// run that command on the wrong machine (R8).
+    pub fn add_terminal_tab_suppressing_repo_connect(
+        &mut self,
+        hide_homepage: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.add_new_session_tab_with_default_mode(
+            NewSessionSource::Tab,
+            Some(ctx.window_id()),
+            None,
+            None,
+            hide_homepage,
+            RepoModeAutoConnect::Suppress,
             ctx,
         );
         ctx.notify();

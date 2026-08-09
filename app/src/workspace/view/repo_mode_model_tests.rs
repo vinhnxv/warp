@@ -3113,8 +3113,30 @@ fn test_tab_opened_outside_the_entry_path_stays_ungrouped() {
                 by_entry.values().all(|members| !members.contains(&index)),
                 "an ungrouped tab must not be filed under any entry"
             );
+            assert_eq!(
+                active_tab_queued_command(workspace, ctx),
+                None,
+                "a loose tab connects to nothing"
+            );
         });
     });
+}
+
+/// The command queued into the active tab's terminal, or `None` when nothing
+/// was queued.
+///
+/// The resolution assertions below say a tab was *filed* under a remote entry.
+/// Only this says it was *connected* — which is the whole difference between
+/// the bug and the fix, since the bug filed tabs under the remote row and left
+/// them local. A freshly created test terminal has not bootstrapped, so
+/// `execute_command_or_set_pending` leaves the command sitting in the input.
+fn active_tab_queued_command(workspace: &Workspace, ctx: &AppContext) -> Option<String> {
+    let terminal = workspace
+        .active_tab_pane_group()
+        .as_ref(ctx)
+        .active_session_view(ctx)?;
+    let text = terminal.as_ref(ctx).input().as_ref(ctx).buffer_text(ctx);
+    (!text.is_empty()).then_some(text)
 }
 
 /// Covers U2: the group's binding — not `selected_repo_root` — is what says
@@ -3223,6 +3245,13 @@ fn test_second_tab_under_a_remote_entry_resolves_to_the_same_host() {
                 .expect("the entry's group resolves to its host");
             assert_eq!(target.server, "10.0.0.7");
             assert_eq!(target.remote_path, "/srv/app");
+
+            let queued = active_tab_queued_command(workspace, ctx)
+                .expect("the second tab should have an ssh queued into it");
+            assert!(
+                queued.contains("ssh") && queued.contains("10.0.0.7"),
+                "expected an ssh to the entry's host, got {queued:?}"
+            );
         });
     });
 }
@@ -3258,6 +3287,51 @@ fn test_add_terminal_tab_action_under_a_remote_entry_joins_its_group() {
             let index = workspace.active_tab_index;
             assert_eq!(workspace.tabs[index].group_id, Some(group_id));
             assert!(workspace.remote_target_for_group(group_id).is_some());
+            assert!(
+                active_tab_queued_command(workspace, ctx)
+                    .is_some_and(|queued| queued.contains("ssh")),
+                "the add-tab menu's terminal action should connect too"
+            );
+        });
+    });
+}
+
+/// Covers R8/AE9: a tab another feature opens to type its own command into must
+/// not have an `ssh` queued ahead of that command, however the tab is filed.
+/// The `warp://` subshell link and the workflow runner both reach tab creation
+/// through the same helper the keyboard shortcut uses, so the eligibility
+/// decision cannot live in that helper.
+#[test]
+fn test_a_feature_driven_tab_under_a_remote_entry_does_not_connect() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let key = format_remote_key("10.0.0.7", 22, "vinh", "", "/srv/app");
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            ProjectManagementModel::handle(ctx).update(ctx, |projects, ctx| {
+                projects.upsert_project(PathBuf::from(&key), ctx);
+            });
+            workspace.select_repo_mode_entry(Path::new(&key), ctx);
+            let group_id = workspace
+                .selected_repo_mode_group_id()
+                .expect("remote entry should bind a group");
+
+            workspace.add_terminal_tab_suppressing_repo_connect(false, ctx);
+
+            let index = workspace.active_tab_index;
+            assert_eq!(
+                workspace.tabs[index].group_id,
+                Some(group_id),
+                "it still belongs to the entry — only the connect is suppressed"
+            );
+            assert_eq!(
+                active_tab_queued_command(workspace, ctx),
+                None,
+                "no ssh may be queued ahead of the caller's own command"
+            );
         });
     });
 }
@@ -3297,6 +3371,11 @@ fn test_new_tab_inherits_an_active_remote_tabs_group_with_no_selection() {
                 "inheritance still files the tab under the entry"
             );
             assert!(workspace.remote_target_for_group(group_id).is_some());
+            assert!(
+                active_tab_queued_command(workspace, ctx)
+                    .is_some_and(|queued| queued.contains("ssh")),
+                "a tab that lands in a remote group connects, selection or not"
+            );
         });
     });
 }
@@ -3346,6 +3425,25 @@ fn test_group_menu_tab_resolves_to_its_target_group_not_the_selection() {
                 .expect("B's group resolves to B's host");
             assert_eq!(target.server, "10.0.0.8");
             assert_eq!(target.remote_path, "/srv/b");
+
+            // The defect this guards against is two connects in one shell: the
+            // seam reaching A, then this path reaching B. One `ssh` line, and
+            // it names B.
+            let queued = active_tab_queued_command(workspace, ctx)
+                .expect("the group menu's tab should have an ssh queued into it");
+            assert!(
+                queued.contains("10.0.0.8"),
+                "expected an ssh to B, got {queued:?}"
+            );
+            assert!(
+                !queued.contains("10.0.0.7"),
+                "the selected entry A must not be reached, got {queued:?}"
+            );
+            assert_eq!(
+                queued.matches("ssh").count(),
+                1,
+                "exactly one connect, got {queued:?}"
+            );
         });
     });
 }
