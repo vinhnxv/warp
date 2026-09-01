@@ -23,6 +23,7 @@ use crate::ai::blocklist::agent_view::AgentViewEntryOrigin;
 use crate::ai::blocklist::history_model::BlocklistAIHistoryModel;
 use crate::server::server_api::ServerApiProvider;
 use crate::terminal::model::block::BlockId;
+use crate::workspaces::user_workspaces::ResolvedTeamScope;
 
 #[derive(Default)]
 pub(super) struct SharedSessionState {
@@ -199,6 +200,7 @@ impl BlocklistAIController {
         });
 
         // Eagerly create an exchange for this request (with empty inputs) and initialize output.
+        let scope = ResolvedTeamScope::from_scope(&self.team_context(ctx));
         history.update(ctx, |history_model, ctx| {
             let _ = history_model.update_conversation_for_new_request_input(
                 RequestInput::for_task(
@@ -208,6 +210,7 @@ impl BlocklistAIController {
                     self.get_current_response_initiator(),
                     conversation_id,
                     self.terminal_surface_id,
+                    &scope,
                     ctx,
                 ),
                 stream_id.clone(),
@@ -517,9 +520,11 @@ impl BlocklistAIController {
                 .map(|conversation| stream_finished::ConversationUsageMetadata {
                     context_window_usage: conversation.context_window_usage(),
                     credits_spent: conversation.inference_credits_spent(),
+                    #[allow(deprecated)]
                     platform_credits_spent: conversation.platform_credits_spent(),
                     summarized: conversation.was_summarized(),
                     total_input_tokens: 0,
+                    total_charges: None,
                     #[allow(deprecated)]
                     token_usage: conversation
                         .token_usage()
@@ -561,7 +566,9 @@ impl BlocklistAIController {
                     conversation_usage_metadata: usage_metadata,
                     token_usage: vec![],
                     should_refresh_model_config: false,
+                    #[allow(deprecated)]
                     request_cost: None,
+                    request_charges: None,
                 },
             )),
         };

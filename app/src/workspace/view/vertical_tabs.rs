@@ -57,7 +57,10 @@ use crate::pane_group::{
     CodePane, NotebookPane, PaneGroup, PaneId, TabBarHoverIndex, TerminalPane, WorkflowPane,
 };
 use crate::safe_triangle::SafeTriangle;
-use crate::tab::{SelectedTabColor, TAB_INDICATOR_SYNCED_COLOR, TabData, tab_position_id};
+use crate::tab::{
+    SelectedTabColor, TAB_INDICATOR_SYNCED_COLOR, TabData, reveals_tab_shortcut_hints,
+    tab_activate_binding_name, tab_position_id,
+};
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::session_settings::SessionSettings;
 use crate::terminal::view::TerminalViewState;
@@ -411,6 +414,7 @@ fn render_pane_row_element(
         is_pinned,
         container_is_hovered,
         in_repo_accordion: _,
+        shortcut_hint_binding_name: _,
     } = props;
     let is_selected = is_active_tab && is_focused;
     let show_pin = FeatureFlag::PinnedTabs.is_enabled() && is_pinned && !container_is_hovered;
@@ -862,6 +866,7 @@ struct PaneProps<'a> {
     /// tree. The repo row already shows directory/branch/PR/diff context, so
     /// terminal rows collapse to just their command/conversation line.
     in_repo_accordion: bool,
+    shortcut_hint_binding_name: Option<&'static str>,
 }
 
 struct PaneRowState {
@@ -1060,7 +1065,7 @@ fn normalize_summary_text(text: &str) -> Option<String> {
 
 /// Returns the conversation status for a terminal pane, used to render the per-line status
 /// pill prefix in Summary mode. Mirrors the status sources used by `render_detail_status_pill`
-/// in the detail sidecar — CLI agent sessions with rich status, Oz agent conversations, or
+/// in the detail sidecar — CLI agent sessions with rich status, Warp Agent conversations, or
 /// ambient agent sessions. Returns `None` for plain terminals or conversations without status.
 fn summary_conversation_status_for_terminal(
     terminal_view: &TerminalView,
@@ -1244,6 +1249,7 @@ impl VerticalTabsPanelState {
                                 None,
                                 tab.pinned,
                                 false,
+                                None,
                                 app,
                             )
                             .is_some_and(|props| pane_matches_query(&props, &query_lower, app))
@@ -1918,6 +1924,7 @@ pub(super) fn render_groups(
                                     None,
                                     tab.pinned,
                                     false,
+                                    None,
                                     app,
                                 )
                                 .is_some_and(|props| {
@@ -1949,6 +1956,7 @@ pub(super) fn render_groups(
                                 None,
                                 tab.pinned,
                                 false,
+                                None,
                                 app,
                             )
                             .is_some_and(|props| pane_matches_query(&props, &query_lower, app))
@@ -2361,6 +2369,7 @@ fn render_tab_group_internal(
                     None,
                     tab.pinned,
                     group_state.is_hovered(),
+                    tab_activate_binding_name(tab_index, workspace.tabs.len()),
                     app,
                 ) else {
                     return Empty::new().finish();
@@ -2421,6 +2430,7 @@ fn render_tab_group_internal(
                     is_pane_being_renamed.then_some(workspace.pane_rename_editor.clone()),
                     tab.pinned,
                     group_state.is_hovered(),
+                    tab_activate_binding_name(tab_index, workspace.tabs.len()),
                     app,
                 ) else {
                     continue;
@@ -3565,6 +3575,24 @@ fn render_synced_inputs_indicator() -> Box<dyn Element> {
     .finish()
 }
 
+/// Resolves the switch-to-tab shortcut label for a row while the reveal
+/// modifier is held. Returns `None` when no hint should be shown.
+fn shortcut_hint_label(props: &PaneProps<'_>, app: &AppContext) -> Option<String> {
+    if !reveals_tab_shortcut_hints(app) {
+        return None;
+    }
+    keybinding_name_to_display_string(props.shortcut_hint_binding_name?, app)
+}
+
+/// Inline label showing the switch-to-tab keyboard shortcut, mirroring the
+/// horizontal tab bar's `TabComponent::render_shortcut_hint`.
+fn render_shortcut_hint(label: &str, appearance: &Appearance) -> Box<dyn Element> {
+    let theme = appearance.theme();
+    Text::new_inline(label.to_string(), appearance.ui_font_family(), 12.)
+        .with_color(theme.sub_text_color(theme.background()).into())
+        .finish()
+}
+
 /// Row title line with its trailing indicators — the synchronized-inputs link
 /// icon followed by the unread-activity dot — pinned to the right edge. Returns
 /// `title` untouched when the row has no indicator to show.
@@ -3572,9 +3600,10 @@ pub(super) fn render_row_title_line(
     title: Box<dyn Element>,
     shows_synced_inputs: bool,
     shows_activity_indicator: bool,
+    shortcut_hint: Option<Box<dyn Element>>,
     theme: &WarpTheme,
 ) -> Box<dyn Element> {
-    if !shows_synced_inputs && !shows_activity_indicator {
+    if !shows_synced_inputs && !shows_activity_indicator && shortcut_hint.is_none() {
         return title;
     }
 
@@ -3587,6 +3616,9 @@ pub(super) fn render_row_title_line(
     }
     if shows_activity_indicator {
         indicators.add_child(render_title_indicator(theme));
+    }
+    if let Some(hint) = shortcut_hint {
+        indicators.add_child(hint);
     }
 
     Flex::row()
@@ -3662,6 +3694,13 @@ fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
         if has_indicator {
             title_row.add_child(
                 Container::new(render_title_indicator(theme))
+                    .with_margin_left(4.)
+                    .finish(),
+            );
+        }
+        if let Some(label) = shortcut_hint_label(&props, app) {
+            title_row.add_child(
+                Container::new(render_shortcut_hint(&label, appearance))
                     .with_margin_left(4.)
                     .finish(),
             );
@@ -4008,6 +4047,7 @@ impl<'a> PaneProps<'a> {
         pane_rename_editor: Option<ViewHandle<EditorView>>,
         is_pinned: bool,
         container_is_hovered: bool,
+        shortcut_hint_binding_name: Option<&'static str>,
         app: &AppContext,
     ) -> Option<Self> {
         let pane = pane_group.pane_by_id(pane_id)?;
@@ -4063,6 +4103,7 @@ impl<'a> PaneProps<'a> {
             is_pinned,
             container_is_hovered,
             in_repo_accordion: false,
+            shortcut_hint_binding_name,
         })
     }
 
@@ -4299,7 +4340,7 @@ fn terminal_kind_badge_label(is_oz_agent: bool, cli_agent: Option<CLIAgent>) -> 
     if let Some(cli_agent) = cli_agent {
         cli_agent.display_name().to_string()
     } else if is_oz_agent {
-        "Oz".to_string()
+        "Warp Agent".to_string()
     } else {
         "Terminal".to_string()
     }
@@ -4550,6 +4591,7 @@ fn render_terminal_row_content(
             first_line,
             row_shows_synced_inputs_indicator(props, app),
             has_unread_activity(&props.typed, app),
+            shortcut_hint_label(props, app).map(|label| render_shortcut_hint(&label, appearance)),
             theme,
         );
     }
@@ -4655,6 +4697,7 @@ fn render_terminal_row_content(
         first_line,
         row_shows_synced_inputs_indicator(props, app),
         has_unread_activity(&props.typed, app),
+        shortcut_hint_label(props, app).map(|label| render_shortcut_hint(&label, appearance)),
         theme,
     );
 
@@ -4945,6 +4988,7 @@ fn render_summary_tab_item(
         title_region.finish(),
         row_shows_synced_inputs_indicator(&props, app),
         summary.has_unread_activity,
+        shortcut_hint_label(&props, app).map(|label| render_shortcut_hint(&label, appearance)),
         theme,
     ));
 
@@ -5427,7 +5471,7 @@ fn render_terminal_primary_line_for_view(
 
 /// Primary line for terminal pane rows. Precedence:
 /// 1. CLI agent session with plugin data (query/summary) + status
-/// 2. Oz agent conversation title + status
+/// 2. Warp Agent conversation title + status
 /// 3. Terminal title
 fn render_terminal_primary_line(
     primary_line: TerminalPrimaryLineData,
@@ -6932,6 +6976,7 @@ fn detail_pane_props<'a>(
         None,
         false,
         false,
+        None,
         app,
     )
 }
@@ -7481,6 +7526,7 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
         title_element,
         row_shows_synced_inputs_indicator(&props, app),
         has_indicator,
+        shortcut_hint_label(&props, app).map(|label| render_shortcut_hint(&label, appearance)),
         theme,
     );
 

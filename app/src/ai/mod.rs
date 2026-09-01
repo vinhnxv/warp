@@ -31,6 +31,7 @@ pub(crate) mod conversation_rename;
 pub(crate) mod conversation_status_ui;
 pub(crate) mod conversation_utils;
 pub mod credit_availability;
+pub(crate) mod custom_endpoints;
 pub(crate) mod custom_model_router_editor;
 pub(crate) mod custom_model_routers;
 pub(crate) mod document;
@@ -52,6 +53,7 @@ pub(crate) mod remote_agent_context;
 pub(crate) mod remote_context_files;
 pub mod request_usage_model;
 pub(crate) mod restored_conversations;
+pub(crate) mod runner_display;
 pub(crate) mod skills;
 #[cfg(not(target_family = "wasm"))]
 pub(crate) mod tui_api_keys;

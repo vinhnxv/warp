@@ -1,20 +1,23 @@
 use warp::tui_export::{
-    AIConversationId, BlocklistAIHistoryModel, CloudAgentStartupBlocker, CloudAgentStartupFailure,
-    CloudAgentStartupIssue, ConversationStatus, Harness, OrchestrationEventStreamerEvent,
-    RenderableAIError, StartAgentExecutionMode, StartAgentExecutor, StartAgentExecutorEvent,
-    StartAgentOutcome, StartAgentRequest, register_tui_session_view_test_singletons,
+    AIConversationId, AmbientAgentTaskId, BlocklistAIHistoryModel, CloudAgentStartupBlocker,
+    CloudAgentStartupFailure, CloudAgentStartupIssue, ConversationStatus, Harness,
+    OrchestrationEventStreamerEvent, RenderableAIError, StartAgentExecutionMode,
+    StartAgentExecutor, StartAgentExecutorEvent, StartAgentOutcome, StartAgentRequest,
+    register_tui_session_view_test_singletons,
 };
+use warp_core::features::FeatureFlag;
 use warpui::platform::WindowStyle;
 use warpui::{AddWindowOptions, ModelHandle, ReadModel, SingletonEntity as _, UpdateModel};
 use warpui_core::elements::tui::{TuiBufferExt, TuiRect, text_width};
 use warpui_core::presenter::tui::TuiPresenter;
 use warpui_core::{App, TuiView as _, TypedActionView as _, WindowId};
 
-use super::TuiOrchestrationModel;
+use super::{MaterializedLocalOzChildSession, ORCHESTRATOR_TAB_LABEL, TuiOrchestrationModel};
 use crate::cloud_run::TuiCloudRunStartup;
 use crate::cloud_run_view::{TuiCloudRunAction, TuiCloudRunView};
 use crate::root_view::RootTuiView;
 use crate::session_registry::{TuiSessionId, TuiSessionView, TuiSessions};
+use crate::tab_bar::TuiTabBarNavigationDirection;
 use crate::test_fixtures::{add_test_semantic_selection, add_test_terminal_session};
 
 struct OrchestrationFixture {
@@ -56,7 +59,7 @@ fn orchestration_fixture(app: &mut App) -> OrchestrationFixture {
                 window_style: WindowStyle::NotStealFocus,
                 ..Default::default()
             },
-            |_| RootTuiView::new(),
+            RootTuiView::new,
         )
     });
     let sessions = app.add_singleton_model(|_| TuiSessions::new_for_test());
@@ -88,6 +91,7 @@ fn add_child_session(
                 name.to_owned(),
                 parent_conversation_id,
                 Some(Harness::Oz),
+                false,
                 ctx,
             );
             history.set_active_conversation_id(conversation_id, session_id.surface_id(), ctx);
@@ -262,6 +266,78 @@ fn assert_failed_launch_cleaned_up(
     );
 }
 
+/// Regression for QUALITY-1902 (the TUI counterpart of QUALITY-1897):
+/// `register_local_oz_child_session` must index the run id through
+/// `assign_run_id_for_conversation`, not a bare `set_task_id`, so the SSE
+/// remote-child placeholder path's idempotency check
+/// (`conversation_id_for_agent_id`) can see it immediately. Drives
+/// `register_local_oz_child_session` itself (not just the shared helper it
+/// calls), so a regression at that call site fails this test.
+#[test]
+fn local_oz_child_session_indexes_run_id_immediately() {
+    App::test((), |mut app| async move {
+        let fixture = orchestration_fixture(&mut app);
+        let parent_session_id = add_dispatching_session(&mut app, &fixture, true);
+        let parent_conversation_id = read_active_conversation_id(&app, parent_session_id);
+
+        let (child_view, child_manager) = add_test_terminal_session(&mut app, fixture.window_id);
+        let child_session_id = app.update(|ctx| {
+            TuiSessions::register_session(
+                &fixture.sessions,
+                child_view.clone(),
+                child_manager,
+                false,
+                ctx,
+            )
+        });
+
+        let task_id: AmbientAgentTaskId = "44444444-4444-4444-4444-444444444444".parse().unwrap();
+        let request = StartAgentRequest {
+            id: Default::default(),
+            name: "verify-child".to_string(),
+            prompt: "echo hello".to_string(),
+            execution_mode: StartAgentExecutionMode::Local {
+                harness_type: None,
+                model_id: None,
+            },
+            lifecycle_subscription: None,
+            parent_conversation_id,
+            parent_run_id: Some("parent-run-1".to_string()),
+        };
+        app.update(|ctx| {
+            TuiOrchestrationModel::handle(ctx).update(ctx, |orchestration, ctx| {
+                orchestration.register_local_oz_child_session(
+                    MaterializedLocalOzChildSession {
+                        parent_session_id,
+                        session_id: child_session_id,
+                        session_view: child_view,
+                        request,
+                        model_id: None,
+                        task_id,
+                        conversation_name: "verify-child".to_string(),
+                    },
+                    ctx,
+                );
+            });
+        });
+
+        app.read(|ctx| {
+            let history = BlocklistAIHistoryModel::as_ref(ctx);
+            let child_ids = history.child_conversation_ids_of(&parent_conversation_id);
+            assert_eq!(
+                child_ids.len(),
+                1,
+                "expected exactly one materialized child"
+            );
+            assert_eq!(
+                history.conversation_id_for_agent_id(&task_id.to_string()),
+                Some(child_ids[0]),
+                "run id must resolve immediately after register_local_oz_child_session"
+            );
+        });
+    });
+}
+
 #[test]
 fn local_harness_children_fail_cleanly() {
     App::test((), |mut app| async move {
@@ -413,6 +489,7 @@ fn snapshot_is_shared_across_tree_and_filters_conversations_without_sessions() {
                     "missing-session".to_owned(),
                     parent_conversation_id,
                     Some(Harness::Oz),
+                    false,
                     ctx,
                 );
             });
@@ -460,7 +537,7 @@ fn snapshot_is_shared_across_tree_and_filters_conversations_without_sessions() {
         });
         app.update(|ctx| {
             TuiOrchestrationModel::handle(ctx).update(ctx, |model, ctx| {
-                model.set_explicit_page(second_child_id, ctx);
+                model.set_explicit_page(parent_conversation_id, second_child_id, ctx);
             });
         });
         app.read(|ctx| {
@@ -824,6 +901,7 @@ fn seed_remote_child(
                 name.to_owned(),
                 parent_conversation_id,
                 Some(Harness::Oz),
+                true,
                 ctx,
             );
             if let Some(conversation) = history.conversation_mut(&child_id) {
@@ -862,6 +940,7 @@ fn snapshot_child_ids(app: &App, selected: AIConversationId) -> Option<Vec<AICon
 
 #[test]
 fn restoring_parent_materializes_supported_descendant_sessions() {
+    let _flag = FeatureFlag::MultiLevelOrchestration.override_enabled(true);
     App::test((), |mut app| async move {
         let fixture = orchestration_fixture(&mut app);
         let parent_session_id = add_dispatching_session(&mut app, &fixture, true);
@@ -890,15 +969,66 @@ fn restoring_parent_materializes_supported_descendant_sessions() {
 
         restore_descendants(&mut app, parent_conversation_id, parent_session_id);
 
-        // After restore: parent + both descendants have sessions, and the
-        // descendants appear in recursive spawn order.
+        // After restore: parent + both descendants have sessions. The root
+        // level shows only the direct child, which carries a subtree rollup
+        // for the restored grandchild.
         assert_eq!(
             snapshot_child_ids(&app, parent_conversation_id),
-            Some(vec![child_id, grandchild_id])
+            Some(vec![child_id])
         );
         assert_eq!(
             app.read_model(&fixture.sessions, |sessions, _| sessions.len()),
             3
+        );
+        app.read(|ctx| {
+            let snapshot = TuiOrchestrationModel::as_ref(ctx)
+                .snapshot(parent_conversation_id, ctx)
+                .expect("root level snapshot");
+            assert_eq!(snapshot.anchor_conversation_id, parent_conversation_id);
+            assert_eq!(snapshot.anchor_label, ORCHESTRATOR_TAB_LABEL);
+            assert!(snapshot.anchor_status.is_some());
+            assert!(snapshot.breadcrumbs.is_empty());
+            let child = &snapshot.children[0];
+            assert_eq!(
+                child
+                    .subtree_rollup
+                    .as_ref()
+                    .map(|rollup| rollup.descendant_count),
+                Some(1),
+                "the restored grandchild must roll up into the child's badge"
+            );
+        });
+
+        // Selecting the group child re-anchors the bar to its level: the
+        // grandchild becomes the row and a root breadcrumb leads back up.
+        app.read(|ctx| {
+            let snapshot = TuiOrchestrationModel::as_ref(ctx)
+                .snapshot(child_id, ctx)
+                .expect("drilled-in level snapshot");
+            assert_eq!(snapshot.anchor_conversation_id, child_id);
+            assert_eq!(snapshot.anchor_label, "cloud-child");
+            assert_eq!(
+                snapshot
+                    .children
+                    .iter()
+                    .map(|child| child.conversation_id)
+                    .collect::<Vec<_>>(),
+                vec![grandchild_id]
+            );
+            assert_eq!(
+                snapshot
+                    .breadcrumbs
+                    .iter()
+                    .map(|breadcrumb| (breadcrumb.conversation_id, breadcrumb.label.as_str()))
+                    .collect::<Vec<_>>(),
+                vec![(parent_conversation_id, ORCHESTRATOR_TAB_LABEL)]
+            );
+        });
+
+        // A grandchild leaf anchors its parent's level (same row).
+        assert_eq!(
+            snapshot_child_ids(&app, grandchild_id),
+            Some(vec![grandchild_id])
         );
 
         // A nested grandchild keeps its own parent linkage in history.
@@ -918,6 +1048,365 @@ fn restoring_parent_materializes_supported_descendant_sessions() {
             });
             assert!(selected.is_some());
         });
+    });
+}
+
+#[test]
+fn snapshot_keeps_flat_projection_with_multi_level_disabled() {
+    let _flag = FeatureFlag::MultiLevelOrchestration.override_enabled(false);
+    App::test((), |mut app| async move {
+        let fixture = orchestration_fixture(&mut app);
+        let parent_session_id = add_dispatching_session(&mut app, &fixture, true);
+        let parent_conversation_id = read_active_conversation_id(&app, parent_session_id);
+        let child_id = seed_remote_child(
+            &mut app,
+            parent_conversation_id,
+            "cloud-child",
+            "00000000-0000-0000-0000-000000000001",
+        );
+        let grandchild_id = seed_remote_child(
+            &mut app,
+            child_id,
+            "cloud-grandchild",
+            "00000000-0000-0000-0000-000000000002",
+        );
+        restore_descendants(&mut app, parent_conversation_id, parent_session_id);
+
+        // Flag off: every descendant renders as a flat sibling of the root
+        // level, with no breadcrumbs, no anchor glyph, and no rollups.
+        app.read(|ctx| {
+            let snapshot = TuiOrchestrationModel::as_ref(ctx)
+                .snapshot(grandchild_id, ctx)
+                .expect("flat snapshot");
+            assert_eq!(snapshot.anchor_conversation_id, parent_conversation_id);
+            assert_eq!(snapshot.anchor_label, ORCHESTRATOR_TAB_LABEL);
+            assert_eq!(snapshot.anchor_status, None);
+            assert!(snapshot.breadcrumbs.is_empty());
+            assert_eq!(
+                snapshot
+                    .children
+                    .iter()
+                    .map(|child| child.conversation_id)
+                    .collect::<Vec<_>>(),
+                vec![child_id, grandchild_id]
+            );
+            assert!(
+                snapshot
+                    .children
+                    .iter()
+                    .all(|child| child.subtree_rollup.is_none())
+            );
+        });
+    });
+}
+
+#[test]
+fn breadcrumbs_cap_at_root_plus_parent_at_depth_three() {
+    let _flag = FeatureFlag::MultiLevelOrchestration.override_enabled(true);
+    App::test((), |mut app| async move {
+        let fixture = orchestration_fixture(&mut app);
+        let parent_session_id = add_dispatching_session(&mut app, &fixture, true);
+        let root_id = read_active_conversation_id(&app, parent_session_id);
+        let alpha_id = seed_remote_child(
+            &mut app,
+            root_id,
+            "alpha",
+            "00000000-0000-0000-0000-000000000001",
+        );
+        let beta_id = seed_remote_child(
+            &mut app,
+            alpha_id,
+            "beta",
+            "00000000-0000-0000-0000-000000000002",
+        );
+        let gamma_id = seed_remote_child(
+            &mut app,
+            beta_id,
+            "gamma",
+            "00000000-0000-0000-0000-000000000003",
+        );
+        restore_descendants(&mut app, root_id, parent_session_id);
+
+        // gamma is a leaf three levels down: the bar anchors its parent
+        // (beta) and shows exactly two breadcrumbs — root plus parent's
+        // parent — never the full ancestor chain.
+        app.read(|ctx| {
+            let snapshot = TuiOrchestrationModel::as_ref(ctx)
+                .snapshot(gamma_id, ctx)
+                .expect("depth-three snapshot");
+            assert_eq!(snapshot.anchor_conversation_id, beta_id);
+            assert_eq!(snapshot.anchor_label, "beta");
+            assert_eq!(
+                snapshot
+                    .children
+                    .iter()
+                    .map(|child| child.conversation_id)
+                    .collect::<Vec<_>>(),
+                vec![gamma_id]
+            );
+            assert_eq!(
+                snapshot
+                    .breadcrumbs
+                    .iter()
+                    .map(|breadcrumb| (breadcrumb.conversation_id, breadcrumb.label.as_str()))
+                    .collect::<Vec<_>>(),
+                vec![(root_id, ORCHESTRATOR_TAB_LABEL), (alpha_id, "alpha"),]
+            );
+        });
+    });
+}
+
+#[test]
+fn sessionless_parents_are_filtered_from_chips_and_marked_non_navigable() {
+    let _flag = FeatureFlag::MultiLevelOrchestration.override_enabled(true);
+    App::test((), |mut app| async move {
+        let fixture = orchestration_fixture(&mut app);
+        let root_session_id = add_dispatching_session(&mut app, &fixture, true);
+        let root_id = read_active_conversation_id(&app, root_session_id);
+
+        // A loaded but sessionless intermediate (e.g. a restored non-Oz local
+        // child the TUI cannot materialize).
+        let sessionless_parent_id = app.update(|ctx| {
+            BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                history.start_new_child_conversation(
+                    warpui::EntityId::new(),
+                    "claude-mid".to_owned(),
+                    root_id,
+                    Some(Harness::Claude),
+                    false,
+                    ctx,
+                )
+            })
+        });
+        let (_, session_backed_child_id) = add_child_session(
+            &mut app,
+            &fixture,
+            sessionless_parent_id,
+            "session-backed-child",
+        );
+        let (_, leaf_id) = add_child_session(&mut app, &fixture, session_backed_child_id, "leaf");
+
+        app.read(|ctx| {
+            let model = TuiOrchestrationModel::as_ref(ctx);
+            // The leaf anchors its session-backed parent; the sessionless
+            // grandparent contributes no breadcrumb chip — only the root
+            // remains, so ascent stays reachable.
+            let snapshot = model.snapshot(leaf_id, ctx).expect("leaf level snapshot");
+            assert_eq!(snapshot.anchor_conversation_id, session_backed_child_id);
+            assert!(snapshot.anchor_navigable);
+            assert_eq!(
+                snapshot
+                    .breadcrumbs
+                    .iter()
+                    .map(|breadcrumb| breadcrumb.conversation_id)
+                    .collect::<Vec<_>>(),
+                vec![root_id],
+                "a sessionless parent must not become a breadcrumb chip"
+            );
+
+            // A leaf directly under the sessionless parent still frames that
+            // level, but the anchor is marked non-navigable so keyboard
+            // navigation and clicks skip it.
+            let snapshot = model
+                .snapshot(session_backed_child_id, ctx)
+                .expect("mid level snapshot");
+            assert_eq!(snapshot.anchor_conversation_id, session_backed_child_id);
+        });
+
+        // Remove the leaf so session-backed-child becomes a leaf whose parent
+        // is the sessionless conversation: the bar anchors the sessionless
+        // parent and marks it non-navigable.
+        app.update(|ctx| {
+            TuiOrchestrationModel::handle(ctx).update(ctx, |model, ctx| {
+                model.kill_child_agent(leaf_id, ctx);
+            });
+        });
+        app.read(|ctx| {
+            let snapshot = TuiOrchestrationModel::as_ref(ctx)
+                .snapshot(session_backed_child_id, ctx)
+                .expect("sessionless-anchor snapshot");
+            assert_eq!(snapshot.anchor_conversation_id, sessionless_parent_id);
+            assert!(!snapshot.anchor_navigable);
+            assert_eq!(
+                snapshot
+                    .breadcrumbs
+                    .iter()
+                    .map(|breadcrumb| breadcrumb.conversation_id)
+                    .collect::<Vec<_>>(),
+                vec![root_id]
+            );
+        });
+    });
+}
+
+#[test]
+fn adjacent_tree_conversation_walks_the_whole_tree_and_wraps() {
+    let _flag = FeatureFlag::MultiLevelOrchestration.override_enabled(true);
+    App::test((), |mut app| async move {
+        let fixture = orchestration_fixture(&mut app);
+        let parent_session_id = add_dispatching_session(&mut app, &fixture, true);
+        let root_id = read_active_conversation_id(&app, parent_session_id);
+        let child_id = seed_remote_child(
+            &mut app,
+            root_id,
+            "cloud-child",
+            "00000000-0000-0000-0000-000000000001",
+        );
+        let grandchild_id = seed_remote_child(
+            &mut app,
+            child_id,
+            "cloud-grandchild",
+            "00000000-0000-0000-0000-000000000002",
+        );
+        restore_descendants(&mut app, root_id, parent_session_id);
+
+        app.read(|ctx| {
+            let model = TuiOrchestrationModel::as_ref(ctx);
+            // Tree order is root → child → grandchild, wrapping at the ends,
+            // so Tab alone still reaches every agent at any depth.
+            assert_eq!(
+                model.adjacent_tree_conversation(root_id, TuiTabBarNavigationDirection::Next, ctx),
+                Some(child_id)
+            );
+            assert_eq!(
+                model.adjacent_tree_conversation(child_id, TuiTabBarNavigationDirection::Next, ctx),
+                Some(grandchild_id)
+            );
+            assert_eq!(
+                model.adjacent_tree_conversation(
+                    grandchild_id,
+                    TuiTabBarNavigationDirection::Next,
+                    ctx
+                ),
+                Some(root_id)
+            );
+            assert_eq!(
+                model.adjacent_tree_conversation(
+                    root_id,
+                    TuiTabBarNavigationDirection::Previous,
+                    ctx
+                ),
+                Some(grandchild_id)
+            );
+        });
+    });
+}
+
+#[test]
+fn explicit_paging_is_tracked_per_level() {
+    let _flag = FeatureFlag::MultiLevelOrchestration.override_enabled(true);
+    App::test((), |mut app| async move {
+        let fixture = orchestration_fixture(&mut app);
+        let parent_session_id = add_dispatching_session(&mut app, &fixture, true);
+        let root_id = read_active_conversation_id(&app, parent_session_id);
+        let first_child_id = seed_remote_child(
+            &mut app,
+            root_id,
+            "first-child",
+            "00000000-0000-0000-0000-000000000001",
+        );
+        let second_child_id = seed_remote_child(
+            &mut app,
+            root_id,
+            "second-child",
+            "00000000-0000-0000-0000-000000000002",
+        );
+        let grandchild_id = seed_remote_child(
+            &mut app,
+            first_child_id,
+            "grandchild",
+            "00000000-0000-0000-0000-000000000003",
+        );
+        restore_descendants(&mut app, root_id, parent_session_id);
+
+        // Page explicitly within the root level.
+        app.update(|ctx| {
+            TuiOrchestrationModel::handle(ctx).update(ctx, |model, ctx| {
+                model.set_explicit_page(root_id, second_child_id, ctx);
+            });
+        });
+        app.read(|ctx| {
+            let root_level = TuiOrchestrationModel::as_ref(ctx)
+                .snapshot(root_id, ctx)
+                .expect("root level snapshot");
+            assert_eq!(root_level.page_anchor, Some(second_child_id));
+            assert!(!root_level.reveal_selected);
+            // The drilled-in level under first-child is unaffected: it keeps
+            // automatic reveal with its own first tab as the page anchor.
+            let drilled = TuiOrchestrationModel::as_ref(ctx)
+                .snapshot(first_child_id, ctx)
+                .expect("drilled level snapshot");
+            assert_eq!(drilled.anchor_conversation_id, first_child_id);
+            assert_eq!(drilled.page_anchor, Some(grandchild_id));
+            assert!(drilled.reveal_selected);
+        });
+    });
+}
+
+#[test]
+fn kill_child_agent_subtree_removes_nested_descendants_with_the_child() {
+    let _flag = FeatureFlag::MultiLevelOrchestration.override_enabled(true);
+    App::test((), |mut app| async move {
+        let fixture = orchestration_fixture(&mut app);
+        let parent_session_id = add_dispatching_session(&mut app, &fixture, true);
+        let parent_conversation_id = app.read(|ctx| {
+            BlocklistAIHistoryModel::as_ref(ctx)
+                .active_conversation(parent_session_id.surface_id())
+                .unwrap()
+                .id()
+        });
+        let child_request = remote_request(parent_conversation_id);
+        let (child_conversation_id, child_surface_id, _) = add_remote_child_session(
+            &mut app,
+            &fixture,
+            parent_session_id,
+            &child_request,
+            "researcher".to_string(),
+            Harness::Oz,
+        );
+        let child_session_id = app.read(|ctx| {
+            TuiSessions::as_ref(ctx)
+                .session_id_for_surface(child_surface_id)
+                .expect("child session should be retained")
+        });
+        let grandchild_request = remote_request(child_conversation_id);
+        let (grandchild_conversation_id, grandchild_surface_id, _) = add_remote_child_session(
+            &mut app,
+            &fixture,
+            child_session_id,
+            &grandchild_request,
+            "nested-researcher".to_string(),
+            Harness::Oz,
+        );
+
+        // Killing the group child tears down the whole subtree deepest-first:
+        // no orphaned grandchild session or conversation remains.
+        app.update(|ctx| {
+            TuiOrchestrationModel::handle(ctx).update(ctx, |model, ctx| {
+                model.kill_child_agent_subtree(child_conversation_id, ctx);
+            });
+        });
+
+        app.read(|ctx| {
+            let history = BlocklistAIHistoryModel::as_ref(ctx);
+            assert!(history.conversation(&child_conversation_id).is_none());
+            assert!(history.conversation(&grandchild_conversation_id).is_none());
+            assert!(
+                history.conversation(&parent_conversation_id).is_some(),
+                "the parent must survive the subtree kill"
+            );
+            let sessions = TuiSessions::as_ref(ctx);
+            assert!(sessions.session_id_for_surface(child_surface_id).is_none());
+            assert!(
+                sessions
+                    .session_id_for_surface(grandchild_surface_id)
+                    .is_none()
+            );
+        });
+        assert_eq!(
+            app.read_model(&fixture.sessions, |sessions, _| sessions.len()),
+            1
+        );
     });
 }
 
@@ -1065,6 +1554,7 @@ fn restore_skips_unsupported_or_malformed_children() {
                     "no-identity".to_owned(),
                     parent_conversation_id,
                     Some(Harness::Oz),
+                    true,
                     ctx,
                 );
                 history
@@ -1082,6 +1572,7 @@ fn restore_skips_unsupported_or_malformed_children() {
                     "claude-child".to_owned(),
                     parent_conversation_id,
                     Some(Harness::Claude),
+                    false,
                     ctx,
                 )
             })
@@ -1094,6 +1585,7 @@ fn restore_skips_unsupported_or_malformed_children() {
                     "shared-viewer".to_owned(),
                     parent_conversation_id,
                     Some(Harness::Oz),
+                    false,
                     ctx,
                 );
                 history
@@ -1189,6 +1681,7 @@ fn restored_local_oz_child_materializes_terminal_session_without_relaunch() {
                     "local-child".to_owned(),
                     parent_conversation_id,
                     Some(Harness::Oz),
+                    false,
                     ctx,
                 )
             })

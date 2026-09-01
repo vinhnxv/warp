@@ -827,6 +827,9 @@ fn render_entry_row(
                     leading.finish(),
                     indicators.synced,
                     indicators.unread,
+                    // Repo rows are not switchable tabs, so they carry no
+                    // switch-to-tab shortcut hint.
+                    None,
                     theme,
                 ),
             )
