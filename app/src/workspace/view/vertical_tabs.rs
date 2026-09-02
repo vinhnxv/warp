@@ -1,7 +1,7 @@
 pub mod telemetry;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -1835,6 +1835,12 @@ pub(super) fn render_groups(
         .with_padding(Padding::uniform(12.))
         .finish();
     }
+
+    // Membership is asked once per tab, and in repo mode this runs for each
+    // section the sidebar renders, so the filter is hashed once here rather
+    // than scanned linearly per tab.
+    let repo_filter: Option<HashSet<usize>> =
+        repo_filter.map(|visible| visible.into_iter().collect());
 
     let resolved_mode = resolve_vertical_tabs_mode(app);
     let display_granularity = match resolved_mode {

@@ -47,6 +47,47 @@ pub(super) const SLOW_MOUNT_PROBE: Duration = Duration::from_millis(50);
 /// on exactly those rows for a UI that keeps running.
 pub(super) const SLOW_MOUNT_CACHE_TTL: Duration = Duration::from_secs(300);
 
+/// Wall-clock a single render may spend *refreshing* filesystem probes whose
+/// TTL has expired.
+///
+/// [`SLOW_MOUNT_CACHE_TTL`] backs off per probe, which only helps a mount slow
+/// enough to trip [`SLOW_MOUNT_PROBE`] on its own. A mount that answers every
+/// stat in, say, 40ms trips nothing, yet twenty rows of it cost the render
+/// thread most of a second every [`REPO_FS_CACHE_TTL`]. The budget bounds the
+/// *number* of such probes per render rather than their duration — the check
+/// happens before a probe starts, so one probe can still overrun it — which
+/// turns "every stale row, every five seconds" into "one slow row per render".
+pub(super) const FS_PROBE_FRAME_BUDGET: Duration = Duration::from_millis(4);
+
+/// Tracks what one render has spent against [`FS_PROBE_FRAME_BUDGET`].
+///
+/// Only refreshes are charged. A path with no cached probe at all is always
+/// probed: it has no value to serve in the meantime, and rendering a repository
+/// with the wrong icon or a missing "dead" mark is worse than the one-off cost,
+/// which each key pays once rather than every TTL.
+#[derive(Debug, Default)]
+pub(super) struct FsProbeBudget {
+    spent: Duration,
+}
+
+impl FsProbeBudget {
+    pub(super) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether a probe that only refreshes a still-servable cached value may
+    /// run. Once this is false the stale value is served and its timestamp left
+    /// alone, so the next render retries it — by then the rows refreshed this
+    /// render are inside their TTL, and the budget falls to the ones skipped.
+    pub(super) fn may_refresh(&self) -> bool {
+        self.spent < FS_PROBE_FRAME_BUDGET
+    }
+
+    pub(super) fn charge(&mut self, elapsed: Duration) {
+        self.spent = self.spent.saturating_add(elapsed);
+    }
+}
+
 /// How long to cache a filesystem probe, given how long the probe itself took.
 ///
 /// Split out from the callers so the back-off is testable without a slow mount
@@ -176,6 +217,25 @@ pub struct RepoModeEntryBadges {
     pub pull_request_url: Option<String>,
 }
 
+/// Which repository-row badges the sidebar is going to render this frame.
+///
+/// Both are independent user settings, and the sweep that fills
+/// [`RepoModeEntryBadges`] runs on every render, so it is told what to read
+/// rather than reading both and having the caller discard half of it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct RepoModeBadgeKinds {
+    pub diff_stats: bool,
+    pub pull_request: bool,
+}
+
+impl RepoModeBadgeKinds {
+    /// Whether anything at all is wanted; a sweep with nothing to fill is
+    /// skipped outright.
+    pub(super) fn any(self) -> bool {
+        self.diff_stats || self.pull_request
+    }
+}
+
 /// Rolled-up activity state for one repository row, standing in for the nested
 /// rows the row hides while collapsed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -206,7 +266,22 @@ impl Workspace {
     /// that reaches this while holding `borrow()` on that cell panics — and only
     /// while a row is actually held, which is the hardest case to reach in a
     /// test.
+    /// The registry list, resolved against a probe budget of its own.
+    ///
+    /// For callers that run per user action (the picker menu, a drag's entry
+    /// lookup) rather than per render, where spending the whole budget is both
+    /// affordable and what the caller wants.
     pub(super) fn repo_mode_entries(&self, ctx: &AppContext) -> Vec<RepoModeListEntry> {
+        self.repo_mode_entries_within(&mut FsProbeBudget::new(), ctx)
+    }
+
+    /// The registry list, charging its filesystem refreshes to `budget` so one
+    /// render's probes stay bounded across every caller that shares it.
+    pub(super) fn repo_mode_entries_within(
+        &self,
+        budget: &mut FsProbeBudget,
+        ctx: &AppContext,
+    ) -> Vec<RepoModeListEntry> {
         if !Self::repo_mode_enabled() {
             return Vec::new();
         }
@@ -296,10 +371,17 @@ impl Workspace {
                 }
                 // `.git`/exists() stats hit the disk; reuse the last probe
                 // within the TTL rather than re-statting on every render.
-                let (kind, is_dead) = match fs_cache.get(&key) {
-                    Some((probed_at, ttl, kind, dead)) if now.duration_since(*probed_at) < *ttl => {
-                        (*kind, *dead)
-                    }
+                let cached = fs_cache.get(&key).copied();
+                let fresh = cached
+                    .filter(|(probed_at, ttl, _, _)| now.duration_since(*probed_at) < *ttl)
+                    .map(|(_, _, kind, dead)| (kind, dead));
+                let stale = cached.map(|(_, _, kind, dead)| (kind, dead));
+                let (kind, is_dead) = match (fresh, stale) {
+                    (Some(answer), _) => answer,
+                    // Expired, but this render has spent its refresh budget.
+                    // Serve the stale answer and leave the entry's timestamp
+                    // alone so the next render picks it up.
+                    (None, Some(answer)) if !budget.may_refresh() => answer,
                     _ => {
                         let started = Instant::now();
                         let kind = classify_entry_kind(&path).unwrap_or(RepoEntryKind::Folder);
@@ -310,8 +392,9 @@ impl Workspace {
                         // the moment it was written and re-probe on the very
                         // next frame.
                         let probed_at = Instant::now();
-                        let ttl =
-                            fs_probe_ttl(probed_at.duration_since(started), REPO_FS_CACHE_TTL);
+                        let elapsed = probed_at.duration_since(started);
+                        budget.charge(elapsed);
+                        let ttl = fs_probe_ttl(elapsed, REPO_FS_CACHE_TTL);
                         fs_cache.insert(key, (probed_at, ttl, kind, dead));
                         (kind, dead)
                     }
@@ -1626,13 +1709,20 @@ impl Workspace {
     ///
     /// Entries with no matching terminal are absent from the map; the caller
     /// reads a default for them.
+    ///
+    /// `want` says which of the two badges the sidebar is actually going to
+    /// render. The settings gate both badges independently, and reading one the
+    /// user has turned off is pure waste on a per-frame path —
+    /// `current_diff_line_changes` in particular resolves git status metadata
+    /// and falls back to scanning the prompt's chips.
     pub(super) fn repo_mode_badges_by_entry(
         &self,
         entry_paths: &[PathBuf],
+        want: RepoModeBadgeKinds,
         app: &AppContext,
     ) -> HashMap<PathBuf, RepoModeEntryBadges> {
         let mut badges: HashMap<PathBuf, RepoModeEntryBadges> = HashMap::new();
-        if entry_paths.is_empty() {
+        if entry_paths.is_empty() || !want.any() {
             return badges;
         }
         let wanted: HashSet<&Path> = entry_paths.iter().map(PathBuf::as_path).collect();
@@ -1650,15 +1740,18 @@ impl Workspace {
                     continue;
                 }
                 let entry = badges.entry(repo_path.to_path_buf()).or_default();
-                if entry.diff_stats.is_some() && entry.pull_request_url.is_some() {
-                    // An earlier, more recently used terminal already answered
-                    // for this repository.
+                let needs_diff_stats = want.diff_stats && entry.diff_stats.is_none();
+                let needs_pull_request = want.pull_request && entry.pull_request_url.is_none();
+                if !needs_diff_stats && !needs_pull_request {
+                    // Everything this sidebar will render for the repository is
+                    // already answered — by an earlier, more recently used
+                    // terminal, or by the setting being off.
                     continue;
                 }
-                if entry.diff_stats.is_none() {
+                if needs_diff_stats {
                     entry.diff_stats = terminal_view.current_diff_line_changes(app);
                 }
-                if entry.pull_request_url.is_none() {
+                if needs_pull_request {
                     entry.pull_request_url = terminal_view.current_pull_request_url(app);
                 }
             }
@@ -1739,18 +1832,34 @@ impl Workspace {
     /// `tabs` — it holds ids for closed tabs, and a tab can exist before it is
     /// ever activated — so it is a ranking over `tabs`, never a listing of it.
     /// Every tab appears exactly once.
+    ///
+    /// Resolved through an index built once rather than a scan per MRU id: this
+    /// runs on the badge sweep's render path, where the pair of linear scans it
+    /// replaces made the whole helper quadratic in the tab count. `seen` also
+    /// enforces the "exactly once" contract directly, rather than relying on
+    /// `tab_mru_order` never repeating an id.
     pub(super) fn tab_indices_in_mru_order(&self) -> Vec<usize> {
-        let mut indices: Vec<usize> = self
-            .tab_mru_order
-            .iter()
-            .filter_map(|pane_group_id| {
-                self.tabs
-                    .iter()
-                    .position(|t| t.pane_group.id() == *pane_group_id)
-            })
-            .collect();
-        for index in 0..self.tabs.len() {
-            if !indices.contains(&index) {
+        let mut index_by_pane_group = HashMap::with_capacity(self.tabs.len());
+        for (index, tab) in self.tabs.iter().enumerate() {
+            // First wins, matching the `position()` scan this replaces.
+            index_by_pane_group
+                .entry(tab.pane_group.id())
+                .or_insert(index);
+        }
+
+        let mut seen = vec![false; self.tabs.len()];
+        let mut indices = Vec::with_capacity(self.tabs.len());
+        for pane_group_id in &self.tab_mru_order {
+            let Some(&index) = index_by_pane_group.get(pane_group_id) else {
+                continue;
+            };
+            if !seen[index] {
+                seen[index] = true;
+                indices.push(index);
+            }
+        }
+        for (index, seen) in seen.into_iter().enumerate() {
+            if !seen {
                 indices.push(index);
             }
         }

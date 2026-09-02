@@ -4989,6 +4989,109 @@ fn test_a_fast_probe_keeps_the_healthy_ttl() {
     );
 }
 
+/// The per-probe back-off only fires for a mount slow enough to trip
+/// `SLOW_MOUNT_PROBE` on its own. A mount that answers just under it trips
+/// nothing, so the render-wide budget is what keeps a registry full of such
+/// rows from re-probing all of them in one frame.
+#[test]
+fn test_the_probe_budget_stops_refreshing_once_it_is_spent() {
+    use std::time::Duration;
+
+    let mut budget = FsProbeBudget::new();
+    assert!(
+        budget.may_refresh(),
+        "a render that has probed nothing yet must be allowed to refresh"
+    );
+
+    // Under the budget, and each one individually too fast to back off.
+    budget.charge(Duration::from_millis(1));
+    budget.charge(Duration::from_millis(1));
+    assert!(budget.may_refresh());
+    assert!(
+        fs_probe_ttl(Duration::from_millis(1), Duration::from_secs(5)) == Duration::from_secs(5),
+        "the point of the budget is that probes this fast never back off"
+    );
+
+    budget.charge(FS_PROBE_FRAME_BUDGET);
+    assert!(
+        !budget.may_refresh(),
+        "once the render has spent its budget, stale rows must be served from \
+         cache rather than re-probed"
+    );
+}
+
+/// The budget bounds refreshes, never the first probe: a row with nothing
+/// cached has no value to serve, and rendering it with the wrong icon or a
+/// missing "dead" mark is worse than the one-off cost.
+#[test]
+fn test_a_spent_budget_still_lets_an_unprobed_row_through() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dunce::canonicalize(dir.path()).expect("canonicalize");
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(
+            &mut app,
+            vec![Project {
+                path: root.to_string_lossy().into_owned(),
+                added_ts: Utc::now().naive_utc(),
+                last_opened_ts: None,
+                manual_position: None,
+            }],
+        );
+        let workspace = mock_workspace(&mut app);
+
+        workspace.read(&app, |workspace, ctx| {
+            let mut spent = FsProbeBudget::new();
+            spent.charge(FS_PROBE_FRAME_BUDGET);
+            assert!(!spent.may_refresh());
+
+            let entries = workspace.repo_mode_entries_within(&mut spent, ctx);
+            assert_eq!(entries.len(), 1);
+            assert!(
+                !entries[0].is_dead,
+                "an existing directory that has never been probed must still be \
+                 classified, budget or no budget"
+            );
+        });
+    });
+}
+
+/// The sweep is told which badges the sidebar will render. With both settings
+/// off it does no terminal work at all, rather than reading both and having the
+/// caller discard them.
+#[test]
+fn test_the_badge_sweep_reads_nothing_when_both_settings_are_off() {
+    let _repo_mode_guard = FeatureFlag::RepoMode.override_enabled(true);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dunce::canonicalize(dir.path()).expect("canonicalize");
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_projects_model(&mut app, Vec::new());
+        let workspace = mock_workspace(&mut app);
+
+        workspace.read(&app, |workspace, ctx| {
+            let nothing_wanted = RepoModeBadgeKinds::default();
+            assert!(!nothing_wanted.any());
+            assert!(
+                workspace
+                    .repo_mode_badges_by_entry(std::slice::from_ref(&root), nothing_wanted, ctx)
+                    .is_empty(),
+                "a sweep with nothing to fill must not walk the tabs"
+            );
+
+            assert!(
+                RepoModeBadgeKinds {
+                    diff_stats: false,
+                    pull_request: true,
+                }
+                .any(),
+                "one setting on is still a sweep worth running"
+            );
+        });
+    });
+}
+
 /// A probe slow enough to mean a stalled mount backs off, so the render thread
 /// pays that mount's timeout far less often than once per healthy TTL.
 #[test]

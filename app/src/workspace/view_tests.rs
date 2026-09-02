@@ -4305,6 +4305,12 @@ fn test_tab_indices_in_mru_order_ranks_every_tab_once() {
                 .tab_mru_order
                 .retain(|id| *id != workspace.tabs[1].pane_group.id());
             assert_eq!(workspace.tab_indices_in_mru_order(), vec![2, 0, 1]);
+
+            // "Exactly once" is enforced by the ranking itself, not by trusting
+            // `tab_mru_order` to never repeat an id.
+            let repeated = workspace.tabs[2].pane_group.id();
+            workspace.tab_mru_order.push(repeated);
+            assert_eq!(workspace.tab_indices_in_mru_order(), vec![2, 0, 1]);
         });
     });
 }

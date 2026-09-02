@@ -32,7 +32,8 @@ use warpui::{AppContext, SingletonEntity};
 
 use super::Workspace;
 use super::repo_mode_model::{
-    RemoteListEntry, RepoModeEntryBadges, RepoModeListEntry, RepoRowActivity, fs_probe_ttl,
+    FsProbeBudget, RemoteListEntry, RepoModeBadgeKinds, RepoModeEntryBadges, RepoModeListEntry,
+    RepoRowActivity, fs_probe_ttl,
 };
 use super::vertical_tabs::telemetry::VerticalTabsChipEntrypoint;
 use super::vertical_tabs::{
@@ -286,7 +287,11 @@ pub(super) fn render_repo_tree(
 ) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(app);
     let sidebar = &state.repo_sidebar;
-    let entries = workspace.repo_mode_entries(app);
+    // One budget for the whole render: the registry's kind/liveness probes and
+    // the per-row branch reads hit the same disk, so they share the bound
+    // rather than each getting one.
+    let mut fs_budget = FsProbeBudget::new();
+    let entries = workspace.repo_mode_entries_within(&mut fs_budget, app);
     let selected = workspace.selected_repo_root.as_deref();
     let show_diff_stats = *TabSettings::as_ref(app)
         .vertical_tabs_show_diff_stats
@@ -302,9 +307,14 @@ pub(super) fn render_repo_tree(
     // Badges come from terminals whose *local* repo path matches an entry, so a
     // remote or dead entry never has any and is left out of the sweep. One sweep
     // for the whole sidebar: asking per row walked every tab and pane again for
-    // each entry. With both badge settings off nothing reads the result, so the
-    // sweep does not run at all.
-    let badge_paths: Vec<PathBuf> = if show_diff_stats || show_pr_link {
+    // each entry. The settings are handed to the sweep rather than applied to
+    // its result: with both off it does not run, and with one off it does not
+    // read the badge that would only be thrown away.
+    let want_badges = RepoModeBadgeKinds {
+        diff_stats: show_diff_stats,
+        pull_request: show_pr_link,
+    };
+    let badge_paths: Vec<PathBuf> = if want_badges.any() {
         entries
             .iter()
             .filter(|entry| !entry.is_dead && entry.remote.is_none())
@@ -313,7 +323,7 @@ pub(super) fn render_repo_tree(
     } else {
         Vec::new()
     };
-    let badges_by_entry = workspace.repo_mode_badges_by_entry(&badge_paths, app);
+    let badges_by_entry = workspace.repo_mode_badges_by_entry(&badge_paths, want_badges, app);
 
     let activity_by_entry = workspace.repo_mode_activity_by_entry(&by_entry, app);
 
@@ -366,21 +376,17 @@ pub(super) fn render_repo_tree(
             Some(state) => state.branch.clone(),
             None => match entry.kind {
                 RepoEntryKind::Repo if !entry.is_dead => {
-                    repo_branch(&sidebar.branch_cache, &entry.path)
+                    repo_branch(&sidebar.branch_cache, &mut fs_budget, &entry.path)
                 }
                 _ => None,
             },
         };
-        let mut badges = badges_by_entry
+        // No post-hoc gating: `want_badges` already kept the sweep from
+        // reading anything this sidebar will not render.
+        let badges = badges_by_entry
             .get(&entry.path)
             .cloned()
             .unwrap_or_default();
-        if !show_diff_stats {
-            badges.diff_stats = None;
-        }
-        if !show_pr_link {
-            badges.pull_request_url = None;
-        }
 
         let members = repo_tab_block_visible(is_selected, entry_drag_active)
             .then(|| by_entry.get(&entry.path).cloned().unwrap_or_default());
@@ -1094,20 +1100,27 @@ pub(super) fn truncate_label(label: &str, budget: usize) -> String {
 /// Current branch (or short detached SHA) for a repo root, via `.git/HEAD`.
 /// Cheap enough to poll behind a short-lived cache; supports linked worktrees
 /// where `.git` is a file pointing at the real git dir.
-fn repo_branch(cache: &BranchCache, root: &Path) -> Option<String> {
+fn repo_branch(cache: &BranchCache, budget: &mut FsProbeBudget, root: &Path) -> Option<String> {
     let key = root.to_string_lossy().into_owned();
     let now = Instant::now();
-    if let Some((refreshed_at, ttl, cached)) = cache.borrow().get(&key)
-        && now.duration_since(*refreshed_at) < *ttl
+    // Served from cache on two counts: the entry is still fresh, or it has
+    // expired but this render has already spent its refresh budget on other
+    // rows. In the second case the stale entry keeps its timestamp, so the next
+    // render re-reads it rather than this one paying for every stale row at
+    // once.
+    if let Some((refreshed_at, ttl, branch)) = cache.borrow().get(&key)
+        && (now.duration_since(*refreshed_at) < *ttl || !budget.may_refresh())
     {
-        return cached.clone();
+        return branch.clone();
     }
     let branch = read_git_head_branch(root);
     // Stamped from when the read *finished*: on a stalled mount `now` is already
     // the full timeout in the past, so timing the TTL from it would expire the
     // entry the moment it was written and re-read on the very next frame.
     let refreshed_at = Instant::now();
-    let ttl = fs_probe_ttl(refreshed_at.duration_since(now), BRANCH_CACHE_TTL);
+    let elapsed = refreshed_at.duration_since(now);
+    budget.charge(elapsed);
+    let ttl = fs_probe_ttl(elapsed, BRANCH_CACHE_TTL);
     cache
         .borrow_mut()
         .insert(key, (refreshed_at, ttl, branch.clone()));

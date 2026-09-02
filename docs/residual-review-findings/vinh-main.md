@@ -442,3 +442,170 @@ Green here: `./script/format`, `cargo clippy -p warp --all-targets --tests -- -D
 warnings`, `cargo clippy -p repo_mode ...`, `cargo nextest run -p warp repo_mode` (135),
 `cargo nextest run -p warp workspace::view` (348), `cargo nextest run -p warp root_view`
 (11), `cargo nextest run -p repo_mode` (34).
+
+---
+
+# Run 4 — upstream merge (254 commits)
+
+Merge: `47fe16fc8` (`upstream/master` into `vinh-main`, base `b076027de`).
+Scope of the review: the branch's own features read against the 254 upstream commits
+the merge brought in — what the merge broke, what it silently degraded, and what it
+left unwired. Not a re-review of the features themselves; Runs 1-3 cover those and
+their residual risks still stand.
+
+Six files conflicted, eight hunks. Three resolutions were mechanical (both sides added
+something, both were kept). Three were not, and are recorded below because a future
+merge will meet the same seams.
+
+## Merge defects — fixed in `47fe16fc8`
+
+### M1. `render_row_title_line` grew a parameter; two repo-mode call sites broke
+
+Upstream #15221 ("Show switch-to-tab shortcut hints while their modifier is held") and
+#15496 added `shortcut_hint: Option<Box<dyn Element>>`. Git merged the signature and
+upstream's three call sites cleanly and left ours arity-broken — `cargo check` caught
+both, but only after the conflict resolution looked finished.
+
+- `vertical_tabs.rs` `render_terminal_row_content`, repo-accordion branch: passes
+  `shortcut_hint_label(props, app)` like every other pane row, so a tab nested under a
+  repository still shows its switch-to-tab shortcut. The hint resolves from
+  `tab_activate_binding_name(tab_index, workspace.tabs.len())`, and `repo_filter`
+  carries real indices into `workspace.tabs`, so repo mode gets the same label the flat
+  list would.
+- `repo_sidebar.rs` `render_entry_row`: passes `None`. A repository row is not a
+  switchable tab.
+
+### M2. Upstream deleted the widget the branch had edited
+
+Upstream split `settings_view/code_page.rs` into `code_indexing_page.rs` and
+`code_editor_review_page.rs`, and removed `ExternalEditorWidget` from the Features page
+outright. Git rename-detected `code_page.rs` → `code_indexing_page.rs` and reported the
+branch's one-line `search_terms` edit as a conflict against a file that no longer
+contains the widget.
+
+Resolved by taking upstream for both pages and porting the search terms onto
+`ExternalEditorCodeWidget` in `code_editor_review_page.rs`, which is where the external
+editor row now lives. `ExternalEditorWidget` no longer exists anywhere; `ExternalEditorView`
+(which owns the branch's "Default folder IDE" dropdown) is still constructed, from
+`code_editor_review_page.rs` alone.
+
+### M3. Test fixture missing an upstream singleton
+
+Two repo-mode tests panicked with `Cannot get singleton model
+"LocalAgentTaskSyncModel" that was never registered`. A CLI agent status change now
+resolves the terminal's task through that model, and upstream registered it in
+`lib.rs` (production) plus `test_util::terminal`, `pane_group::mod_tests` and
+`tui_test_support` — but not `workspace/view_tests.rs::initialize_app`, which is the
+fixture the repo-mode tests use. **Test-only; production was never affected.**
+
+Worth remembering as a pattern: upstream adding a singleton to *some* fixtures is
+invisible to this branch until a branch test happens to walk the new path.
+
+## Performance findings — fixed in this run
+
+All five are repo-mode-only. `render_vertical_tabs_panel` branches on
+`Workspace::repo_mode_enabled()`, so a user without the flag pays none of it.
+
+### P1. The filesystem back-off had no aggregate budget
+
+`fs_probe_ttl` backs off *per probe*: a probe at or over `SLOW_MOUNT_PROBE` (50ms)
+earns `SLOW_MOUNT_CACHE_TTL` (300s). A mount that answers every stat in, say, 40ms
+trips nothing — yet twenty registry rows of it cost the render thread ~800ms every
+`REPO_FS_CACHE_TTL` (5s), and the branch reads in `repo_sidebar::repo_branch` have the
+same shape. Stalled mounts were handled; uniformly slow ones were not.
+
+Fixed with `FsProbeBudget` (`FS_PROBE_FRAME_BUDGET`, 4ms), shared for one render by
+`render_repo_tree` across both the registry's kind/liveness probes and the per-row
+branch reads. Two deliberate properties:
+
+- It bounds the **number** of slow probes per render, not their duration — the check
+  runs before a probe starts, so one probe can still overrun the budget. "Every stale
+  row every 5 seconds" becomes "one slow row per render".
+- It charges **refreshes only**. A key with nothing cached is always probed: it has no
+  value to serve, and a wrong icon or a missing "dead" mark is worse than a one-off
+  cost each key pays once. Skipped rows keep their timestamps, so the next render
+  retries them while the rows refreshed this render sit inside their TTL — the budget
+  rotates on its own.
+
+### P2. The badge sweep read what the settings had turned off
+
+`repo_mode_badges_by_entry` was skipped only when *both* badge settings were off. With
+just `vertical_tabs_show_pr_link` on it still called `current_diff_line_changes` for
+every terminal on every render — the more expensive of the two, since it resolves git
+status metadata and falls back to scanning the prompt's chips — and `render_repo_tree`
+then nulled the result out. Now the sweep takes `RepoModeBadgeKinds` and reads only
+what will be rendered; the post-hoc nulling is gone with it.
+
+### P3. `tab_indices_in_mru_order` was quadratic on a render path
+
+A linear `position()` per MRU id, then a linear `indices.contains()` per tab. Replaced
+with an index built once plus a `seen` bitmap. The bitmap also enforces the documented
+"every tab appears exactly once" contract directly instead of relying on
+`tab_mru_order` never repeating an id.
+
+### P4. `repo_filter` membership was a linear scan
+
+`render_groups` asked `Vec::contains` once per tab, and repo mode calls it once per
+section rendered. Hashed once at the top of the function instead.
+
+### P5. Per-frame allocations (accepted, not fixed)
+
+`repo_mode_entries` allocates roughly three strings/paths per registered project per
+render (`PathBuf::from`, two `to_string_lossy().into_owned()`), and the two sweeps each
+allocate a `Vec<ViewHandle>` per tab via `terminal_views` / `visible_terminal_views`.
+Small individually; recorded because they land on the same frame as P3 and P4 did, and
+because the next thing to measure here is an allocation profile rather than another
+targeted fix.
+
+## Residual risks
+
+- **The probe budget is wall-clock, and wall-clock on a render thread is noisy.** A
+  render descheduled mid-probe charges the budget for time the disk did not take, and
+  will skip refreshes it could have afforded. The failure mode is a staler row, never a
+  slower one, so it is the right direction to be wrong in — but it means the budget
+  cannot be reasoned about as an exact bound.
+- **`FS_PROBE_FRAME_BUDGET` is a guess.** 4ms is a quarter of a 60fps frame and admits
+  hundreds of local stats; it was not measured against a real slow mount, because none
+  was available on this host.
+- **P2's gating is only partially covered.** The "both off, no work" path is tested;
+  "only PR link on ⇒ `current_diff_line_changes` never called" is not, because no test
+  in this repo can currently stand up a terminal with real diff stats or a PR chip —
+  which is also why the badge sweep had no tests before this run.
+- **The `in_repo_accordion` early return in `render_terminal_row_content` will keep
+  drifting.** It renders the title line and returns, so anything upstream adds to the
+  row body below it silently does not exist in repo mode. M1 was the visible half of
+  that seam; the invisible half is any future upstream row affordance.
+- No profiling was done. Every perf finding here is a reading of the code on a path
+  known to run per render, not a measurement.
+
+## Wiring audit — clean
+
+Checked because a long-lived branch accretes orphans, and found none:
+
+- All thirteen repo-mode `WorkspaceAction`s have a definition, a dispatch arm in
+  `view.rs`, and at least one emitter. `ResetRepoModeOrder` looked orphaned (no UI
+  reference) until the context-menu entry in `repo_mode_model.rs` turned up.
+- `FeatureFlag::RepoMode` (4 sites) and `OpenFolderInIde` (10) are read;
+  `TelemetryEvent::OpenedFolderInIde` has a real emitter in `open_folder.rs`;
+  `VerticalTabsChipEntrypoint::RepoSidebar` is used.
+- Every public item in `crates/repo_mode` has a consumer. `REMOTE_PROBE_SHELL_COMMAND`
+  and `format_remote_key` have no callers in `app/` but are used inside `entry.rs`.
+- `default_folder_editor` is `SyncToCloud::Never`, matching the "local-only" intent, and
+  renders its `LocalOnlyIconState`.
+- Migrations coexist: `repo_root`, `selected_repo_root` and `manual_position` all
+  survive in `schema.rs`, and neither branch migration touches a table upstream's two
+  new ones touch.
+
+## Verification note
+
+Green after the merge (6644 tests) and again after the perf changes (6647, three added
+here): `cargo check --workspace --all-targets` (0 warnings), `cargo nextest run -p warp
+-p repo_mode -p persistence`, `cargo clippy -p warp -p repo_mode -p persistence
+--all-targets --tests` (0 warnings), `rustfmt --check` on every file touched by hand.
+
+`notebooks::editor::model::tests::test_debounced_resizes` failed once mid-run and passed
+on both re-runs, having also passed in the pre-perf full run. It is a debounce-timing
+test in an area none of this touches — recorded as flaky rather than chased.
+
+`./script/presubmit` still cannot run on this host for the reason Run 3 recorded:
+`command-signatures-v2`'s build script needs a JS toolchain that is absent.
