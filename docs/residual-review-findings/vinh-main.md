@@ -575,6 +575,7 @@ targeted fix.
   drifting.** It renders the title line and returns, so anything upstream adds to the
   row body below it silently does not exist in repo mode. M1 was the visible half of
   that seam; the invisible half is any future upstream row affordance.
+  *Addressed in Run 5 — and the seam turned out to be in four places, not one.*
 - No profiling was done. Every perf finding here is a reading of the code on a path
   known to run per render, not a measurement.
 
@@ -609,3 +610,85 @@ test in an area none of this touches — recorded as flaky rather than chased.
 
 `./script/presubmit` still cannot run on this host for the reason Run 3 recorded:
 `command-signatures-v2`'s build script needs a JS toolchain that is absent.
+
+# Run 5 — the `in_repo_accordion` seam
+
+Follow-up on Run 4's last residual risk. Not a new review: one structural change to the
+thing that risk names, plus the tests that pin it.
+
+## What the seam was
+
+`PaneProps::in_repo_accordion` marks a terminal row nested under a repository row. Such
+a row draws its title line and nothing else — the repository row above already carries
+the directory, branch, PR link and diff stats. Four places read that flag, and two of
+them branched in the middle of assembling a row:
+
+- `render_terminal_row_content` (expanded) built a title line and `return`ed it.
+- `render_compact_pane_row` (compact) called `render_pane_title_slot` itself in the
+  accordion branch, bypassing `render_compact_terminal_title_and_subtitle` entirely.
+- `render_summary_tab_item` (summary) already had the right shape — a gate around the
+  lower half — but spelled with the raw bool.
+- `render_pane_row` also reads the bool to decide icon alignment, because a title-only
+  row is single-line. Nothing tied that to the renderer's own decision.
+
+Two costs, and one had already been paid. An early return builds the title a second
+time, so the two title paths drift: that is exactly Run 4's M1, where the accordion
+branch was missing upstream's switch-to-tab shortcut hint and only an unrelated arity
+change made the compiler point at it. The second cost is silent — anything added below
+the return does not exist in repo mode, and nothing at the call site says so.
+
+## What replaced it
+
+`RowExtent` (`Full` | `TitleOnly`), built by `RowExtent::for_row(in_repo_accordion)` and
+read once at the top of each renderer. `renders_below_title()` is the single question
+every site now asks, so growing a row means putting the new section next to the sections
+already inside that gate.
+
+- `render_terminal_row_content` is one build path. The `match primary_info` returns
+  *descriptors* (`DescriptionLine`, `MetadataLeftSource`) rather than elements, and the
+  elements are built inside `if let Some(context)` — so lines 2 and 3 have exactly one
+  construction site, under the gate.
+- `render_compact_pane_row` has no accordion branch left; the extent goes into
+  `render_compact_terminal_title_and_subtitle`, which pins "Pane title as" to `Command`
+  and skips the subtitle for a title-only row.
+- The summary gate and the icon alignment now read `RowExtent` too, so all four sites
+  agree by construction rather than by four copies of the same `if`.
+
+Cost side: folding an early return into a gate is only free if the work the return
+skipped stays skipped. Both accordion branches skipped the shell-title, working-directory
+and branch reads by never reaching them, so `TerminalRowContext` and `CompactRowContext`
+exist to keep those reads lazy — `context` is `Some` (resp. non-`Default`) exactly when a
+section under the title is going to render. Written the obvious way instead, this refactor
+would have added three model reads per accordion row per frame, in repo mode, on the
+render path Run 4 had just finished bounding. The one real addition is a `Flex::column`
+node around an accordion row's title line in the expanded renderer, because it now goes
+through the same column every other row uses.
+
+## Testing gaps
+
+- `RowExtent` and `CompactRowContext::working_directory_text` have unit tests (four).
+  The renderers still do not: `vertical_tabs_tests.rs` has no `AppContext` fixture at
+  all, so every test in it is a pure-helper test. That is the reason the seam went
+  uncovered in the first place, and this run does not change it.
+- Nothing asserts the *rendered* difference between a `Full` and a `TitleOnly` row. The
+  compact path's title is now built by a function it never used before, so its accordion
+  rendering is the change most worth an eyeball in a real window.
+
+## Verification note
+
+`cargo check -p warp --all-targets` (0 warnings), `cargo nextest run -p warp -p
+repo_mode -p persistence` (6651 passed, 6 skipped, four added here), `cargo clippy -p
+warp -p repo_mode -p persistence --all-targets --tests` (0 warnings), `rustfmt --check
+--edition 2024` on both files touched.
+
+Getting that green run took three attempts, and the two failed ones are worth recording
+so they are not mistaken for a regression later. Both were run at full parallelism on a
+host at load ~25 (another session was running `scripts/db-backup.test.sh`), and both
+produced dozens of 60s timeouts in `AppContext`-backed tests — but in *disjoint* sets
+(`workspace::view::tests` the first time, `ai::agent_conversations_model::tests` and
+`ai::blocklist::*` the second), none of which this change touches. The second run also
+failed `settings::cloud_preferences_syncer::tests::
+test_cloud_pref_not_synced_when_current_value_not_syncable` on an unmet mockall
+expectation; it passes on its own. Re-running with `-j 4` was green end to end in 152s.
+The lesson for the next run on this branch: `AppContext` tests here are contention-
+sensitive, so a timeout storm under load is not evidence of anything.

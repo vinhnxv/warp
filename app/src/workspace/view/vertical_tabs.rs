@@ -869,6 +869,49 @@ struct PaneProps<'a> {
     shortcut_hint_binding_name: Option<&'static str>,
 }
 
+/// How much of a row the vertical tabs panel renders.
+///
+/// Every row renderer here — expanded, summary, compact — draws a title line
+/// and then some number of sections under it describing the terminal's
+/// directory, branch, PR link and diff stats. A row nested under a repository
+/// row in repo mode draws none of those: the repository row above already
+/// carries all of it.
+///
+/// This exists so that decision is one value read at the top of a renderer
+/// rather than an early `return` in the middle of one. An early return has to
+/// build the title line a second time, and it silently excludes anything added
+/// after it — which is how repo-mode rows went without the switch-to-tab
+/// shortcut hint until its call site failed to compile for an unrelated reason.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowExtent {
+    /// The title line and every section under it.
+    Full,
+    /// The title line alone.
+    TitleOnly,
+}
+
+impl RowExtent {
+    fn for_row(in_repo_accordion: bool) -> Self {
+        if in_repo_accordion {
+            Self::TitleOnly
+        } else {
+            Self::Full
+        }
+    }
+
+    /// Whether the sections stacked under the title line render.
+    ///
+    /// A renderer that grows a new section under the title gates it on this,
+    /// next to the sections already there — the point being that there is one
+    /// row-building path to add it to, and the question is visible when you do.
+    fn renders_below_title(self) -> bool {
+        match self {
+            Self::Full => true,
+            Self::TitleOnly => false,
+        }
+    }
+}
+
 struct PaneRowState {
     mouse_state: MouseStateHandle,
     title_mouse_state: Option<MouseStateHandle>,
@@ -3655,7 +3698,7 @@ fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
     // the first line; center it for single-line rows (Settings, Notebook with no subtitle,
     // repo-accordion terminals, etc.).
     let icon_alignment = if (matches!(props.typed, TypedPane::Terminal(_))
-        && !props.in_repo_accordion)
+        && RowExtent::for_row(props.in_repo_accordion).renders_below_title())
         || !effective_subtitle.is_empty()
     {
         CrossAxisAlignment::Start
@@ -4573,42 +4616,26 @@ fn render_terminal_row_content(
     let main_text_color = theme.main_text_color(theme.background());
     let sub_text_color = theme.sub_text_color(theme.background());
 
-    // Repo accordion rows: the repo row above already shows the directory,
-    // branch, PR link, and diff stats, so the terminal row keeps only its
-    // command/conversation line.
-    if props.in_repo_accordion {
-        let first_line = render_pane_title_slot(
-            props,
-            || {
-                render_terminal_primary_line_for_view(
-                    terminal_view,
-                    appearance,
-                    main_text_color,
-                    app,
-                )
-            },
-            12.,
-            main_text_color,
-            ClipConfig::ellipsis(),
-            appearance,
-            app,
-        );
-        return render_row_title_line(
-            first_line,
-            row_shows_synced_inputs_indicator(props, app),
-            has_unread_activity(&props.typed, app),
-            shortcut_hint_label(props, app).map(|label| render_shortcut_hint(&label, appearance)),
-            theme,
-        );
-    }
+    let extent = RowExtent::for_row(props.in_repo_accordion);
 
-    let primary_info = *TabSettings::as_ref(app).vertical_tabs_primary_info.value();
-
-    let title_text = terminal_view.terminal_title_from_shell();
-    let working_directory = resolved_terminal_working_directory(terminal_view, app)
-        .unwrap_or_else(|| title_text.clone());
-
-    let git_branch = terminal_view.current_git_branch(app);
+    // `Command` is the one layout whose title line needs no terminal context,
+    // and it is the layout a title-only row uses — which is what lets the two
+    // model reads below be skipped outright rather than performed and thrown
+    // away. `context` is therefore `Some` exactly when a section under the
+    // title is going to render.
+    let primary_info = if extent.renders_below_title() {
+        *TabSettings::as_ref(app).vertical_tabs_primary_info.value()
+    } else {
+        VerticalTabsPrimaryInfo::Command
+    };
+    let context = extent.renders_below_title().then(|| {
+        let title_text = terminal_view.terminal_title_from_shell();
+        TerminalRowContext {
+            working_directory: resolved_terminal_working_directory(terminal_view, app)
+                .unwrap_or(title_text),
+            git_branch: terminal_view.current_git_branch(app),
+        }
+    });
 
     // Line 1 and line 2 depend on the "Pane title as" setting.
     // Line 3 (metadata) shows context data on the left + badges on the right.
@@ -4618,7 +4645,10 @@ fn render_terminal_row_content(
     // | Command          | command/conversation | working directory       | git branch           |
     // | WorkingDirectory | working directory    | command/conversation    | git branch           |
     // | Branch           | git branch           | command/conversation    | working directory    |
-    let (first_line, second_line, metadata_left) = match primary_info {
+    //
+    // Lines 2 and 3 come back as descriptors rather than elements: a title-only
+    // row builds neither, and it has no `context` to build them from.
+    let (first_line, description, metadata_left) = match primary_info {
         VerticalTabsPrimaryInfo::Command => (
             render_pane_title_slot(
                 props,
@@ -4636,20 +4666,17 @@ fn render_terminal_row_content(
                 appearance,
                 app,
             ),
-            render_text_line(
-                &working_directory,
-                sub_text_color,
-                ClipConfig::start(),
-                appearance,
-            ),
-            MetadataLeftContent::GitBranch(git_branch),
+            DescriptionLine::WorkingDirectory,
+            MetadataLeftSource::GitBranch,
         ),
         VerticalTabsPrimaryInfo::WorkingDirectory => (
             render_pane_title_slot(
                 props,
                 || {
                     render_text_line(
-                        &working_directory,
+                        context
+                            .as_ref()
+                            .map_or("", |context| context.working_directory.as_str()),
                         main_text_color,
                         ClipConfig::start(),
                         appearance,
@@ -4661,12 +4688,21 @@ fn render_terminal_row_content(
                 appearance,
                 app,
             ),
-            render_terminal_primary_line_for_view(terminal_view, appearance, sub_text_color, app),
-            MetadataLeftContent::GitBranch(git_branch),
+            DescriptionLine::PrimaryLine,
+            MetadataLeftSource::GitBranch,
         ),
         VerticalTabsPrimaryInfo::Branch => {
-            let (branch_text, show_branch_icon) =
-                branch_label_display(git_branch.as_deref(), working_directory.as_str());
+            // Only reachable with a `context`: a title-only row is pinned to
+            // `Command` above, whatever the setting says.
+            let (branch_text, show_branch_icon) = context.as_ref().map_or_else(
+                || (String::new(), false),
+                |context| {
+                    branch_label_display(
+                        context.git_branch.as_deref(),
+                        context.working_directory.as_str(),
+                    )
+                },
+            );
             (
                 render_pane_title_slot(
                     props,
@@ -4688,45 +4724,88 @@ fn render_terminal_row_content(
                     appearance,
                     app,
                 ),
-                render_terminal_primary_line_for_view(
-                    terminal_view,
-                    appearance,
-                    sub_text_color,
-                    app,
-                ),
-                MetadataLeftContent::WorkingDirectory(working_directory),
+                DescriptionLine::PrimaryLine,
+                MetadataLeftSource::WorkingDirectory,
             )
         }
     };
 
-    let first_line_element = render_row_title_line(
+    let mut content = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Start);
+    content.add_child(render_row_title_line(
         first_line,
         row_shows_synced_inputs_indicator(props, app),
         has_unread_activity(&props.typed, app),
         shortcut_hint_label(props, app).map(|label| render_shortcut_hint(&label, appearance)),
         theme,
-    );
+    ));
 
-    let mut content = Flex::column()
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_cross_axis_alignment(CrossAxisAlignment::Start);
-    content.add_child(first_line_element);
-    content.add_child(Container::new(second_line).with_margin_top(2.).finish());
-    content.add_child(
-        Container::new(render_terminal_metadata_line(
-            terminal_view,
-            props.pane_group_id,
-            props.pane_id,
-            metadata_left,
-            chip_entrypoint_for_granularity(props.display_granularity),
-            &props.badge_mouse_states,
-            appearance,
-            app,
-        ))
-        .with_margin_top(2.)
-        .finish(),
-    );
+    // Everything under the title line, in one block. A repo-accordion row
+    // renders none of it; anything added to the row belongs in here or above,
+    // and either way has to answer which of the two it is.
+    if let Some(context) = context {
+        let description = match description {
+            DescriptionLine::WorkingDirectory => render_text_line(
+                &context.working_directory,
+                sub_text_color,
+                ClipConfig::start(),
+                appearance,
+            ),
+            DescriptionLine::PrimaryLine => render_terminal_primary_line_for_view(
+                terminal_view,
+                appearance,
+                sub_text_color,
+                app,
+            ),
+        };
+        content.add_child(Container::new(description).with_margin_top(2.).finish());
+
+        let metadata_left = match metadata_left {
+            MetadataLeftSource::GitBranch => MetadataLeftContent::GitBranch(context.git_branch),
+            MetadataLeftSource::WorkingDirectory => {
+                MetadataLeftContent::WorkingDirectory(context.working_directory)
+            }
+        };
+        content.add_child(
+            Container::new(render_terminal_metadata_line(
+                terminal_view,
+                props.pane_group_id,
+                props.pane_id,
+                metadata_left,
+                chip_entrypoint_for_granularity(props.display_granularity),
+                &props.badge_mouse_states,
+                appearance,
+                app,
+            ))
+            .with_margin_top(2.)
+            .finish(),
+        );
+    }
+
     content.finish()
+}
+
+/// The terminal context an expanded row's lines are laid out from. Resolved
+/// once, and only for rows that render a line needing it.
+struct TerminalRowContext {
+    working_directory: String,
+    git_branch: Option<String>,
+}
+
+/// What the description line under the title carries, per the "Pane title as"
+/// setting.
+enum DescriptionLine {
+    WorkingDirectory,
+    PrimaryLine,
+}
+
+/// What the metadata line's left half carries, per the same setting. The
+/// element-level counterpart is [`MetadataLeftContent`], which owns the value;
+/// this names the choice before there is a value to own.
+enum MetadataLeftSource {
+    GitBranch,
+    WorkingDirectory,
 }
 
 fn chip_entrypoint_for_granularity(
@@ -4998,9 +5077,10 @@ fn render_summary_tab_item(
         theme,
     ));
 
-    // Repo accordion rows keep only the title region: the repo row above
-    // already carries the directory/branch/PR context.
-    if !props.in_repo_accordion {
+    // The working-directory and branch regions are what a repo-accordion row
+    // drops: the repository row above already carries that context. Any region
+    // added to a summary row belongs inside this block or above it.
+    if RowExtent::for_row(props.in_repo_accordion).renders_below_title() {
         // Working-directory region.
         let visible_directory_count = summary
             .working_directories
@@ -7457,38 +7537,17 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
         if let TypedPane::Terminal(terminal_pane) = &props.typed {
             let terminal_view = terminal_pane.terminal_view(app).as_ref(app);
 
-            // Repo accordion rows: command/conversation only; the repo row
-            // above carries the directory/branch/PR/diff context.
-            if props.in_repo_accordion {
-                let title: Box<dyn Element> = render_pane_title_slot(
-                    &props,
-                    || {
-                        render_terminal_primary_line_for_view(
-                            terminal_view,
-                            appearance,
-                            main_text_color,
-                            app,
-                        )
-                    },
-                    12.,
-                    main_text_color,
-                    ClipConfig::ellipsis(),
-                    appearance,
-                    app,
-                );
-                (title, None)
-            } else {
-                render_compact_terminal_title_and_subtitle(
-                    &props,
-                    terminal_view,
-                    primary_info,
-                    compact_subtitle,
-                    main_text_color,
-                    sub_text_color,
-                    appearance,
-                    app,
-                )
-            }
+            render_compact_terminal_title_and_subtitle(
+                &props,
+                terminal_view,
+                RowExtent::for_row(props.in_repo_accordion),
+                primary_info,
+                compact_subtitle,
+                main_text_color,
+                sub_text_color,
+                appearance,
+                app,
+            )
         } else {
             let title = render_pane_title_slot(
                 &props,
@@ -7565,12 +7624,44 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
     render_pane_row_element(props, Padding::uniform(8.), true, content, theme)
 }
 
+/// The directory and branch a compact terminal row reads to draw the lines
+/// under its title, and the shell-reported title they fall back to.
+#[derive(Default)]
+struct CompactRowContext {
+    terminal_title: String,
+    git_branch: Option<String>,
+    working_directory: Option<String>,
+}
+
+impl CompactRowContext {
+    /// A [`RowExtent::TitleOnly`] row draws none of the lines this feeds, so it
+    /// gets the empty context and the lookups never run.
+    fn for_extent(extent: RowExtent, terminal_view: &TerminalView, app: &AppContext) -> Self {
+        if !extent.renders_below_title() {
+            return Self::default();
+        }
+        Self {
+            terminal_title: terminal_view.terminal_title_from_shell(),
+            git_branch: terminal_view.current_git_branch(app),
+            working_directory: resolved_terminal_working_directory(terminal_view, app),
+        }
+    }
+
+    /// The working directory, falling back to the shell-reported title.
+    fn working_directory_text(&self) -> &str {
+        self.working_directory
+            .as_deref()
+            .unwrap_or(self.terminal_title.as_str())
+    }
+}
+
 /// Compact-mode title/subtitle for a terminal row, driven by the "Pane title
 /// as" and "Additional metadata" settings.
 #[allow(clippy::too_many_arguments)]
 fn render_compact_terminal_title_and_subtitle(
     props: &PaneProps<'_>,
     terminal_view: &TerminalView,
+    extent: RowExtent,
     primary_info: VerticalTabsPrimaryInfo,
     compact_subtitle: VerticalTabsCompactSubtitle,
     main_text_color: WarpThemeFill,
@@ -7579,14 +7670,20 @@ fn render_compact_terminal_title_and_subtitle(
     app: &AppContext,
 ) -> (Box<dyn Element>, Option<Box<dyn Element>>) {
     let font_family = appearance.ui_font_family();
-    let terminal_title = terminal_view.terminal_title_from_shell();
-    let git_branch = terminal_view.current_git_branch(app);
-    let working_directory = resolved_terminal_working_directory(terminal_view, app);
-    let working_directory_text = working_directory
-        .clone()
-        .unwrap_or_else(|| terminal_title.clone());
-    let branch_display =
-        branch_label_display(git_branch.as_deref(), working_directory_text.as_str());
+    let context = CompactRowContext::for_extent(extent, terminal_view, app);
+
+    // A title-only row draws the command line whatever "Pane title as" says:
+    // the directory and branch it would name instead are on the repository row
+    // above it.
+    let primary_info = if extent.renders_below_title() {
+        primary_info
+    } else {
+        VerticalTabsPrimaryInfo::Command
+    };
+    let branch_display = branch_label_display(
+        context.git_branch.as_deref(),
+        context.working_directory_text(),
+    );
 
     // Title based on "Pane title as"
     let title: Box<dyn Element> = render_pane_title_slot(
@@ -7598,12 +7695,14 @@ fn render_compact_terminal_title_and_subtitle(
                 main_text_color,
                 app,
             ),
-            VerticalTabsPrimaryInfo::WorkingDirectory => {
-                Text::new_inline(working_directory_text.clone(), font_family, 12.)
-                    .with_clip(ClipConfig::start())
-                    .with_color(main_text_color.into())
-                    .finish()
-            }
+            VerticalTabsPrimaryInfo::WorkingDirectory => Text::new_inline(
+                context.working_directory_text().to_string(),
+                font_family,
+                12.,
+            )
+            .with_clip(ClipConfig::start())
+            .with_color(main_text_color.into())
+            .finish(),
             VerticalTabsPrimaryInfo::Branch => match branch_display {
                 (branch_text, true) => {
                     render_git_branch_text(&branch_text, main_text_color, 12., appearance)
@@ -7621,48 +7720,55 @@ fn render_compact_terminal_title_and_subtitle(
         app,
     );
 
-    // Subtitle based on "Additional metadata"
-    let subtitle: Option<Box<dyn Element>> = match compact_subtitle {
-        VerticalTabsCompactSubtitle::Branch => {
-            compact_branch_subtitle_display(git_branch.as_deref(), working_directory.as_deref())
-                .map(|(text, show_branch_icon)| {
-                    if show_branch_icon {
-                        render_git_branch_text(&text, sub_text_color, 10., appearance)
-                    } else {
-                        Text::new_inline(text, font_family, 10.)
-                            .with_clip(ClipConfig::start())
-                            .with_color(sub_text_color.into())
-                            .finish()
-                    }
-                })
-        }
-        VerticalTabsCompactSubtitle::WorkingDirectory => working_directory.map(|wd| {
-            Text::new_inline(wd, font_family, 10.)
-                .with_clip(ClipConfig::start())
-                .with_color(sub_text_color.into())
-                .finish()
-        }),
-        VerticalTabsCompactSubtitle::Command => {
-            let agent_text = terminal_agent_text(terminal_view, app);
-            let (conv_title, cli_title) =
-                preferred_agent_tab_titles(&agent_text, agent_tab_text_preference(app));
-            let line_data = terminal_primary_line_data(
-                terminal_view.is_long_running_and_user_controlled(),
-                conv_title,
-                cli_title,
-                terminal_title.as_str(),
-                working_directory_text.as_str(),
-                terminal_title_fallback_font(&agent_text),
-                terminal_view.last_completed_command_text(),
-            );
-            Some(
-                Text::new_inline(line_data.text().to_string(), font_family, 10.)
-                    .with_clip(ClipConfig::ellipsis())
-                    .with_color(sub_text_color.into())
-                    .finish(),
+    // Subtitle based on "Additional metadata". A title-only row has no second
+    // line, and any line added here is under the same gate.
+    let subtitle: Option<Box<dyn Element>> = extent
+        .renders_below_title()
+        .then(|| match compact_subtitle {
+            VerticalTabsCompactSubtitle::Branch => compact_branch_subtitle_display(
+                context.git_branch.as_deref(),
+                context.working_directory.as_deref(),
             )
-        }
-    };
+            .map(|(text, show_branch_icon)| {
+                if show_branch_icon {
+                    render_git_branch_text(&text, sub_text_color, 10., appearance)
+                } else {
+                    Text::new_inline(text, font_family, 10.)
+                        .with_clip(ClipConfig::start())
+                        .with_color(sub_text_color.into())
+                        .finish()
+                }
+            }),
+            VerticalTabsCompactSubtitle::WorkingDirectory => {
+                context.working_directory.clone().map(|wd| {
+                    Text::new_inline(wd, font_family, 10.)
+                        .with_clip(ClipConfig::start())
+                        .with_color(sub_text_color.into())
+                        .finish()
+                })
+            }
+            VerticalTabsCompactSubtitle::Command => {
+                let agent_text = terminal_agent_text(terminal_view, app);
+                let (conv_title, cli_title) =
+                    preferred_agent_tab_titles(&agent_text, agent_tab_text_preference(app));
+                let line_data = terminal_primary_line_data(
+                    terminal_view.is_long_running_and_user_controlled(),
+                    conv_title,
+                    cli_title,
+                    context.terminal_title.as_str(),
+                    context.working_directory_text(),
+                    terminal_title_fallback_font(&agent_text),
+                    terminal_view.last_completed_command_text(),
+                );
+                Some(
+                    Text::new_inline(line_data.text().to_string(), font_family, 10.)
+                        .with_clip(ClipConfig::ellipsis())
+                        .with_color(sub_text_color.into())
+                        .finish(),
+                )
+            }
+        })
+        .flatten();
 
     (title, subtitle)
 }

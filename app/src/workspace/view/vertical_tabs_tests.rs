@@ -7,8 +7,8 @@ use warpui::EntityId;
 use warpui::elements::PositionedElementOffsetBounds;
 
 use super::{
-    AgentTabTextPreference, SummaryPaneKind, SummaryPaneKindIcons, TerminalAgentText,
-    TerminalPrimaryLineData, TerminalPrimaryLineFont, VerticalTabsDetailTarget,
+    AgentTabTextPreference, CompactRowContext, RowExtent, SummaryPaneKind, SummaryPaneKindIcons,
+    TerminalAgentText, TerminalPrimaryLineData, TerminalPrimaryLineFont, VerticalTabsDetailTarget,
     VerticalTabsDetailTargetKind, VerticalTabsSummaryBranchEntry, VerticalTabsSummaryData,
     VerticalTabsSummaryPrimaryLabel, branch_label_display, coalesce_summary_branch_entries,
     code_detail_kind_label, compact_branch_subtitle_display, detail_sidecar_width_and_bounds,
@@ -1241,4 +1241,43 @@ fn summary_search_fragments_include_hidden_overflow_values() {
     assert!(search_fragments_contain_query(&fragments, "#789"));
     assert!(search_fragments_contain_query(&fragments, "+2"));
     assert!(search_fragments_contain_query(&fragments, "-3"));
+}
+
+#[test]
+fn row_extent_keeps_everything_below_the_title_outside_a_repo_accordion() {
+    assert_eq!(RowExtent::for_row(false), RowExtent::Full);
+    assert!(RowExtent::Full.renders_below_title());
+}
+
+#[test]
+fn row_extent_drops_everything_below_the_title_inside_a_repo_accordion() {
+    assert_eq!(RowExtent::for_row(true), RowExtent::TitleOnly);
+    assert!(!RowExtent::TitleOnly.renders_below_title());
+}
+
+#[test]
+fn compact_row_context_falls_back_to_the_shell_title_without_a_working_directory() {
+    let context = CompactRowContext {
+        terminal_title: "zsh".to_string(),
+        git_branch: None,
+        working_directory: None,
+    };
+    assert_eq!(context.working_directory_text(), "zsh");
+
+    let context = CompactRowContext {
+        working_directory: Some("~/warp".to_string()),
+        ..context
+    };
+    assert_eq!(context.working_directory_text(), "~/warp");
+}
+
+#[test]
+fn compact_row_context_for_a_title_only_row_holds_nothing() {
+    // A title-only row skips the directory and branch lookups, so nothing it
+    // could read is populated. Any renderer that reads this outside the
+    // `renders_below_title` gate would show these blanks.
+    let context = CompactRowContext::default();
+    assert_eq!(context.working_directory_text(), "");
+    assert_eq!(context.git_branch, None);
+    assert_eq!(context.working_directory, None);
 }
