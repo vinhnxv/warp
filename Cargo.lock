@@ -2992,6 +2992,7 @@ dependencies = [
  "session-sharing-protocol",
  "settings",
  "settings_value",
+ "url",
  "uuid",
  "warp-workflows",
  "warp_cli",
@@ -8199,6 +8200,7 @@ dependencies = [
  "cfg-if",
  "cloud_object_models",
  "futures",
+ "handlebars",
  "http 1.4.0",
  "log",
  "oauth2",
@@ -15468,7 +15470,7 @@ dependencies = [
 [[package]]
 name = "warp-command-signatures"
 version = "0.0.0"
-source = "git+https://github.com/warpdotdev/command-signatures.git?rev=d3725aa42375cc229699c87be2b38f9d9f07080f#d3725aa42375cc229699c87be2b38f9d9f07080f"
+source = "git+https://github.com/warpdotdev/command-signatures.git?rev=d69b340ef622540ac28340ef565dae45287d51d8#d69b340ef622540ac28340ef565dae45287d51d8"
 dependencies = [
  "cfg-if",
  "itertools 0.10.5",
@@ -15486,7 +15488,7 @@ dependencies = [
 [[package]]
 name = "warp-completion-metadata"
 version = "0.0.0"
-source = "git+https://github.com/warpdotdev/command-signatures.git?rev=d3725aa42375cc229699c87be2b38f9d9f07080f#d3725aa42375cc229699c87be2b38f9d9f07080f"
+source = "git+https://github.com/warpdotdev/command-signatures.git?rev=d69b340ef622540ac28340ef565dae45287d51d8#d69b340ef622540ac28340ef565dae45287d51d8"
 dependencies = [
  "html-escape",
  "itertools 0.10.5",
@@ -15868,7 +15870,7 @@ dependencies = [
 [[package]]
 name = "warp_multi_agent_api"
 version = "0.0.0"
-source = "git+https://github.com/warpdotdev/warp-proto-apis.git?rev=2bd5df2e3a73ada980d1e9c613ce369232e8c41d#2bd5df2e3a73ada980d1e9c613ce369232e8c41d"
+source = "git+https://github.com/warpdotdev/warp-proto-apis.git?rev=7b638a3bce15b6159116c25caa1dda62cf004b0e#7b638a3bce15b6159116c25caa1dda62cf004b0e"
 dependencies = [
  "prost",
  "prost-reflect",

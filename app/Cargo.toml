@@ -376,6 +376,7 @@ signal-hook = "0.3.17"
 nix = { workspace = true, features = [
     "fs",
     "hostname",
+    "process",
     "resource",
     "signal",
     "socket",
@@ -633,6 +634,7 @@ default = [
     "inline_slash_commands",
     "inline_history_menu",
     "inline_model_selector",
+    "restore_prompt_on_inline_model_selector_search",
     "oz_launch_modal",
     "open_warp_launch_modal",
     "orchestration_launch_modal",
@@ -1040,6 +1042,9 @@ git_credential_refresh = []
 prompt_cache_expiry_warning = []
 osc_hyperlinks = []
 ctrl_c_cancels_third_party_harness = []
+shell_widget_handoff = []
+history_search_ranking_v2 = []
+stored_screenshots = []
 
 [package.metadata.bundle.bin.warp-oss]
 category = "public.app-category.developer-tools"
